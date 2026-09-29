@@ -6,7 +6,7 @@
         <Disc class="w-6 h-6 text-white spinning-disc" />
       </div>
       <div class="brand-text">
-        <h2 class="brand-title"> · BGM</h2>
+        <h2 class="brand-title">听风吟 · BGM</h2>
         <span class="brand-subtitle">剪辑音频素材库</span>
       </div>
     </div>
