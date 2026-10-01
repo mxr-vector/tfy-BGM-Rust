@@ -36,14 +36,14 @@
         <div 
           v-else 
           v-for="(song, idx) in queue" 
-          :key="song.id"
+          :key="songKey(song)"
           class="queue-item"
-          :class="{ 'is-current': currentSong?.id === song.id }"
+          :class="{ 'is-current': isCurrent(song) }"
           @click="playSong(song)"
         >
           <!-- Current Indicator -->
           <div class="item-left">
-            <div v-if="currentSong?.id === song.id && isPlaying" class="equalizer">
+            <div v-if="isCurrent(song) && isPlaying" class="equalizer">
               <div class="equalizer-bar" :style="{ backgroundColor: song.color || '#6366f1' }"></div>
               <div class="equalizer-bar" :style="{ backgroundColor: song.color || '#6366f1' }"></div>
               <div class="equalizer-bar" :style="{ backgroundColor: song.color || '#6366f1' }"></div>
@@ -85,6 +85,7 @@
 <script setup>
 import { ListMusic, X, Music, Trash2 } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
+import { songKey } from '../utils/songSchema';
 
 defineProps({
   isOpen: {
@@ -96,6 +97,8 @@ defineProps({
 defineEmits(['close']);
 
 const { queue, currentSong, isPlaying, playSong, removeFromQueue, clearQueue } = useAudioPlayer();
+
+const isCurrent = (song) => !!currentSong.value && songKey(currentSong.value) === songKey(song);
 </script>
 
 <style scoped>

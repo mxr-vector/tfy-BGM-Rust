@@ -1,7 +1,8 @@
 <template>
   <div 
     class="song-row"
-    :class="{ 'is-current': isCurrent, 'is-playing': isCurrent && isPlaying }"
+    :class="{ 'is-current': isCurrent, 'is-playing': isCurrent && isPlaying, 'is-unavailable': unavailable }"
+    :title="unavailable ? '本地未找到该音频文件，可运行 node scripts/download_all.js 补齐' : ''"
     @click="handleRowClick"
   >
     <!-- Index / Play Button -->
@@ -26,12 +27,12 @@
     <div class="col-title">
       <div class="mini-thumb">
         <img 
-          v-if="song.cover" 
+          v-if="song.cover && !coverFailed" 
           :src="song.cover" 
           :alt="song.title"
           class="thumb-img"
           loading="lazy"
-          @error="song.cover = ''"
+          @error="coverFailed = true"
         />
         <div 
           v-else 
@@ -46,6 +47,7 @@
         <span class="row-title" :title="song.title">{{ song.title }}</span>
         <span class="row-artist" :title="song.artist">{{ song.artist }}</span>
       </div>
+      <span v-if="unavailable" class="unavailable-tag">本地缺失</span>
     </div>
 
     <!-- Category -->
@@ -76,15 +78,15 @@
     <div class="col-actions" @click.stop>
       <button 
         class="action-icon-btn fav-btn" 
-        :class="{ 'is-active': isFav(song.id) }"
-        @click="toggleFavorite(song.id)"
+        :class="{ 'is-active': isFav }"
+        @click="toggleFavorite(songKey(song))"
         title="收藏"
       >
-        <Heart class="w-4 h-4" :fill="isFav(song.id) ? '#ec4899' : 'none'" />
+        <Heart class="w-4 h-4" :fill="isFav ? '#ec4899' : 'none'" />
       </button>
 
       <a 
-        :href="song.url" 
+        :href="audioUrl" 
         :download="`${song.title}.mp3`"
         class="action-icon-btn download-btn"
         title="下载音频"
@@ -96,9 +98,10 @@
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Play, Pause, Heart, Download, Music } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
+import { songKey, resolveSongUrl } from '../utils/songSchema';
 
 const props = defineProps({
   song: {
@@ -108,6 +111,10 @@ const props = defineProps({
   index: {
     type: Number,
     required: true
+  },
+  unavailable: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -115,19 +122,26 @@ const emit = defineEmits(['play']);
 
 const { currentSong, isPlaying, favorites, toggleFavorite } = useAudioPlayer();
 
-const isCurrent = computed(() => currentSong.value?.id === props.song.id);
-const isFav = (id) => favorites.value.has(id);
+const isCurrent = computed(() => currentSong.value && songKey(currentSong.value) === songKey(props.song));
+const isFav = computed(() => favorites.value.has(songKey(props.song)));
+const audioUrl = computed(() => resolveSongUrl(props.song));
+
+// 封面加载失败只影响本组件展示，不回写共享数据
+const coverFailed = ref(false);
+watch(() => props.song.cover, () => { coverFailed.value = false; });
 
 const formatSize = (bytes) => {
-  if (!bytes) return '2.5 MB';
+  if (!bytes) return '—';
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
 const handleRowClick = () => {
+  if (props.unavailable) return;
   emit('play', props.song);
 };
 
 const toggleCurrent = () => {
+  if (props.unavailable) return;
   emit('play', props.song);
 };
 </script>
@@ -154,6 +168,22 @@ const toggleCurrent = () => {
 
 .song-row.is-current .row-title {
   color: #818cf8;
+}
+
+.song-row.is-unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.unavailable-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.6);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  padding: 1px 6px;
+  border-radius: 6px;
 }
 
 /* Col: Index & Play */

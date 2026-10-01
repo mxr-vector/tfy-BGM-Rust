@@ -1,18 +1,19 @@
 <template>
   <div 
     class="song-card glass-panel"
-    :class="{ 'is-active': isCurrent, 'is-playing': isCurrent && isPlaying }"
+    :class="{ 'is-active': isCurrent, 'is-playing': isCurrent && isPlaying, 'is-unavailable': unavailable }"
+    :title="unavailable ? '本地未找到该音频文件，可运行 node scripts/download_all.js 补齐' : ''"
     @click="handleCardClick"
   >
     <!-- Artwork Thumbnail -->
     <div class="thumb-container">
       <img 
-        v-if="song.cover" 
+        v-if="song.cover && !coverFailed" 
         :src="song.cover" 
         :alt="song.title"
         class="card-img"
         loading="lazy"
-        @error="song.cover = ''"
+        @error="coverFailed = true"
       />
       <div 
         v-else 
@@ -57,9 +58,12 @@
       </span>
 
       <!-- Duration badge -->
-      <span class="duration-pill">
+      <span v-if="!unavailable" class="duration-pill">
         {{ song.durationFormatted || '03:00' }}
       </span>
+
+      <!-- 音频未随应用分发时的角标 -->
+      <span v-if="unavailable" class="unavailable-pill">本地缺失</span>
     </div>
 
     <!-- Metadata Content -->
@@ -79,18 +83,19 @@
         <div class="card-actions" @click.stop>
           <button 
             class="mini-btn fav-btn" 
-            :class="{ 'is-active': isFav(song.id) }"
-            @click="toggleFavorite(song.id)"
+            :class="{ 'is-active': isFav }"
+            @click="toggleFavorite(songKey(song))"
             title="收藏"
           >
-            <Heart class="w-4 h-4" :fill="isFav(song.id) ? '#ec4899' : 'none'" />
+            <Heart class="w-4 h-4" :fill="isFav ? '#ec4899' : 'none'" />
           </button>
 
           <a 
-            :href="song.url" 
+            :href="audioUrl" 
             :download="`${song.title}.mp3`"
             class="mini-btn download-btn"
             title="下载音频"
+            @click.prevent="onDownload"
           >
             <Download class="w-4 h-4" />
           </a>
@@ -101,14 +106,19 @@
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Play, Pause, Heart, Download, Music } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
+import { songKey, resolveSongUrl, downloadSong } from '../utils/songSchema';
 
 const props = defineProps({
   song: {
     type: Object,
     required: true
+  },
+  unavailable: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -116,21 +126,30 @@ const emit = defineEmits(['play']);
 
 const { currentSong, isPlaying, favorites, toggleFavorite } = useAudioPlayer();
 
-const isCurrent = computed(() => currentSong.value?.id === props.song.id);
-const isFav = (id) => favorites.value.has(id);
+const isCurrent = computed(() => currentSong.value && songKey(currentSong.value) === songKey(props.song));
+const isFav = computed(() => favorites.value.has(songKey(props.song)));
+const audioUrl = computed(() => resolveSongUrl(props.song));
+
+// 封面加载失败只在组件本地降级，不回写共享的 song 对象（一次网络抖动会永久弄丢封面）
+const coverFailed = ref(false);
+watch(() => props.song.cover, () => { coverFailed.value = false; });
 
 const formatSize = (bytes) => {
-  if (!bytes) return '2.5 MB';
+  if (!bytes) return '—';
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
 const handleCardClick = () => {
+  if (props.unavailable) return;
   emit('play', props.song);
 };
 
 const toggleCurrent = () => {
+  if (props.unavailable) return;
   emit('play', props.song);
 };
+
+const onDownload = () => downloadSong(props.song, `${props.song.title}.mp3`);
 </script>
 
 <style scoped>
@@ -157,6 +176,25 @@ const toggleCurrent = () => {
   border-color: rgba(99, 102, 241, 0.6);
   background: rgba(30, 41, 59, 0.85);
   box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+}
+
+.song-card.is-unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.unavailable-pill {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 2;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.85);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  padding: 2px 6px;
+  border-radius: 6px;
 }
 
 /* Thumbnail */

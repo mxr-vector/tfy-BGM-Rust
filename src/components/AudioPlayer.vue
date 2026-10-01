@@ -58,12 +58,12 @@
             :style="{ '--glow-color': currentSong.color || '#6366f1' }"
           >
             <img 
-              v-if="currentSong.cover" 
+              v-if="currentSong.cover && !coverFailed" 
               :src="currentSong.cover" 
               :alt="currentSong.title"
               class="cover-img"
               :class="{ 'spinning-disc': isPlaying, 'spinning-paused': !isPlaying }"
-              @error="currentSong.cover = ''"
+              @error="coverFailed = true"
             />
             <div 
               v-else 
@@ -101,11 +101,11 @@
           <!-- Like / Favorite button -->
           <button 
             class="action-btn fav-btn" 
-            :class="{ 'is-favorited': isFav(currentSong.id) }"
-            @click="toggleFavorite(currentSong.id)"
+            :class="{ 'is-favorited': isFav }"
+            @click="toggleFavorite(songKey(currentSong))"
             title="收藏歌曲"
           >
-            <Heart class="icon" :fill="isFav(currentSong.id) ? '#ec4899' : 'none'" />
+            <Heart class="icon" :fill="isFav ? '#ec4899' : 'none'" />
           </button>
         </div>
 
@@ -192,10 +192,11 @@
 
           <!-- Download MP3 directly -->
           <a 
-            :href="currentSong.url" 
+            :href="audioUrl" 
             :download="`${currentSong.title}.mp3`"
             class="action-btn download-btn"
             title="下载当前音频文件 (.mp3)"
+            @click.prevent="onDownload"
           >
             <Download class="icon" />
           </a>
@@ -213,18 +214,25 @@
         </div>
 
       </div>
+
+      <!-- 加载/播放失败提示 -->
+      <div v-if="playbackError" class="playback-error-bar">
+        <AlertTriangle class="icon" />
+        <span>{{ playbackError }}</span>
+      </div>
     </div>
   </footer>
 </transition>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { 
   Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Repeat1, 
-  Volume2, VolumeX, Volume1, Download, Heart, ListMusic, Music 
+  Volume2, VolumeX, Volume1, Download, Heart, ListMusic, Music, AlertTriangle
 } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
+import { songKey, resolveSongUrl, downloadSong } from '../utils/songSchema';
 
 const props = defineProps({
   showQueueDrawer: {
@@ -247,6 +255,7 @@ const {
   playMode,
   queue,
   isDraggingProgress,
+  playbackError,
   favorites,
   toggleFavorite,
   togglePlay,
@@ -266,7 +275,17 @@ const hoverVisible = ref(false);
 const hoverPercent = ref(0);
 const hoverTime = ref(0);
 
-const isFav = (id) => favorites.value.has(id);
+const isFav = computed(() => favorites.value.has(songKey(currentSong.value)));
+const audioUrl = computed(() => resolveSongUrl(currentSong.value));
+
+const onDownload = () => {
+  if (!currentSong.value) return;
+  downloadSong(currentSong.value, `${currentSong.value.title}.mp3`);
+};
+
+// 封面加载失败只影响底栏展示，不回写共享的 currentSong 对象
+const coverFailed = ref(false);
+watch(() => currentSong.value?.url, () => { coverFailed.value = false; });
 
 const displayCurrentTime = computed(() => {
   return isDraggingProgress.value ? dragTime.value : currentTime.value;
@@ -410,6 +429,23 @@ onUnmounted(() => {
   overflow: hidden;
   pointer-events: auto;
   transition: all 0.3s ease;
+}
+
+.playback-error-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 18px;
+  font-size: 12px;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.55);
+  border-top: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.playback-error-bar .icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 /* Scrubber Bar on top edge */

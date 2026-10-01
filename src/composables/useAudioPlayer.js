@@ -1,4 +1,5 @@
-import { ref, reactive, computed, watch } from 'vue';
+import { ref } from 'vue';
+import { songKey, resolveSongUrl } from '../utils/songSchema';
 
 // Global singleton state
 const audio = new Audio();
@@ -25,12 +26,16 @@ const queue = ref([]);
 const queueIndex = ref(-1);
 const isDraggingProgress = ref(false);
 const bufferedPercent = ref(0);
+// 当前曲目加载/播放失败提示（供底栏展示，避免静默卡死）
+const playbackError = ref('');
 
-// Local storage favorites
+// Local storage favorites（存稳定 key，不用位置型 id，避免重建曲库后收藏错位）
+const FAVORITES_KEY = 'tfy_bgm_favorites';
 const loadFavorites = () => {
   try {
-    const raw = localStorage.getItem('tfy_bgm_favorites');
-    return raw ? JSON.parse(raw) : [];
+    const raw = localStorage.getItem(FAVORITES_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
   } catch (e) {
     return [];
   }
@@ -39,19 +44,48 @@ const favorites = ref(new Set(loadFavorites()));
 
 const saveFavorites = () => {
   try {
-    localStorage.setItem('tfy_bgm_favorites', JSON.stringify(Array.from(favorites.value)));
+    localStorage.setItem(FAVORITES_KEY, JSON.stringify(Array.from(favorites.value)));
   } catch (e) {}
 };
 
-const toggleFavorite = (id) => {
-  if (favorites.value.has(id)) {
-    favorites.value.delete(id);
+const toggleFavorite = (key) => {
+  if (!key) return;
+  if (favorites.value.has(key)) {
+    favorites.value.delete(key);
   } else {
-    favorites.value.add(id);
+    favorites.value.add(key);
   }
   saveFavorites();
   // Trigger reactivity
   favorites.value = new Set(favorites.value);
+};
+
+/**
+ * 一次性升级：旧版本收藏存的是数值 id / 原始 url，这里按当前曲目表换算成稳定 key。
+ */
+const migrateFavorites = (songs) => {
+  if (!Array.isArray(songs) || favorites.value.size === 0) return;
+  const byId = new Map();
+  const byUrl = new Map();
+  for (const s of songs) {
+    if (s?.id !== undefined) byId.set(String(s.id), songKey(s));
+    if (s?.url) byUrl.set(s.url, songKey(s));
+  }
+  const migrated = new Set();
+  let changed = false;
+  for (const stored of favorites.value) {
+    const mapped = byUrl.get(stored) ?? byId.get(String(stored));
+    if (mapped) {
+      migrated.add(mapped);
+      if (mapped !== stored) changed = true;
+    } else {
+      migrated.add(stored); // 保留已下架曲目的收藏，回归时自动恢复
+    }
+  }
+  if (changed) {
+    favorites.value = migrated;
+    saveFavorites();
+  }
 };
 
 // Format seconds into mm:ss
@@ -79,6 +113,7 @@ audio.preload = 'metadata';
 audio.addEventListener('loadstart', () => {
   isLoading.value = true;
   bufferedPercent.value = 0;
+  playbackError.value = '';
 });
 
 audio.addEventListener('progress', () => {
@@ -103,11 +138,17 @@ audio.addEventListener('timeupdate', () => {
 audio.addEventListener('play', () => {
   isPlaying.value = true;
   isLoading.value = false;
+  consecutiveFailures = 0;
 });
 
 audio.addEventListener('pause', () => {
   isPlaying.value = false;
 });
+
+// 自动跳过加载失败的曲目，但有连续上限，避免曲库缺文件时死循环跳歌
+const MAX_AUTO_SKIPS = 3;
+let consecutiveFailures = 0;
+let lastFailureAt = 0;
 
 audio.addEventListener('ended', () => {
   handleTrackEnded();
@@ -117,6 +158,19 @@ audio.addEventListener('error', (err) => {
   console.warn('Audio playback error:', err);
   isLoading.value = false;
   isPlaying.value = false;
+
+  const title = currentSong.value?.title || '该素材';
+  const now = Date.now();
+  if (now - lastFailureAt > 1500) consecutiveFailures = 0;
+  lastFailureAt = now;
+  consecutiveFailures++;
+
+  if (queue.value.length > 1 && consecutiveFailures <= MAX_AUTO_SKIPS) {
+    playbackError.value = `《${title}》加载失败，已自动跳到下一首`;
+    nextTrack(true);
+  } else {
+    playbackError.value = `《${title}》加载失败：音频文件可能未随应用一起部署（先运行 node scripts/publish_bgm.js 并配置 VITE_BGM_BASE）`;
+  }
 });
 
 function handleTrackEnded() {
@@ -132,19 +186,24 @@ function handleTrackEnded() {
 function playSong(song, newQueue = null, forcePlay = false) {
   if (!song) return;
 
+  const key = songKey(song);
+  if (song.downloaded === false) {
+    playbackError.value = `《${song.title || '该素材'}》尚未下载，请先运行 node scripts/download_all.js`;
+  }
+
   if (newQueue && Array.isArray(newQueue)) {
     queue.value = [...newQueue];
-    const idx = queue.value.findIndex(s => s.id === song.id);
+    const idx = queue.value.findIndex(s => songKey(s) === key);
     queueIndex.value = idx !== -1 ? idx : 0;
-  } else if (!queue.value.some(s => s.id === song.id)) {
+  } else if (!queue.value.some(s => songKey(s) === key)) {
     queue.value.push(song);
     queueIndex.value = queue.value.length - 1;
   } else {
-    queueIndex.value = queue.value.findIndex(s => s.id === song.id);
+    queueIndex.value = queue.value.findIndex(s => songKey(s) === key);
   }
 
   // If already playing the same song
-  if (currentSong.value?.id === song.id) {
+  if (currentSong.value && songKey(currentSong.value) === key) {
     if (forcePlay) {
       audio.currentTime = 0;
       currentTime.value = 0;
@@ -158,7 +217,7 @@ function playSong(song, newQueue = null, forcePlay = false) {
   }
 
   currentSong.value = song;
-  audio.src = song.url;
+  audio.src = resolveSongUrl(song);
   audio.playbackRate = playbackRate.value;
   audio.volume = isMuted.value ? 0 : volume.value;
   currentTime.value = 0;
@@ -325,7 +384,8 @@ function clearQueue() {
 
 function addToQueue(song) {
   if (!song) return;
-  if (!queue.value.some(s => s.id === song.id)) {
+  const key = songKey(song);
+  if (!queue.value.some(s => songKey(s) === key)) {
     queue.value.push(song);
   }
 }
@@ -346,8 +406,11 @@ export function useAudioPlayer() {
     queue,
     queueIndex,
     isDraggingProgress,
+    playbackError,
     favorites,
     toggleFavorite,
+    migrateFavorites,
+    songKey,
     playSong,
     togglePlay,
     seek,

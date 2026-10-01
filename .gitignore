@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*
@@ -23,7 +26,11 @@ dist-ssr
 *.sln
 *.sw?
 
-dist
+# 音频素材不进 git（体积大），走云盘分发：node scripts/publish_bgm.js
+# 但 songs.json 是曲库元数据，必须入库，否则新克隆只能得到空曲库
+public/bgm/**
+!public/bgm/*/
+!public/bgm/songs.json
 
-node_modules
-public/bgm
+# 云盘发布产物
+dist-bgm/
