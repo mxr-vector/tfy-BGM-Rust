@@ -192,7 +192,14 @@
               :song="song"
               :index="idx"
               :unavailable="song.downloaded === false"
+              draggable="true"
+              :class="{ 'is-drag-over': dragOverKey === songKey(song) && dragKey !== songKey(song) }"
               @play="handleSongPlay(song)"
+              @dragstart="onDragStart(song)"
+              @dragover.prevent
+              @dragenter.prevent="dragOverKey = songKey(song)"
+              @drop="onDropOn(song)"
+              @dragend="onDragEnd"
             />
           </div>
         </div>
@@ -232,6 +239,7 @@ const allSongs = ref([]);
 const invalidSongs = ref([]);
 const duplicateKeys = ref([]);
 const isLoading = ref(true);
+const isFetching = ref(false);   // 重试互斥锁，与展示态 isLoading 分离
 const loadError = ref(null);
 const currentCategory = ref('all');
 const showFavoritesOnly = ref(false);
@@ -240,6 +248,33 @@ const sortBy = ref('default');
 const viewMode = ref('grid');
 const isQueueDrawerOpen = ref(false);
 const searchInput = ref(null);
+
+// 列表视图拖拽排序（仅内存重排 allSongs，不做持久化）
+const dragKey = ref(null);
+const dragOverKey = ref(null);
+
+const onDragStart = (song) => {
+  dragKey.value = songKey(song);
+};
+
+const onDropOn = (targetSong) => {
+  const fromKey = dragKey.value;
+  const toKey = songKey(targetSong);
+  if (!fromKey || fromKey === toKey) return;
+  const arr = [...allSongs.value];
+  const from = arr.findIndex(s => songKey(s) === fromKey);
+  const to = arr.findIndex(s => songKey(s) === toKey);
+  if (from < 0 || to < 0) return;
+  const [moved] = arr.splice(from, 1);
+  const insertAt = arr.findIndex(s => songKey(s) === toKey);
+  arr.splice(from < to ? insertAt + 1 : insertAt, 0, moved);
+  allSongs.value = arr;
+};
+
+const onDragEnd = () => {
+  dragKey.value = null;
+  dragOverKey.value = null;
+};
 
 const favCount = computed(() => {
   const loaded = new Set(allSongs.value.map(songKey));
@@ -362,9 +397,10 @@ const handleGlobalKeyDown = (e) => {
 let fetchToken = 0;
 
 const fetchSongs = async () => {
-  if (isLoading.value) return;          // 重试互斥，避免并发竞态覆盖结果
+  if (isFetching.value) return;      // 重试互斥，避免并发竞态覆盖结果
   const token = ++fetchToken;
   try {
+    isFetching.value = true;
     isLoading.value = true;
     loadError.value = null;
 
@@ -425,6 +461,7 @@ const fetchSongs = async () => {
     if (token === fetchToken) loadError.value = err.message || '加载曲库失败';
   } finally {
     if (token === fetchToken) isLoading.value = false;
+    isFetching.value = false;
   }
 };
 
@@ -696,6 +733,20 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
   margin-top: 4px;
+}
+
+/* 拖拽排序落点高亮 */
+.table-body :deep(.song-row) {
+  cursor: grab;
+}
+
+.table-body :deep(.song-row.is-drag-over) {
+  box-shadow: inset 0 2px 0 0 #6366f1;
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.table-body :deep(.song-row:active) {
+  cursor: grabbing;
 }
 
 /* Empty State */
