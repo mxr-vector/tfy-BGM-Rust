@@ -20,7 +20,7 @@ Starlight
 踏遍青山
 竹林小曲（燕云）
 咏春
-stranger(燕云)
+stranger
 步步高
 答案
 象王行
@@ -36,11 +36,11 @@ monsieur melody
 
 ## 独处
 
-于人于物 细水长流 弥足珍贵
+虚拟
 on more time
 稳稳的幸福（钢琴）
 oh you beat
-人生路慢慢
+人生路漫漫
 爱的供养（伴奏）
 windy hill
 flower dance
@@ -49,8 +49,8 @@ kiss the rain
 the truth that you leave
 所念皆星河
 幻昼
-萤火虫之歌
-一个人过冬
+萤火虫之舞
+一个人过冬天
 little story
 merry christmas mr.lawrence
 悬溺
@@ -103,7 +103,7 @@ intro
 
 ## 古风
 
-风云决（笛子）
+风云决
 醉忆仙乡
 灼雪
 双面燕洵

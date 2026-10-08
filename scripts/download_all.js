@@ -43,11 +43,11 @@ const CATEGORY_MAP = {
 };
 
 const SPECIFIC_ALIASES = {
-  '于人于物 细水长流 弥足珍贵': ['弥足珍贵', '细水长流 弥足珍贵', '细水长流'],
+  '虚拟': ['弥足珍贵', '细水长流 弥足珍贵', '细水长流'],
   'on more time': ['One More Time', 'One More Time 纯音乐', 'on more time'],
   'oh you beat': ['Oh You Beat', 'You Beat', 'beat 纯音乐'],
   '稳稳的幸福（钢琴）': ['稳稳的幸福 钢琴', '稳稳的幸福 伴奏', '稳稳的幸福'],
-  '人生路慢慢': ['人生路慢慢', '人生路慢漫', '慢慢人生路'],
+  '人生路漫漫': ['人生路漫漫', '人生路慢漫', '慢慢人生路'],
   '爱的供养（伴奏）': ['爱的供养 伴奏', '爱的供养 钢琴', '爱的供养'],
   'windy hill': ['Windy Hill', 'Windy Hill 纯音乐', 'Windy Hill bgm'],
   'flower dance': ['Flower Dance', 'Flower Dance 钢琴', 'Flower Dance bgm'],
@@ -55,8 +55,8 @@ const SPECIFIC_ALIASES = {
   'kiss the rain': ['Kiss the Rain', '雨的印记', 'Kiss the Rain 钢琴'],
   'the truth that you leave': ['The Truth That You Leave', 'The Truth That You Leave 钢琴'],
   '所念皆星河': ['所念皆星河', '所念皆星河 伴奏', '所念皆星河 钢琴'],
-  '萤火虫之歌': ['萤火虫之歌', '萤火虫之歌 纯音乐', '萤火之歌'],
-  '一个人过冬': ['一个人过冬', '一个人过冬 纯音乐', '一个人过冬 伴奏'],
+  '萤火虫之舞': ['萤火虫之舞', '萤火虫之舞 纯音乐', '萤火之歌'],
+  '一个人过冬天': ['一个人过冬天', '一个人过冬天 纯音乐', '一个人过冬天 伴奏'],
   'merry christmas mr.lawrence': ['Merry Christmas Mr. Lawrence', '坂本龙一 圣诞快乐劳伦斯先生', '圣诞快乐劳伦斯先生 钢琴'],
   '思绪回到那年秋': ['思绪回到那年秋', '思绪回到那年秋 纯音乐', '思绪回到那年秋 伴奏'],
   '你听啊秋末的落叶': ['你听啊秋末的落叶', '你听啊秋末的落叶 伴奏', '你听啊秋末的落叶 纯音乐'],
