@@ -169,7 +169,7 @@ audio.addEventListener('error', (err) => {
     playbackError.value = `《${title}》加载失败，已自动跳到下一首`;
     nextTrack(true);
   } else {
-    playbackError.value = `《${title}》加载失败：音频文件可能未随应用一起部署（先运行 node scripts/publish_bgm.js 并配置 VITE_BGM_BASE）`;
+    playbackError.value = `《${title}》加载失败：音频文件可能未随应用一起部署（请确认 mp3 已放入 public/bgm 对应目录，或配置 VITE_BGM_BASE 指向云盘）`;
   }
 });
 
@@ -187,9 +187,6 @@ function playSong(song, newQueue = null, forcePlay = false) {
   if (!song) return;
 
   const key = songKey(song);
-  if (song.downloaded === false) {
-    playbackError.value = `《${song.title || '该素材'}》尚未下载，请先运行 node scripts/download_all.js`;
-  }
 
   if (newQueue && Array.isArray(newQueue)) {
     queue.value = [...newQueue];
@@ -221,7 +218,7 @@ function playSong(song, newQueue = null, forcePlay = false) {
   audio.playbackRate = playbackRate.value;
   audio.volume = isMuted.value ? 0 : volume.value;
   currentTime.value = 0;
-  duration.value = song.duration || 0;
+  duration.value = 0;
   bufferedPercent.value = 0;
 
   audio.play()

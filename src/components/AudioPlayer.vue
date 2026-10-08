@@ -51,34 +51,6 @@
         
         <!-- Left: Track Info -->
         <div class="track-info">
-          <!-- Thumbnail with vinyl/cover -->
-          <div 
-            class="cover-box"
-            :class="{ 'playing-glow': isPlaying }"
-            :style="{ '--glow-color': currentSong.color || '#6366f1' }"
-          >
-            <img 
-              v-if="currentSong.cover && !coverFailed" 
-              :src="currentSong.cover" 
-              :alt="currentSong.title"
-              class="cover-img"
-              :class="{ 'spinning-disc': isPlaying, 'spinning-paused': !isPlaying }"
-              @error="coverFailed = true"
-            />
-            <div 
-              v-else 
-              class="fallback-cover"
-              :style="{ background: `linear-gradient(135deg, ${currentSong.color || '#6366f1'}88, #090b10)` }"
-            >
-              <Music class="w-5 h-5 text-white" />
-            </div>
-
-            <!-- Mini play state badge -->
-            <div v-if="isPlaying" class="playing-indicator-badge">
-              <span class="pulse-dot"></span>
-            </div>
-          </div>
-
           <div class="meta-box">
             <div class="title-row">
               <span class="track-title" :title="currentSong.title">{{ currentSong.title }}</span>
@@ -92,9 +64,6 @@
               >
                 {{ currentSong.categoryZh }}
               </span>
-            </div>
-            <div class="artist-row">
-              <span class="track-artist">{{ currentSong.artist }}</span>
             </div>
           </div>
 
@@ -226,10 +195,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { 
   Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Repeat1, 
-  Volume2, VolumeX, Volume1, Download, Heart, ListMusic, Music, AlertTriangle
+  Volume2, VolumeX, Volume1, Download, Heart, ListMusic, AlertTriangle
 } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
 import { songKey, resolveSongUrl, downloadSong } from '../utils/songSchema';
@@ -282,10 +251,6 @@ const onDownload = () => {
   if (!currentSong.value) return;
   downloadSong(currentSong.value, `${currentSong.value.title}.mp3`);
 };
-
-// 封面加载失败只影响底栏展示，不回写共享的 currentSong 对象
-const coverFailed = ref(false);
-watch(() => currentSong.value?.url, () => { coverFailed.value = false; });
 
 const displayCurrentTime = computed(() => {
   return isDraggingProgress.value ? dragTime.value : currentTime.value;
@@ -544,51 +509,6 @@ onUnmounted(() => {
   max-width: 340px;
 }
 
-.cover-box {
-  width: 50px;
-  height: 50px;
-  border-radius: 12px;
-  overflow: hidden;
-  position: relative;
-  flex-shrink: 0;
-  background: #111827;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.cover-box.playing-glow {
-  box-shadow: 0 0 20px var(--glow-color);
-}
-
-.cover-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: 50%;
-  padding: 2px;
-}
-
-.fallback-cover {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.playing-indicator-badge {
-  position: absolute;
-  bottom: 2px;
-  right: 2px;
-  width: 8px;
-  height: 8px;
-  background: #10b981;
-  border-radius: 50%;
-  box-shadow: 0 0 6px #10b981;
-}
-
 .meta-box {
   min-width: 0;
   display: flex;
@@ -619,19 +539,6 @@ onUnmounted(() => {
   border-radius: 99px;
   border: 1px solid;
   flex-shrink: 0;
-}
-
-.artist-row {
-  display: flex;
-  align-items: center;
-}
-
-.track-artist {
-  font-size: 12px;
-  color: #94a3b8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .fav-btn {

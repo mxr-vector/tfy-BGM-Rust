@@ -12,8 +12,6 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "bgm:check": "node scripts/download_all.js --meta-only",
-    "bgm:download": "node scripts/download_all.js",
     "bgm:publish": "node scripts/publish_bgm.js"
   },
   "dependencies": {

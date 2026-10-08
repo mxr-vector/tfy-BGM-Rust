@@ -1,62 +1,12 @@
 /**
- * songs.json 的唯一数据契约定义。
- * 生成侧（scripts/download_all.js、scripts/download_paladin_songs.js）与
- * 消费侧（src/App.vue 加载校验、各组件渲染）共用同一套规则，避免 schema 漂移。
+ * 曲目运行时工具集：稳定标识、音频地址解析与下载。
+ * 曲库不再有索引文件（songs.json）—— 曲目清单由 vite.config.js 在构建 / dev 期
+ * 直接扫描 public/bgm 目录下的 mp3 文件名生成（见 virtual:bgm-manifest），
+ * 每条曲目只携带「曲名（=文件名）+ 分类 + 音频路径」，不再有时长 / 作者等易失配的元数据。
  *
  * Copyright 2026 YuanJie
  * SPDX-License-Identifier: Apache-2.0
  */
-
-export const SONG_FIELDS = [
-  'id',      // 数值 id：由 scripts/data/song-ids.json 按「分类+曲名」锁定，清单增删不再影响已有曲目
-  'key',     // 稳定字符串键 `${category}/${文件名去扩展名}`，收藏 / 队列 / 播放态以此比对
-  'title',
-  'category',
-  'categoryZh',
-  'categoryEn',
-  'color',
-  'artist',
-  'duration',
-  'durationFormatted',
-  'url',     // 未编码的站内原始路径，渲染前经 encodeBgmPath() 逐段转义
-  'cover',
-  'downloaded'
-];
-
-export const REQUIRED_FIELDS = ['id', 'key', 'title', 'category', 'url'];
-
-/** 曲库文件在 public 下的相对位置 */
-export const BGM_DIR = 'bgm';
-export const SONGS_JSON_FILE = 'songs.json';
-
-/**
- * 校验单条曲目元数据。
- * @returns {{ok: boolean, reason: string}}
- */
-export function validateSong(song) {
-  if (!song || typeof song !== 'object') return { ok: false, reason: '不是对象' };
-  for (const field of REQUIRED_FIELDS) {
-    if (song[field] === undefined || song[field] === null || song[field] === '') {
-      return { ok: false, reason: `缺少必填字段 ${field}` };
-    }
-  }
-  if (typeof song.url !== 'string' || !song.url.startsWith('/')) {
-    return { ok: false, reason: 'url 必须是以 / 开头的站内路径' };
-  }
-  if (typeof song.duration !== 'number' || !Number.isFinite(song.duration) || song.duration < 1) {
-    return { ok: false, reason: 'duration 必须是 >= 1 秒的正数' };
-  }
-  if (typeof song.downloaded !== 'boolean') {
-    return { ok: false, reason: 'downloaded 必须是布尔值' };
-  }
-  return { ok: true, reason: '' };
-}
-
-/** 归一化 + 过滤，返回可安全渲染的曲目数组 */
-export function normalizeSongs(list) {
-  if (!Array.isArray(list)) return [];
-  return list.filter(s => validateSong(s).ok);
-}
 
 /** 队列 / 收藏 / 播放态统一使用的稳定标识 */
 export function songKey(song) {

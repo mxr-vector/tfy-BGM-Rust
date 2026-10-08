@@ -1,8 +1,7 @@
 <template>
   <div 
     class="song-row"
-    :class="{ 'is-current': isCurrent, 'is-playing': isCurrent && isPlaying, 'is-unavailable': unavailable }"
-    :title="unavailable ? '本地未找到该音频文件，可运行 node scripts/download_all.js 补齐' : ''"
+    :class="{ 'is-current': isCurrent, 'is-playing': isCurrent && isPlaying }"
     @click="handleRowClick"
   >
     <!-- Index / Play Button -->
@@ -23,31 +22,11 @@
       </button>
     </div>
 
-    <!-- Title & Artist & Thumbnail -->
+    <!-- Title -->
     <div class="col-title">
-      <div class="mini-thumb">
-        <img 
-          v-if="song.cover && !coverFailed" 
-          :src="song.cover" 
-          :alt="song.title"
-          class="thumb-img"
-          loading="lazy"
-          @error="coverFailed = true"
-        />
-        <div 
-          v-else 
-          class="fallback-thumb"
-          :style="{ background: `linear-gradient(135deg, ${song.color || '#6366f1'}, #0f172a)` }"
-        >
-          <Music class="w-3.5 h-3.5 text-white/60" />
-        </div>
-      </div>
-
       <div class="title-meta">
         <span class="row-title" :title="song.title">{{ song.title }}</span>
-        <span class="row-artist" :title="song.artist">{{ song.artist }}</span>
       </div>
-      <span v-if="unavailable" class="unavailable-tag">本地缺失</span>
     </div>
 
     <!-- Category -->
@@ -62,16 +41,6 @@
       >
         {{ song.categoryZh }}
       </span>
-    </div>
-
-    <!-- File Size -->
-    <div class="col-size">
-      <span class="size-text">{{ formatSize(song.fileSize) }}</span>
-    </div>
-
-    <!-- Duration -->
-    <div class="col-duration">
-      <span class="duration-text">{{ song.durationFormatted || '03:00' }}</span>
     </div>
 
     <!-- Actions (Favorite & Download) -->
@@ -98,8 +67,8 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue';
-import { Play, Pause, Heart, Download, Music } from '@lucide/vue';
+import { computed } from 'vue';
+import { Play, Pause, Heart, Download } from '@lucide/vue';
 import { useAudioPlayer } from '../composables/useAudioPlayer';
 import { songKey, resolveSongUrl } from '../utils/songSchema';
 
@@ -111,10 +80,6 @@ const props = defineProps({
   index: {
     type: Number,
     required: true
-  },
-  unavailable: {
-    type: Boolean,
-    default: false
   }
 });
 
@@ -126,22 +91,11 @@ const isCurrent = computed(() => currentSong.value && songKey(currentSong.value)
 const isFav = computed(() => favorites.value.has(songKey(props.song)));
 const audioUrl = computed(() => resolveSongUrl(props.song));
 
-// 封面加载失败只影响本组件展示，不回写共享数据
-const coverFailed = ref(false);
-watch(() => props.song.cover, () => { coverFailed.value = false; });
-
-const formatSize = (bytes) => {
-  if (!bytes) return '—';
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-};
-
 const handleRowClick = () => {
-  if (props.unavailable) return;
   emit('play', props.song);
 };
 
 const toggleCurrent = () => {
-  if (props.unavailable) return;
   emit('play', props.song);
 };
 </script>
@@ -168,22 +122,6 @@ const toggleCurrent = () => {
 
 .song-row.is-current .row-title {
   color: #818cf8;
-}
-
-.song-row.is-unavailable {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.unavailable-tag {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 700;
-  color: #fde68a;
-  background: rgba(120, 53, 15, 0.6);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  padding: 1px 6px;
-  border-radius: 6px;
 }
 
 /* Col: Index & Play */
@@ -225,37 +163,12 @@ const toggleCurrent = () => {
   align-items: center;
 }
 
-/* Col: Title & Thumb */
+/* Col: Title */
 .col-title {
   display: flex;
   align-items: center;
-  gap: 12px;
   flex: 3;
   min-width: 0;
-}
-
-.mini-thumb {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: #0f172a;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.thumb-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.fallback-thumb {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .title-meta {
@@ -274,14 +187,6 @@ const toggleCurrent = () => {
   white-space: nowrap;
 }
 
-.row-artist {
-  font-size: 12px;
-  color: #94a3b8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Col: Category */
 .col-category {
   flex: 1.2;
@@ -295,29 +200,6 @@ const toggleCurrent = () => {
   padding: 2px 8px;
   border-radius: 99px;
   border: 1px solid;
-}
-
-/* Col: Size */
-.col-size {
-  flex: 0.8;
-}
-
-.size-text {
-  font-size: 12px;
-  color: #64748b;
-  font-weight: 600;
-}
-
-/* Col: Duration */
-.col-duration {
-  flex: 0.8;
-}
-
-.duration-text {
-  font-size: 12px;
-  color: #94a3b8;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 
 /* Col: Actions */

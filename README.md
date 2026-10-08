@@ -6,36 +6,37 @@
 
 ## 📦 仓库结构与素材分发
 
-曲库只有**一份事实来源**，音频本体不进 git：
+曲库以 **`public/bgm/` 目录本身为唯一事实来源**：文件名即曲名，不再有索引文件与元数据脚本。
+构建 / dev 期由 `vite.config.js` 直接扫描各分类目录下的 `.mp3` 生成曲目清单（`virtual:bgm-manifest`），
+因此手动替换 / 增删音频后，页面展示的曲名即刻同步，不会出现时长、作者与实际音频不匹配的情况。
 
 | 内容 | 位置 | 是否进 git |
 | :--- | :--- | :--- |
-| 曲库清单（人工维护，一行一曲） | `scripts/songs.md` | ✅ |
-| 稳定 id 快照（按「分类+曲名」锁定） | `scripts/data/song-ids.json` | ✅ |
-| 数据契约定义（前后端共用） | `src/utils/songSchema.js` | ✅ |
-| 曲库元数据（脚本生成） | `public/bgm/songs.json` | ✅ |
-| 音频本体（~330 MB） | `public/bgm/<分类>/*.mp3` | ❌ 云盘分发 |
+| 分类元数据（目录名 ↔ 中文名 / 主题色） | `src/utils/categories.js` | ✅ |
+| 目录扫描器（构建期 + 发布脚本共用） | `scripts/scan_bgm.js` | ✅ |
+| 曲目运行时工具（地址解析 / 下载） | `src/utils/songSchema.js` | ✅ |
+| 音频本体 | `public/bgm/<分类>/*.mp3` | ❌ 体积大，按需本地/云盘分发 |
 | 云盘发布产物 | `dist-bgm/` | ❌ |
 
 ```
-scripts/songs.md ──node scripts/download_all.js──▶ public/bgm/songs.json + public/bgm/<分类>/*.mp3
-                                   └─node scripts/publish_bgm.js─▶ dist-bgm/（上传云盘）
+public/bgm/<分类>/*.mp3 ──vite 构建期扫描──▶ virtual:bgm-manifest ──▶ 前端渲染（仅曲名 + 分类）
+                       └─node scripts/publish_bgm.js─▶ dist-bgm/（打包上传云盘）
 ```
 
 ---
 
 ## 📁 分类与英文目录规范
 
-所有 BGM 已按类别创建对应标准英文文件夹（下表数量仅供参考，以 `scripts/songs.md` 为准）：
+所有 BGM 按类别放入对应标准英文文件夹（曲目数量以 `public/bgm/<分类>/` 目录下的实际 mp3 为准）：
 
-| 中文分类 | 英文目录名 | 曲目数量 | 适用剪辑场景 | 目录路径 |
-| :--- | :--- | :--- | :--- | :--- |
-| **欢快** | `cheerful` | 20 首 | 生活日常 Vlog、开箱解说、趣味搞笑、快节奏卡点 | `public/bgm/cheerful/` |
-| **独处** | `solitude` | 19 首 | 深夜独白、治愈流行、静心学习/工作、自律慢生活 | `public/bgm/solitude/` |
-| **回忆** | `memories` | 11 首 | 怀旧温情、青春毕业季、岁月光影、情感纪实 | `public/bgm/memories/` |
-| **史诗** | `epic` | 28 首 | 燃向混剪、大片战歌、高光集锦、企业宣传片 | `public/bgm/epic/` |
-| **古风** | `gufeng` | 13 首 | 国风雅韵、汉服走秀、仙剑经典、唯美武侠 | `public/bgm/gufeng/` |
-| **乡村** | `country` | 1 首 | 乡野烟火、农家田园、悠闲度假风景 | `public/bgm/country/` |
+| 中文分类 | 英文目录名 | 适用剪辑场景 | 目录路径 |
+| :--- | :--- | :--- | :--- |
+| **欢快** | `cheerful` | 生活日常 Vlog、开箱解说、趣味搞笑、快节奏卡点 | `public/bgm/cheerful/` |
+| **独处** | `solitude` | 深夜独白、治愈流行、静心学习/工作、自律慢生活 | `public/bgm/solitude/` |
+| **回忆** | `memories` | 怀旧温情、青春毕业季、岁月光影、情感纪实 | `public/bgm/memories/` |
+| **史诗** | `epic` | 燃向混剪、大片战歌、高光集锦、企业宣传片 | `public/bgm/epic/` |
+| **古风** | `gufeng` | 国风雅韵、汉服走秀、仙剑经典、唯美武侠 | `public/bgm/gufeng/` |
+| **乡村** | `country` | 乡野烟火、农家田园、悠闲度假风景 | `public/bgm/country/` |
 
 ---
 
@@ -49,7 +50,7 @@ scripts/songs.md ──node scripts/download_all.js──▶ public/bgm/songs.js
    - 分类标签一键切换、收藏夹过滤。
    - 实时响应式搜索（快捷键 `/` 快速聚焦搜索框）。
    - 支持网格卡片（Grid）与高密度列表（List）双视图无缝切换。
-   - 多种排序方式（默认推荐、按名称 A-Z、时长升降序、文件大小）。
+   - 排序方式（默认推荐、按曲名 A-Z）。
 3. **全功能可拖拽底部音频播放器**
    - **高精度时间轴拖拽**：鼠标悬停实时时间预览、支持随意点击与滑动拖拽精准跳转进度（Seek）。
    - **全键盘快捷键控制**：
@@ -80,22 +81,16 @@ pnpm preview
 ```
 
 ### 3. 曲库维护
+
+直接向对应分类目录 `public/bgm/<分类>/` 放入 / 替换 / 删除 `.mp3` 文件即可，**文件名就是页面上展示的曲名**；
+`pnpm dev` 会监听 `public/bgm` 目录，改动即时刷新，生产构建则在打包时重新扫描。
+
 ```bash
-# 校验清单 + 刷新元数据（时长用 ffprobe 实测、艺术家从 ID3 回填，不重复下载）
-pnpm bgm:check
-
-# 增量下载缺失音频（清单来自 scripts/songs.md）
-pnpm bgm:download
-
-# 强制重新检索下载
-node scripts/download_all.js --force
-
-# 重新打包云盘发布内容 -> dist-bgm/
+# 重新扫描目录并打包云盘发布内容 -> dist-bgm/
 pnpm bgm:publish
 ```
 
-新增曲目：在 `scripts/songs.md` 对应分类下加一行曲名，再跑 `pnpm bgm:download`。
-曲目 id 由 `scripts/data/song-ids.json` 按「分类+曲名」锁定，增删条目不会打乱已有 id（收藏不再错位）。
+收藏（favorite）/ 播放队列以稳定的「分类/曲名」key 保存，替换同名文件不会错位；只要文件名不变，收藏与队列仍然有效。
 
 ### 4. 音频地址（云盘分发）
 

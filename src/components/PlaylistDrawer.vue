@@ -53,7 +53,6 @@
 
             <div class="queue-meta">
               <span class="song-name" :title="song.title">{{ song.title }}</span>
-              <span class="artist-name">{{ song.artist }}</span>
             </div>
           </div>
 
@@ -67,7 +66,6 @@
             >
               {{ song.categoryZh }}
             </span>
-            <span class="duration">{{ song.durationFormatted || '03:00' }}</span>
             <button 
               class="item-remove-btn" 
               @click.stop="removeFromQueue(idx)" 
@@ -260,14 +258,6 @@ const isCurrent = (song) => !!currentSong.value && songKey(currentSong.value) ==
   color: #818cf8;
 }
 
-.artist-name {
-  font-size: 11px;
-  color: #94a3b8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .item-right {
   display: flex;
   align-items: center;
@@ -280,12 +270,6 @@ const isCurrent = (song) => !!currentSong.value && songKey(currentSong.value) ==
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 4px;
-}
-
-.duration {
-  font-size: 11px;
-  color: #64748b;
-  font-variant-numeric: tabular-nums;
 }
 
 .header-actions {
