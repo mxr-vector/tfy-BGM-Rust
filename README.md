@@ -113,7 +113,17 @@ pnpm build
 
 如需本地起服务预览，也可用 `pnpm preview`。
 
-### 3. 曲库维护
+### 3. 类型检查
+```bash
+pnpm type-check
+```
+全仓已转为 TypeScript（`src/**` 含 `.vue` 均为 `<script setup lang="ts">`，构建脚本与 `vite.config.ts` 同为 TS），
+由 `vue-tsc` 做类型校验；`pnpm build` 已内置这一步，类型不通过则不产出。曲库清单的条目类型定义在 `src/types/bgm.ts`，
+扫描器与前端共用，清单结构一旦改动编译期即会报错。
+
+> `typescript` 请锁 5.x：vue-tsc 3.3 仍依赖 `typescript/lib/tsc` 入口，TypeScript 7（原生编译器）下无法运行。
+
+### 4. 曲库维护
 
 直接向对应分类目录 `public/bgm/<分类>/` 放入 / 替换 / 删除 `.mp3` 文件即可，**文件名就是页面上展示的曲名**（下划线 `_` 显示为空格）；
 `pnpm dev` 会监听 `public/bgm` 目录，改动即时刷新，生产构建则在打包时重新扫描。
@@ -126,7 +136,7 @@ pnpm bgm:publish
 
 收藏（favorite）/ 播放队列以稳定的「分类/曲名」key 保存，替换同名文件不会错位；只要文件名不变，收藏与队列仍然有效。
 
-### 4. 音频地址（云盘分发）
+### 5. 音频地址（云盘分发）
 
 音频本体不进 git，三种部署方式：
 
