@@ -9,7 +9,7 @@
           <component :is="activeCatInfo.iconComponent" class="w-3.5 h-3.5 inline mr-1" />
           {{ activeCatInfo.labelEn }}
         </span>
-        <span class="offline-tag">✓ 离线已下载</span>
+        <span class="offline-tag">目录扫描 · 文件名即曲名</span>
       </div>
 
       <h1 class="hero-title">{{ activeCatInfo.title }}</h1>
@@ -53,6 +53,7 @@
 <script setup>
 import { computed } from 'vue';
 import { Play, Shuffle, Sparkles, Coffee, Clock, Flame, Feather, Sun, Music, Heart } from '@lucide/vue';
+import { CATEGORY_MAP } from '../utils/categories';
 
 const props = defineProps({
   category: {
@@ -71,6 +72,8 @@ const props = defineProps({
 
 defineEmits(['play-all', 'shuffle-play']);
 
+// 横幅专属文案（title / description / 图标）；分类 id、主题色、英文名以 categories.js 为准，
+// 与侧边栏 / 曲目行 / 播放器保持同一来源。
 const CATEGORY_META = {
   all: {
     title: '全部精选视频剪辑 BGM',
@@ -81,43 +84,31 @@ const CATEGORY_META = {
   },
   cheerful: {
     title: '欢快节奏 · Cheerful & Upbeat',
-    labelEn: 'CHEERFUL / UPBEAT',
-    color: '#f59e0b',
     iconComponent: Sparkles,
     description: '适用于生活 Vlog、开箱解说、美食探店、搞笑趣味、快闪卡点等轻松愉悦的视频剪辑。'
   },
   solitude: {
     title: '独处沉思 · Solitude & Chill',
-    labelEn: 'SOLITUDE / PEACEFUL',
-    color: '#818cf8',
     iconComponent: Coffee,
     description: '纯音乐、治愈钢琴、深夜独白、静心工作与自律学习视频的最佳背景配乐。'
   },
   memories: {
     title: '时光回忆 · Memories & Nostalgia',
-    labelEn: 'MEMORIES / NOSTALGIA',
-    color: '#f472b6',
     iconComponent: Clock,
     description: '温情故事、毕业季纪念、告白与重逢、岁月光影、情感纪实剪辑首选配乐。'
   },
   epic: {
     title: '震撼史诗 · Epic & Grand',
-    labelEn: 'EPIC / MAJESTIC',
-    color: '#ef4444',
     iconComponent: Flame,
     description: '气势磅礴的大片感战歌，适合燃向混剪、企业宣传片、运动高光、游戏集锦、宏大叙事。'
   },
   gufeng: {
     title: '东方古风 · Traditional Chinese',
-    labelEn: 'GUFENG / TRADITIONAL',
-    color: '#10b981',
     iconComponent: Feather,
     description: '笛子、古筝、二胡等国风雅韵，完美契合汉服国风、古建文旅、武侠唯美剪辑。'
   },
   country: {
     title: '田园乡村 · Country & Rural',
-    labelEn: 'COUNTRY / FOLK',
-    color: '#84cc16',
     iconComponent: Sun,
     description: '乡野烟火、农家田园、归隐慢生活、悠闲度假风景短视频的绝妙搭档。'
   }
@@ -133,7 +124,11 @@ const activeCatInfo = computed(() => {
       description: '你标记喜欢的配乐都在这里，方便在剪辑过程中随时试听与下载使用。'
     };
   }
-  return CATEGORY_META[props.category] || CATEGORY_META.all;
+  const local = CATEGORY_META[props.category];
+  if (!local) return CATEGORY_META.all;
+  if (local.color) return local;   // 「全部」横幅不挂分类，保留自带颜色 / 英文名
+  const cat = CATEGORY_MAP[props.category];
+  return { ...cat, ...local };
 });
 </script>
 

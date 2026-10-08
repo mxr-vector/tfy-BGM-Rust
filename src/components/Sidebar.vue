@@ -63,23 +63,16 @@
       </div>
     </nav>
 
-    <!-- Bottom Storage Status Card -->
+    <!-- Bottom Manifest Status Card -->
     <div class="status-card glass-panel">
       <div class="status-header">
         <div class="status-indicator">
           <span class="status-dot"></span>
-          <span class="status-text">本地离线库已就绪</span>
+          <span class="status-text">曲库清单就绪</span>
         </div>
-        <span class="status-percent">100%</span>
+        <span class="status-percent">{{ totalSongs }} 首</span>
       </div>
-      <p class="status-detail">{{ totalSongs }} 首音频已全部下载至本地文件夹</p>
-      <div class="storage-bar">
-        <div class="storage-fill" style="width: 100%"></div>
-      </div>
-      <div class="storage-meta">
-        <span>已占用 ~307 MB</span>
-        <span>无限制畅听</span>
-      </div>
+      <p class="status-detail">构建期由 public/bgm 目录扫描生成，音频本体随本地/云盘分发</p>
     </div>
   </aside>
 </template>
@@ -328,28 +321,6 @@ const toggleFavorites = () => {
   font-size: 11px;
   color: #64748b;
   line-height: 1.4;
-}
-
-.storage-bar {
-  width: 100%;
-  height: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.storage-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #10b981, #06b6d4);
-  border-radius: 4px;
-}
-
-.storage-meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  font-weight: 600;
-  color: #64748b;
 }
 
 @media (max-width: 900px) {

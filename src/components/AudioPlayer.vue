@@ -3,9 +3,10 @@
     <footer v-if="currentSong" class="audio-player-container">
       <div class="player-wrapper glass-player">
       
-      <!-- Top Scrubber Progress Bar -->
+      <!-- Top Scrubber Progress Bar（元数据就绪前禁用拖拽/悬停预览，避免基于 0 时长的错误 seek） -->
       <div 
         class="progress-bar-container"
+        :class="{ 'is-unready': !duration }"
         ref="progressContainer"
         @mousedown="startDrag"
         @mousemove="handleHover"
@@ -132,7 +133,7 @@
           <div class="time-display">
             <span class="time-current">{{ formatTime(displayCurrentTime) }}</span>
             <span class="time-separator">/</span>
-            <span class="time-total">{{ formatTime(duration) }}</span>
+            <span class="time-total">{{ duration ? formatTime(duration) : '--:--' }}</span>
           </div>
         </div>
 
@@ -278,14 +279,15 @@ const cycleRate = () => {
 
 // Dragging logic
 const calculateTimeFromEvent = (e) => {
-  if (!progressContainer.value) return 0;
+  if (!progressContainer.value || !duration.value) return 0;
   const rect = progressContainer.value.getBoundingClientRect();
   const clientX = e.touches ? e.touches[0].clientX : e.clientX;
   const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  return ratio * (duration.value || 1);
+  return ratio * duration.value;
 };
 
 const startDrag = (e) => {
+  if (!duration.value) return;
   isDraggingProgress.value = true;
   dragTime.value = calculateTimeFromEvent(e);
 
@@ -305,6 +307,7 @@ const startDrag = (e) => {
 };
 
 const startTouchDrag = (e) => {
+  if (!duration.value) return;
   isDraggingProgress.value = true;
   dragTime.value = calculateTimeFromEvent(e);
 
@@ -324,11 +327,11 @@ const startTouchDrag = (e) => {
 };
 
 const handleHover = (e) => {
-  if (!progressContainer.value) return;
+  if (!progressContainer.value || !duration.value) return;
   const rect = progressContainer.value.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   hoverPercent.value = ratio * 100;
-  hoverTime.value = ratio * (duration.value || 1);
+  hoverTime.value = ratio * duration.value;
   hoverVisible.value = true;
 };
 
@@ -423,6 +426,12 @@ onUnmounted(() => {
   align-items: center;
   padding: 0;
   margin-top: -2px;
+}
+
+/* 时长未知（元数据未就绪）时不接受拖拽 / 悬停预览 */
+.progress-bar-container.is-unready {
+  cursor: default;
+  pointer-events: none;
 }
 
 .progress-track {

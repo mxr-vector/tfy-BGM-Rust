@@ -61,20 +61,19 @@ const toggleFavorite = (key) => {
 };
 
 /**
- * 一次性升级：旧版本收藏存的是数值 id / 原始 url，这里按当前曲目表换算成稳定 key。
+ * 一次性升级：旧版本收藏存的是音频原始 url，这里按当前曲目表换算成稳定 key。
+ * 无法映射的项（已下架 / 更早版本的数值 id）原样保留，曲目回归时自动恢复。
  */
 const migrateFavorites = (songs) => {
   if (!Array.isArray(songs) || favorites.value.size === 0) return;
-  const byId = new Map();
   const byUrl = new Map();
   for (const s of songs) {
-    if (s?.id !== undefined) byId.set(String(s.id), songKey(s));
     if (s?.url) byUrl.set(s.url, songKey(s));
   }
   const migrated = new Set();
   let changed = false;
   for (const stored of favorites.value) {
-    const mapped = byUrl.get(stored) ?? byId.get(String(stored));
+    const mapped = byUrl.get(stored);
     if (mapped) {
       migrated.add(mapped);
       if (mapped !== stored) changed = true;
@@ -246,14 +245,16 @@ function togglePlay() {
 }
 
 function seek(time) {
-  if (isNaN(time)) return;
-  const target = Math.max(0, Math.min(time, duration.value || audio.duration || 1000));
+  // 元数据就绪前 duration 未知，此时 seek 没有有意义目标，直接忽略（进度条侧已同步禁用交互）
+  if (isNaN(time) || !duration.value) return;
+  const target = Math.max(0, Math.min(time, duration.value));
   currentTime.value = target;
   audio.currentTime = target;
 }
 
 function seekPercentage(ratio) {
-  const target = ratio * (duration.value || 1);
+  if (!duration.value) return;
+  const target = ratio * duration.value;
   seek(target);
 }
 

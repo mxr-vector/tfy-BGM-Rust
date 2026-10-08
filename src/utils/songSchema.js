@@ -8,10 +8,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/** 队列 / 收藏 / 播放态统一使用的稳定标识 */
+/** 队列 / 收藏 / 播放态统一使用的稳定标识（清单条目为「分类/文件名主干」） */
 export function songKey(song) {
   if (!song) return '';
-  return song.key || song.url || String(song.id ?? '');
+  return song.key || song.url || '';
 }
 
 /** 音频文件尚未随应用一起分发时，可指向云盘直链 */

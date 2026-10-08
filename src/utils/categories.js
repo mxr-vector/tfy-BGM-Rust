@@ -8,12 +8,22 @@
  */
 
 export const CATEGORIES = [
-  { id: 'cheerful', nameZh: '欢快', nameEn: 'Cheerful', labelEn: 'Cheerful / Upbeat', color: '#f59e0b' },
-  { id: 'solitude', nameZh: '独处', nameEn: 'Solitude', labelEn: 'Solitude / Chill', color: '#6366f1' },
-  { id: 'memories', nameZh: '回忆', nameEn: 'Memories', labelEn: 'Memories / Nostalgia', color: '#ec4899' },
-  { id: 'epic', nameZh: '史诗', nameEn: 'Epic', labelEn: 'Epic / Grand', color: '#ef4444' },
-  { id: 'gufeng', nameZh: '古风', nameEn: 'GuFeng', labelEn: 'Traditional / GuFeng', color: '#10b981' },
-  { id: 'country', nameZh: '乡村', nameEn: 'Country', labelEn: 'Country / Rural', color: '#84cc16' },
+  { id: 'cheerful', nameZh: '欢快', nameEn: 'Cheerful', labelEn: 'CHEERFUL / UPBEAT', color: '#f59e0b' },
+  { id: 'solitude', nameZh: '独处', nameEn: 'Solitude', labelEn: 'SOLITUDE / PEACEFUL', color: '#818cf8' },
+  { id: 'memories', nameZh: '回忆', nameEn: 'Memories', labelEn: 'MEMORIES / NOSTALGIA', color: '#f472b6' },
+  { id: 'epic', nameZh: '史诗', nameEn: 'Epic', labelEn: 'EPIC / MAJESTIC', color: '#ef4444' },
+  { id: 'gufeng', nameZh: '古风', nameEn: 'GuFeng', labelEn: 'GUFENG / TRADITIONAL', color: '#10b981' },
+  { id: 'country', nameZh: '乡村', nameEn: 'Country', labelEn: 'COUNTRY / FOLK', color: '#84cc16' },
 ];
 
 export const CATEGORY_MAP = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+
+/**
+ * 给构建期清单条目补上运行时分类信息（中文名 / 英文名 / 主题色）。
+ * 清单只携带「分类 id」，颜色等展示信息改一处即全局生效，不会与构建产物漂移。
+ */
+export function withCategoryMeta(song) {
+  const cat = CATEGORY_MAP[song.category];
+  if (!cat) return song;
+  return { ...song, categoryZh: cat.nameZh, categoryEn: cat.labelEn, color: cat.color };
+}

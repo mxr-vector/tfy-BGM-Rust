@@ -21,7 +21,7 @@
             ref="searchInput"
             v-model="searchQuery" 
             type="text" 
-            placeholder="搜索背景音乐、作者、或分类关键词... (按 / 快速聚焦)"
+            placeholder="搜索曲名或分类关键词... (按 / 快速聚焦)"
             class="search-input"
           />
           <button v-if="searchQuery" class="clear-search-btn" @click="searchQuery = ''">
@@ -101,14 +101,20 @@
           </div>
         </div>
 
-        <!-- Empty Search State -->
+        <!-- Empty State：区分「曲库为空」与「筛选无结果」，避免误导新使用者 -->
         <div v-if="filteredSongs.length === 0" class="empty-results-box glass-panel">
           <Music class="w-16 h-16 text-slate-600 mb-3" />
-          <h3 class="text-lg font-bold text-slate-300">没有找到匹配的音频素材</h3>
-          <p class="text-sm text-slate-500 mt-1">请尝试更换搜索词，或清除分类与筛选条件</p>
-          <button class="reset-filter-btn" @click="resetFilters">
-            重置所有筛选
-          </button>
+          <template v-if="allSongs.length === 0">
+            <h3 class="text-lg font-bold text-slate-300">曲库为空</h3>
+            <p class="text-sm text-slate-500 mt-1">请向 public/bgm/&lt;分类&gt;/ 目录放入 .mp3（或配置 VITE_BGM_BASE 指向云盘音频）</p>
+          </template>
+          <template v-else>
+            <h3 class="text-lg font-bold text-slate-300">没有找到匹配的音频素材</h3>
+            <p class="text-sm text-slate-500 mt-1">请尝试更换搜索词，或清除分类与筛选条件</p>
+            <button class="reset-filter-btn" @click="resetFilters">
+              重置所有筛选
+            </button>
+          </template>
         </div>
 
         <!-- List / Table View -->
@@ -161,7 +167,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { Search, X, ArrowUpDown, Music } from '@lucide/vue';
 import { useAudioPlayer } from './composables/useAudioPlayer';
 import { songKey } from './utils/songSchema';
-import { CATEGORIES } from './utils/categories';
+import { CATEGORIES, withCategoryMeta } from './utils/categories';
 import bgmManifest from 'virtual:bgm-manifest';
 
 import Sidebar from './components/Sidebar.vue';
@@ -172,8 +178,9 @@ import PlaylistDrawer from './components/PlaylistDrawer.vue';
 
 const { playSong, favorites, currentSong, migrateFavorites } = useAudioPlayer();
 
-// 曲库清单由构建期扫描 public/bgm 目录生成，无异步加载 / 无索引文件。
-const allSongs = ref([...bgmManifest]);
+// 曲库清单由构建期扫描 public/bgm 目录生成（仅含曲名/分类/路径），
+// 分类中文名与主题色运行时从 categories.js 派生，改色不会与构建产物漂移。
+const allSongs = ref(bgmManifest.map(withCategoryMeta));
 const currentCategory = ref('all');
 const showFavoritesOnly = ref(false);
 const searchQuery = ref('');
@@ -317,7 +324,7 @@ const handleGlobalKeyDown = (e) => {
 };
 
 onMounted(() => {
-  migrateFavorites(allSongs.value);   // 旧版收藏（数值 id / 原始 url）-> 稳定 key
+  migrateFavorites(allSongs.value);   // 旧版收藏（原始 url）-> 稳定 key
   window.addEventListener('keydown', handleGlobalKeyDown);
 });
 
