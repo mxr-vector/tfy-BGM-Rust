@@ -75,11 +75,18 @@ pnpm dev
 ```
 启动后在浏览器中打开 `http://localhost:5173/` 即可尽情试听。
 
-### 2. 构建生产环境包
+### 2. 构建静态包（免服务器，双击即用）
 ```bash
 pnpm build
-pnpm preview
 ```
+产物 `dist/index.html` 为**单个自包含文件**（JS/CSS 全部内联），配合同目录的 `dist/bgm/` 音频，
+**直接双击 `dist/index.html` 即可在浏览器中打开使用，无需 nginx 等任何静态服务器**
+（基于 `vite-plugin-singlefile` + 相对 `base`，兼容 `file://` 协议）。
+
+> 说明：`file://` 下浏览器会拦截外部 ES 模块脚本，故构建期将脚本内联进 `index.html`；
+> 音频 `<audio>` 走相对路径加载本地文件，不受该限制。收藏 / 音量等仍用 `localStorage` 持久化。
+
+如需本地起服务预览，也可用 `pnpm preview`。
 
 ### 3. 曲库维护
 

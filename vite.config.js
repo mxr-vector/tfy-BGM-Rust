@@ -1,5 +1,6 @@
 import vue from '@vitejs/plugin-vue'
 import { defineConfig, normalizePath } from 'vite'
+import { viteSingleFile } from 'vite-plugin-singlefile'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,6 +42,9 @@ function bgmManifestPlugin() {
 }
 
 // https://vite.dev/config/
+// 静态打包：产物为单个自包含 index.html（JS/CSS 全内联），双击即可在 file:// 下打开，
+// 无需 nginx 等静态服务器。base 用相对路径，dist/bgm 下的 mp3 以文件形式随包分发、相对引用。
 export default defineConfig({
-  plugins: [bgmManifestPlugin(), vue()],
+  base: './',
+  plugins: [bgmManifestPlugin(), vue(), viteSingleFile()],
 })
