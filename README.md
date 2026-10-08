@@ -41,6 +41,30 @@ public/bgm/<分类>/*.mp3 ──vite 构建期扫描──▶ virtual:bgm-manife
 
 ---
 
+## 🎵 曲库清单
+
+以下为各分类目录下的实际曲目（共 92 首，以 `public/bgm/<分类>/` 目录为准；页面展示时下划线 `_` 显示为空格）：
+
+### 欢快 · cheerful（20 首）
+Starlight、buttercup、monkeys spring monkeys、monsieur melody、spring in my step、stranger、summer（菊次郎的夏天）、上春山、亲爱的共产主义请赐我前行的力量、可爱翻倍 吨吨吨、咏春、天下第一好、来杯好茶摇一摇、步步高、猪突猛进、竹林小曲（燕云）、答案、象王行、踏遍青山、风月吻眉梢
+
+### 独处 · solitude（19 首）
+flower dance、kiss the rain、little story、merry christmas mr.lawrence、oh you beat、on more time、river flow in you、the truth that you leave、windy hill、一个人过冬天、人生路漫漫、幻昼、悬溺、所念皆星河、爱人错过、爱的供养（伴奏）、稳稳的幸福（钢琴）、萤火虫之舞、虚拟
+
+### 回忆 · memories（11 首）
+asphyxia、你听啊秋末的落叶、告白之夜、城南花已开、山上的山花开呀、思绪回到那年秋、时间煮雨、樱花草、穿越时空的思念、阳光灿烂的日子（萨克斯）、风居住的街道
+
+### 史诗 · epic（28 首）
+EI Dorado、Empire of Angels、breath and life、conquest of paradise、go time、he's a pirate、heart of courage、intro、last reunion、pacific rim、requiem for a tower、rise、star sky、sunburst、三界四洲、天地缓缓、好一朵茉莉花、归零、惊涛日落（红警）、望月婵媛吟唱、水龙吟、浮光、相许、知我、空山野马、精卫、难解、bloody mary
+
+### 古风 · gufeng（13 首）
+九州同、云水禅心、偏爱、双面燕洵、忘记时间、明月引、此生不换、灼雪、莫失莫忘、醉忆仙乡、雪见-落入凡尘、青花瓷（纯音乐）、风云决
+
+### 乡村 · country（1 首）
+莫忙
+
+---
+
 ## ✨ 核心特性
 
 1. **现代化 UI 审美**
