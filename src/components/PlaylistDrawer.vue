@@ -80,23 +80,26 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ListMusic, X, Music, Trash2 } from '@lucide/vue';
-import { useAudioPlayer } from '../composables/useAudioPlayer';
-import { songKey } from '../utils/songSchema';
+import { useAudioPlayer } from '../composables/useAudioPlayer.ts';
+import { songKey } from '../utils/songSchema.ts';
+import type { Song } from '../types/bgm.ts';
 
-defineProps({
-  isOpen: {
-    type: Boolean,
-    default: false
-  }
+withDefaults(defineProps<{
+  /** 抽屉是否展开 */
+  isOpen?: boolean;
+}>(), {
+  isOpen: false,
 });
 
-defineEmits(['close']);
+defineEmits<{
+  close: [];
+}>();
 
 const { queue, currentSong, isPlaying, playSong, removeFromQueue, clearQueue } = useAudioPlayer();
 
-const isCurrent = (song) => !!currentSong.value && songKey(currentSong.value) === songKey(song);
+const isCurrent = (song: Song) => !!currentSong.value && songKey(currentSong.value) === songKey(song);
 </script>
 
 <style scoped>

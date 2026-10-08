@@ -1,15 +1,19 @@
 /**
  * 曲目运行时工具集：稳定标识、音频地址解析与下载。
- * 曲库不再有索引文件（songs.json）—— 曲目清单由 vite.config.js 在构建 / dev 期
+ * 曲库不再有索引文件（songs.json）—— 曲目清单由 vite.config.ts 在构建 / dev 期
  * 直接扫描 public/bgm 目录下的 mp3 文件名生成（见 virtual:bgm-manifest），
  * 每条曲目只携带「曲名（=文件名）+ 分类 + 音频路径」，不再有时长 / 作者等易失配的元数据。
  *
  * Copyright 2026 YuanJie
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { BgmManifestEntry } from '../types/bgm.ts';
+
+/** 只需标识字段即可参与取 key / 解析地址，便于各类调用方复用 */
+type SongIdentity = Partial<Pick<BgmManifestEntry, 'key' | 'url' | 'title'>>;
 
 /** 队列 / 收藏 / 播放态统一使用的稳定标识（清单条目为「分类/文件名主干」） */
-export function songKey(song) {
+export function songKey(song?: SongIdentity | null): string {
   if (!song) return '';
   return song.key || song.url || '';
 }
@@ -17,27 +21,29 @@ export function songKey(song) {
 /** 音频文件尚未随应用一起分发时，可指向云盘直链 */
 const BGM_BASE_KEY = 'tfy_bgm_base';
 
-export function getBgmBase() {
-  const envBase = import.meta.env?.VITE_BGM_BASE;
+export function getBgmBase(): string {
+  const envBase = import.meta.env.VITE_BGM_BASE;
   if (typeof envBase === 'string' && envBase) return envBase;
   try {
     return localStorage.getItem(BGM_BASE_KEY) || '';
-  } catch (e) {
+  } catch {
     return '';
   }
 }
 
-export function setBgmBase(base) {
+export function setBgmBase(base: string): void {
   try {
     if (base) localStorage.setItem(BGM_BASE_KEY, base);
     else localStorage.removeItem(BGM_BASE_KEY);
-  } catch (e) {}
+  } catch {
+    /* 隐私模式等场景下 localStorage 不可写，忽略即可 */
+  }
 }
 
 /**
  * 将站内原始路径逐段转义（仅用于展示 / 比对，不改变磁盘上的真实文件名）。
  */
-export function encodeBgmPath(url) {
+export function encodeBgmPath(url: string): string {
   const [beforeHash, hash = ''] = String(url).split('#');
   const [beforeQuery, query = ''] = beforeHash.split('?');
   const encoded = beforeQuery
@@ -55,35 +61,35 @@ export function encodeBgmPath(url) {
  *   2. 以 public 结尾的网盘根，如 https://host/public（自动拼 /bgm/...）
  *   3. 留空，走应用自身的 BASE_URL（音频随 dist 一起部署）
  */
-export function resolveSongUrl(song) {
+export function resolveSongUrl(song?: SongIdentity | null): string {
   if (!song?.url) return '';
   if (/^https?:\/\//i.test(song.url)) return song.url;
 
   const clean = song.url.replace(/^\/+/, '');          // bgm/cheerful/xxx.mp3
   const encoded = clean.split('/').map(encodeURIComponent).join('/');
-  const file = encoded.split('/').pop();
+  const file = encoded.split('/').pop() ?? '';
   const base = getBgmBase().replace(/\/+$/, '');
 
   if (!base) {
-    const appBase = typeof import.meta.env?.BASE_URL === 'string' ? import.meta.env.BASE_URL : '/';
+    const appBase = typeof import.meta.env.BASE_URL === 'string' ? import.meta.env.BASE_URL : '/';
     return `${appBase.replace(/\/$/, '')}/${encoded}`;
   }
   if (base.includes('{path}')) return base.replace('{path}', encoded);
   if (base.includes('{file}')) return base.replace('{file}', file);
-  if (/\/public$/i.test(base)) return `${base}/${encoded.replace(/^bgm\//, 'bgm/')}`;
+  if (/\/public$/i.test(base)) return `${base}/${encoded}`;   // 网盘根：直接拼站内相对路径（原冗余 replace 已去）
   return `${base}/${encoded}`;
 }
 
 /** 判断解析后的地址是否与当前页面同源 */
-export function isSameOriginUrl(url) {
+export function isSameOriginUrl(url: string): boolean {
   try {
     return new URL(url, window.location.href).origin === window.location.origin;
-  } catch (e) {
+  } catch {
     return true;
   }
 }
 
-function triggerAnchorDownload(href, filename) {
+function triggerAnchorDownload(href: string, filename: string): void {
   const a = document.createElement('a');
   a.href = href;
   a.download = filename;
@@ -98,7 +104,7 @@ function triggerAnchorDownload(href, filename) {
  * 同源地址直接用 <a download>；跨域（云盘直链）时 download 属性会被浏览器忽略，
  * 改为 fetch→blob 触发下载；若因 CORS/网络失败则回退到新标签打开，避免按钮变哑。
  */
-export async function downloadSong(song, filename) {
+export async function downloadSong(song?: SongIdentity | null, filename?: string): Promise<void> {
   const url = resolveSongUrl(song);
   if (!url) return;
   const name = filename || `${song?.title || 'audio'}.mp3`;
@@ -115,7 +121,7 @@ export async function downloadSong(song, filename) {
     const objectUrl = URL.createObjectURL(blob);
     triggerAnchorDownload(objectUrl, name);
     setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
-  } catch (e) {
+  } catch {
     window.open(url, '_blank', 'noopener');
   }
 }

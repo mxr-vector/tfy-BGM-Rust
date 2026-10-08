@@ -3,24 +3,29 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "TFY · 视频剪辑 BGM 音频素材库与试听平台（Vue 3 + Vite）",
+  "description": "TFY · 视频剪辑 BGM 音频素材库与试听平台（Vue 3 + TypeScript + Vite）",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vue-tsc --noEmit && vite build",
+    "type-check": "vue-tsc --noEmit",
     "preview": "vite preview",
-    "bgm:publish": "node scripts/publish_bgm.js"
+    "bgm:publish": "tsx scripts/publish_bgm.ts"
   },
   "dependencies": {
     "@lucide/vue": "^1.48.0",
     "vue": "^3.5.42"
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
     "@vitejs/plugin-vue": "^6.0.8",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
     "vite": "^8.3.0",
-    "vite-plugin-singlefile": "^2.3.3"
+    "vite-plugin-singlefile": "^2.3.3",
+    "vue-tsc": "^3.3.12"
   }
 }

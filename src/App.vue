@@ -162,12 +162,13 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { Search, X, ArrowUpDown, Music } from '@lucide/vue';
-import { useAudioPlayer } from './composables/useAudioPlayer';
-import { songKey } from './utils/songSchema';
-import { CATEGORIES, withCategoryMeta } from './utils/categories';
+import { useAudioPlayer } from './composables/useAudioPlayer.ts';
+import { songKey } from './utils/songSchema.ts';
+import { CATEGORIES, withCategoryMeta } from './utils/categories.ts';
+import type { ActiveCategory, CategoryWithCount, Song, SortOrder } from './types/bgm.ts';
 import bgmManifest from 'virtual:bgm-manifest';
 
 import Sidebar from './components/Sidebar.vue';
@@ -179,24 +180,24 @@ import PlaylistDrawer from './components/PlaylistDrawer.vue';
 const { playSong, favorites, currentSong, migrateFavorites } = useAudioPlayer();
 
 // 曲库清单由构建期扫描 public/bgm 目录生成（仅含曲名/分类/路径），
-// 分类中文名与主题色运行时从 categories.js 派生，改色不会与构建产物漂移。
-const allSongs = ref(bgmManifest.map(withCategoryMeta));
-const currentCategory = ref('all');
+// 分类中文名与主题色运行时从 categories.ts 派生，改色不会与构建产物漂移。
+const allSongs = ref<Song[]>(bgmManifest.map(withCategoryMeta));
+const currentCategory = ref<ActiveCategory>('all');
 const showFavoritesOnly = ref(false);
 const searchQuery = ref('');
-const sortBy = ref('default');
+const sortBy = ref<SortOrder>('default');
 const isQueueDrawerOpen = ref(false);
-const searchInput = ref(null);
+const searchInput = ref<HTMLInputElement | null>(null);
 
 // 列表视图拖拽排序（仅内存重排 allSongs，不做持久化）
-const dragKey = ref(null);
-const dragOverKey = ref(null);
+const dragKey = ref<string | null>(null);
+const dragOverKey = ref<string | null>(null);
 
-const onDragStart = (song) => {
+const onDragStart = (song: Song) => {
   dragKey.value = songKey(song);
 };
 
-const onDropOn = (targetSong) => {
+const onDropOn = (targetSong: Song) => {
   const fromKey = dragKey.value;
   const toKey = songKey(targetSong);
   if (!fromKey || fromKey === toKey) return;
@@ -221,18 +222,12 @@ const favCount = computed(() => {
 });
 
 // Category configurations with counts
-const categoryList = computed(() => {
-  const counts = {};
+const categoryList = computed<CategoryWithCount[]>(() => {
+  const counts: Record<string, number> = {};
   for (const s of allSongs.value) {
     counts[s.category] = (counts[s.category] || 0) + 1;
   }
-  return CATEGORIES.map(cat => ({
-    id: cat.id,
-    nameZh: cat.nameZh,
-    nameEn: cat.nameEn,
-    color: cat.color,
-    count: counts[cat.id] || 0
-  }));
+  return CATEGORIES.map(cat => ({ ...cat, count: counts[cat.id] || 0 }));
 });
 
 // Category header title
@@ -244,7 +239,7 @@ const currentHeaderTitle = computed(() => {
 });
 
 // Filtered and Sorted Songs
-const filteredSongs = computed(() => {
+const filteredSongs = computed<Song[]>(() => {
   let list = [...allSongs.value];
 
   // Category filter
@@ -262,9 +257,9 @@ const filteredSongs = computed(() => {
   if (query) {
     list = list.filter(s => {
       const matchTitle = s.title.toLowerCase().includes(query);
-      const matchCategoryZh = s.categoryZh && s.categoryZh.toLowerCase().includes(query);
-      const matchCategoryEn = s.categoryEn && s.categoryEn.toLowerCase().includes(query);
-      const matchCategoryKey = s.category && s.category.toLowerCase().includes(query);
+      const matchCategoryZh = s.categoryZh.toLowerCase().includes(query);
+      const matchCategoryEn = s.categoryEn.toLowerCase().includes(query);
+      const matchCategoryKey = s.category.toLowerCase().includes(query);
       return matchTitle || matchCategoryZh || matchCategoryEn || matchCategoryKey;
     });
   }
@@ -278,7 +273,7 @@ const filteredSongs = computed(() => {
 });
 
 // Handlers
-const handleCategorySelect = (catId) => {
+const handleCategorySelect = (catId: ActiveCategory) => {
   showFavoritesOnly.value = false;
   currentCategory.value = catId;
 };
@@ -287,7 +282,7 @@ const handleFavoritesToggle = () => {
   showFavoritesOnly.value = !showFavoritesOnly.value;
 };
 
-const handleSongPlay = (song) => {
+const handleSongPlay = (song: Song) => {
   playSong(song, filteredSongs.value);
 };
 
@@ -311,9 +306,10 @@ const resetFilters = () => {
 };
 
 // Keyboard listener for '/' search focus & Space initial start
-const handleGlobalKeyDown = (e) => {
-  const isInputActive = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target?.tagName) || e.target?.isContentEditable;
-  
+const handleGlobalKeyDown = (e: KeyboardEvent) => {
+  const target = e.target as HTMLElement | null;
+  const isInputActive = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '') || !!target?.isContentEditable;
+
   if (e.key === '/' && !isInputActive) {
     e.preventDefault();
     searchInput.value?.focus();

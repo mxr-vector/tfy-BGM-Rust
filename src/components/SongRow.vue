@@ -66,28 +66,27 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue';
 import { Play, Pause, Heart, Download } from '@lucide/vue';
-import { useAudioPlayer } from '../composables/useAudioPlayer';
-import { songKey, resolveSongUrl } from '../utils/songSchema';
+import { useAudioPlayer } from '../composables/useAudioPlayer.ts';
+import { songKey, resolveSongUrl } from '../utils/songSchema.ts';
+import type { Song } from '../types/bgm.ts';
 
-const props = defineProps({
-  song: {
-    type: Object,
-    required: true
-  },
-  index: {
-    type: Number,
-    required: true
-  }
-});
+const props = defineProps<{
+  /** 行对应的曲目 */
+  song: Song;
+  /** 当前列表中的序号（从 0 开始，展示时 +1） */
+  index: number;
+}>();
 
-const emit = defineEmits(['play']);
+const emit = defineEmits<{
+  play: [song: Song];
+}>();
 
 const { currentSong, isPlaying, favorites, toggleFavorite } = useAudioPlayer();
 
-const isCurrent = computed(() => currentSong.value && songKey(currentSong.value) === songKey(props.song));
+const isCurrent = computed(() => !!currentSong.value && songKey(currentSong.value) === songKey(props.song));
 const isFav = computed(() => favorites.value.has(songKey(props.song)));
 const audioUrl = computed(() => resolveSongUrl(props.song));
 

@@ -95,7 +95,7 @@
             </button>
 
             <!-- Previous track -->
-            <button class="control-btn" @click="prevTrack" title="上一首 (←)">
+            <button class="control-btn" @click="prevTrack()" title="上一首 (←)">
               <SkipBack class="icon" />
             </button>
 
@@ -113,7 +113,7 @@
             </button>
 
             <!-- Next track -->
-            <button class="control-btn" @click="nextTrack" title="下一首 (→)">
+            <button class="control-btn" @click="nextTrack()" title="下一首 (→)">
               <SkipForward class="icon" />
             </button>
 
@@ -195,23 +195,28 @@
 </transition>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { 
   Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, Repeat1, 
   Volume2, VolumeX, Volume1, Download, Heart, ListMusic, AlertTriangle
 } from '@lucide/vue';
-import { useAudioPlayer } from '../composables/useAudioPlayer';
-import { songKey, resolveSongUrl, downloadSong } from '../utils/songSchema';
+import { useAudioPlayer } from '../composables/useAudioPlayer.ts';
+import { songKey, resolveSongUrl, downloadSong } from '../utils/songSchema.ts';
 
-const props = defineProps({
-  showQueueDrawer: {
-    type: Boolean,
-    default: false
-  }
+/** 进度条拖拽 / 悬停同时支持鼠标与触摸 */
+type PointerEventLike = MouseEvent | TouchEvent;
+
+withDefaults(defineProps<{
+  /** 队列抽屉是否展开（仅用于按钮高亮） */
+  showQueueDrawer?: boolean;
+}>(), {
+  showQueueDrawer: false,
 });
 
-defineEmits(['toggle-queue']);
+defineEmits<{
+  'toggle-queue': [];
+}>();
 
 const {
   currentSong,
@@ -239,7 +244,7 @@ const {
   formatTime
 } = useAudioPlayer();
 
-const progressContainer = ref(null);
+const progressContainer = ref<HTMLDivElement | null>(null);
 const dragTime = ref(0);
 const hoverVisible = ref(false);
 const hoverPercent = ref(0);
@@ -250,7 +255,7 @@ const audioUrl = computed(() => resolveSongUrl(currentSong.value));
 
 const onDownload = () => {
   if (!currentSong.value) return;
-  downloadSong(currentSong.value, `${currentSong.value.title}.mp3`);
+  void downloadSong(currentSong.value, `${currentSong.value.title}.mp3`);
 };
 
 const displayCurrentTime = computed(() => {
@@ -278,20 +283,20 @@ const cycleRate = () => {
 };
 
 // Dragging logic
-const calculateTimeFromEvent = (e) => {
+const calculateTimeFromEvent = (e: PointerEventLike): number => {
   if (!progressContainer.value || !duration.value) return 0;
   const rect = progressContainer.value.getBoundingClientRect();
-  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
   const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   return ratio * duration.value;
 };
 
-const startDrag = (e) => {
+const startDrag = (e: MouseEvent) => {
   if (!duration.value) return;
   isDraggingProgress.value = true;
   dragTime.value = calculateTimeFromEvent(e);
 
-  const onMouseMove = (moveEvent) => {
+  const onMouseMove = (moveEvent: MouseEvent) => {
     dragTime.value = calculateTimeFromEvent(moveEvent);
   };
 
@@ -306,12 +311,12 @@ const startDrag = (e) => {
   window.addEventListener('mouseup', onMouseUp);
 };
 
-const startTouchDrag = (e) => {
+const startTouchDrag = (e: TouchEvent) => {
   if (!duration.value) return;
   isDraggingProgress.value = true;
   dragTime.value = calculateTimeFromEvent(e);
 
-  const onTouchMove = (moveEvent) => {
+  const onTouchMove = (moveEvent: TouchEvent) => {
     dragTime.value = calculateTimeFromEvent(moveEvent);
   };
 
@@ -326,7 +331,7 @@ const startTouchDrag = (e) => {
   window.addEventListener('touchend', onTouchEnd);
 };
 
-const handleHover = (e) => {
+const handleHover = (e: MouseEvent) => {
   if (!progressContainer.value || !duration.value) return;
   const rect = progressContainer.value.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -339,14 +344,16 @@ const hideHover = () => {
   hoverVisible.value = false;
 };
 
-const handleVolumeChange = (e) => {
-  setVolume(parseFloat(e.target.value));
+const handleVolumeChange = (e: Event) => {
+  const input = e.target as HTMLInputElement;
+  setVolume(parseFloat(input.value));
 };
 
 // Global keyboard shortcuts
-const handleKeyDown = (e) => {
+const handleKeyDown = (e: KeyboardEvent) => {
   // If user is typing or interacting with form elements, don't trigger shortcuts
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target?.tagName) || e.target?.isContentEditable) return;
+  const target = e.target as HTMLElement | null;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '') || target?.isContentEditable) return;
 
   if (e.code === 'Space') {
     e.preventDefault();

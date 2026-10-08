@@ -1,27 +1,28 @@
 # TFY · 视频剪辑 BGM 音频素材库与试听平台
 
-专为视频剪辑量身定制的高颜值背景音乐库与试听平台，采用 **Vue 3 + Vite** 构建，拥有现代化暗黑磨砂玻璃（Glassmorphism）UI、沉浸式交互与全功能音频播放器。
+专为视频剪辑量身定制的高颜值背景音乐库与试听平台，采用 **Vue 3 + TypeScript + Vite** 构建，拥有现代化暗黑磨砂玻璃（Glassmorphism）UI、沉浸式交互与全功能音频播放器。
 
 ---
 
 ## 📦 仓库结构与素材分发
 
 曲库以 **`public/bgm/` 目录本身为唯一事实来源**：文件名即曲名，不再有索引文件与元数据脚本。
-构建 / dev 期由 `vite.config.js` 直接扫描各分类目录下的 `.mp3` 生成曲目清单（`virtual:bgm-manifest`），
+构建 / dev 期由 `vite.config.ts` 直接扫描各分类目录下的 `.mp3` 生成曲目清单（`virtual:bgm-manifest`），
 因此手动替换 / 增删音频后，页面展示的曲名即刻同步，不会出现时长、作者与实际音频不匹配的情况。
 
 | 内容 | 位置 | 是否进 git |
 | :--- | :--- | :--- |
-| 分类元数据（目录名 ↔ 中文名 / 英文名 / 主题色，前端唯一事实来源） | `src/utils/categories.js` | ✅ |
-| 目录扫描器（构建期 + 发布脚本共用，含扫描结果告警） | `scripts/scan_bgm.js` | ✅ |
-| 曲目运行时工具（地址解析 / 下载） | `src/utils/songSchema.js` | ✅ |
+| 曲库共享类型（清单条目 / 曲目 / 分类，前后端与构建脚本共用） | `src/types/bgm.ts` | ✅ |
+| 分类元数据（目录名 ↔ 中文名 / 英文名 / 主题色，前端唯一事实来源） | `src/utils/categories.ts` | ✅ |
+| 目录扫描器（构建期 + 发布脚本共用，含扫描结果告警） | `scripts/scan_bgm.ts` | ✅ |
+| 曲目运行时工具（地址解析 / 下载） | `src/utils/songSchema.ts` | ✅ |
 | 分类目录占位 | `public/bgm/<分类>/.gitkeep` | ✅ |
 | 音频本体 | `public/bgm/<分类>/*.mp3` | ❌ 体积大，按需本地/云盘分发 |
 | 云盘发布产物 | `dist-bgm/` | ❌ |
 
 ```
 public/bgm/<分类>/*.mp3 ──vite 构建期扫描──▶ virtual:bgm-manifest ──▶ 前端渲染（仅曲名 + 分类）
-                       └─node scripts/publish_bgm.js─▶ dist-bgm/（打包上传云盘）
+                       └────────pnpm bgm:publish────▶ dist-bgm/（打包上传云盘）
 ```
 
 ---
@@ -116,10 +117,10 @@ pnpm build
 
 直接向对应分类目录 `public/bgm/<分类>/` 放入 / 替换 / 删除 `.mp3` 文件即可，**文件名就是页面上展示的曲名**（下划线 `_` 显示为空格）；
 `pnpm dev` 会监听 `public/bgm` 目录，改动即时刷新，生产构建则在打包时重新扫描。
-音频放入未注册目录（非 `categories.js` 中登记的 6 个分类）或 `public/bgm` 根目录时不会进曲库，构建日志会给出告警。
+音频放入未注册目录（非 `categories.ts` 中登记的 6 个分类）或 `public/bgm` 根目录时不会进曲库，构建日志会给出告警。
 
 ```bash
-# 重新扫描目录并打包云盘发布内容 -> dist-bgm/
+# 重新扫描目录并打包云盘发布内容 -> dist-bgm/（可选 -- --clean / -- --zip）
 pnpm bgm:publish
 ```
 

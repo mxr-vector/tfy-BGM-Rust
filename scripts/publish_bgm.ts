@@ -6,9 +6,9 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * 用法：
- *   node scripts/publish_bgm.js            # 生成 dist-bgm/
- *   node scripts/publish_bgm.js --clean    # 生成后删除旧产物再打包
- *   node scripts/publish_bgm.js --zip      # 额外打包成 dist-bgm.zip
+ *   pnpm bgm:publish                # 生成 dist-bgm/
+ *   pnpm bgm:publish -- --clean     # 生成后删除旧产物再打包
+ *   pnpm bgm:publish -- --zip       # 额外打包成 dist-bgm/bgm.zip
  *
  * 上传后告诉前端音频地址：
  *   构建期 VITE_BGM_BASE=https://host/public pnpm build
@@ -19,7 +19,25 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { scanBgmSongs } from './scan_bgm.js';
+import { scanBgmSongs } from './scan_bgm.ts';
+
+/** 发布清单中的单个文件校验项 */
+interface PublishedFile {
+  /** 相对 dist-bgm/public 的路径，如 bgm/cheerful/xxx.mp3 */
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+/** dist-bgm/bgm-manifest.json 的结构 */
+interface PublishManifest {
+  generatedAt: string;
+  songCount: number;
+  fileCount: number;
+  totalBytes: number;
+  totalSize: string;
+  files: PublishedFile[];
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -28,20 +46,20 @@ const SRC_DIR = path.join(rootDir, 'public', 'bgm');
 const OUT_DIR = path.join(rootDir, 'dist-bgm', 'public', 'bgm');
 const MANIFEST_PATH = path.join(rootDir, 'dist-bgm', 'bgm-manifest.json');
 
-function humanSize(bytes) {
+function humanSize(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
-function sha256(filePath) {
+function sha256(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
-function rmrf(target) {
+function rmrf(target: string): void {
   if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
 }
 
-function zipDir(cwd, outName) {
+function zipDir(cwd: string, outName: string): boolean {
   try {
     if (process.platform === 'win32') {
       console.warn('! --zip 在 Windows 下需自行打包，已跳过');
@@ -51,12 +69,12 @@ function zipDir(cwd, outName) {
     execFileSync('zip', ['-qr', `${outName}.zip`, outName], { cwd });
     return true;
   } catch (e) {
-    console.warn(`! 打包 zip 失败（未安装 zip 命令？）: ${e.message}`);
+    console.warn(`! 打包 zip 失败（未安装 zip 命令？）: ${(e as Error).message}`);
     return false;
   }
 }
 
-function run() {
+function run(): void {
   const args = process.argv.slice(2);
   const doZip = args.includes('--zip');
 
@@ -69,7 +87,7 @@ function run() {
   rmrf(OUT_DIR);
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
-  const files = [];
+  const files: PublishedFile[] = [];
 
   for (const song of songs) {
     const rel = song.url.replace(/^\/+/, '').replace(/^bgm\//, '');   // 分类/文件.mp3
@@ -83,7 +101,7 @@ function run() {
   }
 
   const totalBytes = files.reduce((n, f) => n + f.size, 0);
-  const manifest = {
+  const manifest: PublishManifest = {
     generatedAt: new Date().toISOString(),
     songCount: songs.length,
     fileCount: files.length,

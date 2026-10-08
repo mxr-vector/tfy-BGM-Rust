@@ -77,36 +77,38 @@
   </aside>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue';
-import { Disc, Music, Heart, Sparkles, Coffee, Clock, Flame, Feather, Sun } from '@lucide/vue';
-import { useAudioPlayer } from '../composables/useAudioPlayer';
+import { Disc, Music, Heart } from '@lucide/vue';
+import { useAudioPlayer } from '../composables/useAudioPlayer.ts';
+import type { ActiveCategory, CategoryWithCount } from '../types/bgm.ts';
 
-const props = defineProps({
-  categories: {
-    type: Array,
-    required: true
-  },
-  activeCategory: {
-    type: String,
-    default: 'all'
-  },
-  showFavoritesOnly: {
-    type: Boolean,
-    default: false
-  },
-  totalSongs: {
-    type: Number,
-    default: 83
-  }
+interface Props {
+  /** 侧边栏分类列表（含曲目数） */
+  categories: CategoryWithCount[];
+  /** 当前选中分类 */
+  activeCategory?: ActiveCategory;
+  /** 是否只看收藏 */
+  showFavoritesOnly?: boolean;
+  /** 曲库总数 */
+  totalSongs?: number;
+}
+
+withDefaults(defineProps<Props>(), {
+  activeCategory: 'all',
+  showFavoritesOnly: false,
+  totalSongs: 0,
 });
 
-const emit = defineEmits(['select-category', 'toggle-favorites']);
+const emit = defineEmits<{
+  'select-category': [catId: ActiveCategory];
+  'toggle-favorites': [];
+}>();
 
 const { favorites } = useAudioPlayer();
 const favCount = computed(() => favorites.value.size);
 
-const selectCategory = (catId) => {
+const selectCategory = (catId: ActiveCategory) => {
   emit('select-category', catId);
 };
 

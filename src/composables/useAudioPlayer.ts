@@ -1,19 +1,29 @@
 import { ref } from 'vue';
-import { songKey, resolveSongUrl } from '../utils/songSchema';
+import type { Ref } from 'vue';
+import { songKey, resolveSongUrl } from '../utils/songSchema.ts';
+import type { Song } from '../types/bgm.ts';
+
+/** 播放模式：顺序循环 / 单曲循环 / 随机 */
+export type PlayMode = 'sequence' | 'repeat-one' | 'shuffle';
 
 // Global singleton state
-const audio = new Audio();
-const currentSong = ref(null);
+const audio: HTMLAudioElement = new Audio();
+const currentSong: Ref<Song | null> = ref(null);
 const isPlaying = ref(false);
 const isLoading = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
+
 // Local storage volume
-const loadVolume = () => {
+const loadVolume = (): number => {
   try {
     const raw = localStorage.getItem('tfy_bgm_volume');
-    return raw !== null ? Math.max(0, Math.min(1, parseFloat(raw))) : 0.85;
-  } catch (e) {
+    if (raw === null) return 0.85;
+    const parsed = Number.parseFloat(raw);
+    // 脏值（手写 localStorage）回落默认音量，避免 NaN 传导给 audio.volume
+    if (!Number.isFinite(parsed)) return 0.85;
+    return Math.max(0, Math.min(1, parsed));
+  } catch {
     return 0.85;
   }
 };
@@ -21,8 +31,8 @@ const loadVolume = () => {
 const volume = ref(loadVolume());
 const isMuted = ref(false);
 const playbackRate = ref(1.0);
-const playMode = ref('sequence'); // 'sequence' | 'repeat-one' | 'shuffle'
-const queue = ref([]);
+const playMode: Ref<PlayMode> = ref('sequence');
+const queue: Ref<Song[]> = ref([]);
 const queueIndex = ref(-1);
 const isDraggingProgress = ref(false);
 const bufferedPercent = ref(0);
@@ -31,24 +41,26 @@ const playbackError = ref('');
 
 // Local storage favorites（存稳定 key，不用位置型 id，避免重建曲库后收藏错位）
 const FAVORITES_KEY = 'tfy_bgm_favorites';
-const loadFavorites = () => {
+const loadFavorites = (): string[] => {
   try {
     const raw = localStorage.getItem(FAVORITES_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? list : [];
-  } catch (e) {
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((k): k is string => typeof k === 'string') : [];
+  } catch {
     return [];
   }
 };
-const favorites = ref(new Set(loadFavorites()));
+const favorites: Ref<Set<string>> = ref(new Set(loadFavorites()));
 
-const saveFavorites = () => {
+const saveFavorites = (): void => {
   try {
     localStorage.setItem(FAVORITES_KEY, JSON.stringify(Array.from(favorites.value)));
-  } catch (e) {}
+  } catch {
+    /* localStorage 不可写时静默降级为会话级收藏 */
+  }
 };
 
-const toggleFavorite = (key) => {
+const toggleFavorite = (key: string): void => {
   if (!key) return;
   if (favorites.value.has(key)) {
     favorites.value.delete(key);
@@ -64,13 +76,13 @@ const toggleFavorite = (key) => {
  * 一次性升级：旧版本收藏存的是音频原始 url，这里按当前曲目表换算成稳定 key。
  * 无法映射的项（已下架 / 更早版本的数值 id）原样保留，曲目回归时自动恢复。
  */
-const migrateFavorites = (songs) => {
+const migrateFavorites = (songs: Song[]): void => {
   if (!Array.isArray(songs) || favorites.value.size === 0) return;
-  const byUrl = new Map();
+  const byUrl = new Map<string, string>();
   for (const s of songs) {
     if (s?.url) byUrl.set(s.url, songKey(s));
   }
-  const migrated = new Set();
+  const migrated = new Set<string>();
   let changed = false;
   for (const stored of favorites.value) {
     const mapped = byUrl.get(stored);
@@ -88,7 +100,7 @@ const migrateFavorites = (songs) => {
 };
 
 // Format seconds into mm:ss
-export function formatTime(seconds) {
+export function formatTime(seconds: number): string {
   if (isNaN(seconds) || seconds < 0) return '00:00';
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -96,7 +108,7 @@ export function formatTime(seconds) {
 }
 
 // Update buffered percentage
-function updateBuffered() {
+function updateBuffered(): void {
   if (audio.buffered.length > 0) {
     const dur = audio.duration || duration.value || 0;
     if (dur > 0) {
@@ -121,7 +133,7 @@ audio.addEventListener('progress', () => {
 
 audio.addEventListener('canplay', () => {
   isLoading.value = false;
-  duration.value = audio.duration || (currentSong.value?.duration) || 0;
+  duration.value = audio.duration || 0;
   updateBuffered();
 });
 
@@ -172,7 +184,7 @@ audio.addEventListener('error', (err) => {
   }
 });
 
-function handleTrackEnded() {
+function handleTrackEnded(): void {
   if (playMode.value === 'repeat-one') {
     audio.currentTime = 0;
     currentTime.value = 0;
@@ -182,7 +194,7 @@ function handleTrackEnded() {
   nextTrack(true);
 }
 
-function playSong(song, newQueue = null, forcePlay = false) {
+function playSong(song: Song, newQueue?: Song[] | null, forcePlay = false): void {
   if (!song) return;
 
   const key = songKey(song);
@@ -224,13 +236,13 @@ function playSong(song, newQueue = null, forcePlay = false) {
     .then(() => {
       isPlaying.value = true;
     })
-    .catch((e) => {
+    .catch((e: unknown) => {
       console.warn('Auto-play prevented or network issue:', e);
       isPlaying.value = false;
     });
 }
 
-function togglePlay() {
+function togglePlay(): void {
   if (!currentSong.value && queue.value.length > 0) {
     playSong(queue.value[0], null, true);
     return;
@@ -244,7 +256,7 @@ function togglePlay() {
   }
 }
 
-function seek(time) {
+function seek(time: number): void {
   // 元数据就绪前 duration 未知，此时 seek 没有有意义目标，直接忽略（进度条侧已同步禁用交互）
   if (isNaN(time) || !duration.value) return;
   const target = Math.max(0, Math.min(time, duration.value));
@@ -252,23 +264,25 @@ function seek(time) {
   audio.currentTime = target;
 }
 
-function seekPercentage(ratio) {
+function seekPercentage(ratio: number): void {
   if (!duration.value) return;
   const target = ratio * duration.value;
   seek(target);
 }
 
-function setVolume(v) {
+function setVolume(v: number): void {
   const val = Math.max(0, Math.min(1, v));
   volume.value = val;
   try {
     localStorage.setItem('tfy_bgm_volume', String(val));
-  } catch (e) {}
+  } catch {
+    /* 忽略持久化失败 */
+  }
   if (val > 0) isMuted.value = false;
   audio.volume = isMuted.value ? 0 : val;
 }
 
-function toggleMute() {
+function toggleMute(): void {
   isMuted.value = !isMuted.value;
   if (!isMuted.value && volume.value === 0) {
     setVolume(0.5);
@@ -277,18 +291,18 @@ function toggleMute() {
   }
 }
 
-function setPlaybackRate(rate) {
+function setPlaybackRate(rate: number): void {
   playbackRate.value = rate;
   audio.playbackRate = rate;
 }
 
-function togglePlayMode() {
-  const modes = ['sequence', 'repeat-one', 'shuffle'];
+function togglePlayMode(): void {
+  const modes: PlayMode[] = ['sequence', 'repeat-one', 'shuffle'];
   const nextIdx = (modes.indexOf(playMode.value) + 1) % modes.length;
   playMode.value = modes[nextIdx];
 }
 
-function nextTrack(forcePlay = true) {
+function nextTrack(forcePlay = true): void {
   if (queue.value.length === 0) return;
 
   if (queue.value.length === 1) {
@@ -299,7 +313,7 @@ function nextTrack(forcePlay = true) {
     }
     return;
   }
-  
+
   if (playMode.value === 'shuffle') {
     let nextIdx;
     do {
@@ -318,9 +332,9 @@ function nextTrack(forcePlay = true) {
   playSong(queue.value[nextIdx], null, forcePlay);
 }
 
-function prevTrack(forcePlay = true) {
+function prevTrack(forcePlay = true): void {
   if (queue.value.length === 0) return;
-  
+
   // If playing more than 3s, replay current track
   if (audio.currentTime > 3) {
     seek(0);
@@ -346,9 +360,9 @@ function prevTrack(forcePlay = true) {
   playSong(queue.value[prevIdx], null, forcePlay);
 }
 
-function removeFromQueue(index) {
+function removeFromQueue(index: number): void {
   if (index < 0 || index >= queue.value.length) return;
-  
+
   const isCurrent = queueIndex.value === index;
   queue.value.splice(index, 1);
 
@@ -370,7 +384,7 @@ function removeFromQueue(index) {
   }
 }
 
-function clearQueue() {
+function clearQueue(): void {
   audio.pause();
   queue.value = [];
   queueIndex.value = -1;
@@ -380,7 +394,7 @@ function clearQueue() {
   isPlaying.value = false;
 }
 
-function addToQueue(song) {
+function addToQueue(song: Song): void {
   if (!song) return;
   const key = songKey(song);
   if (!queue.value.some(s => songKey(s) === key)) {

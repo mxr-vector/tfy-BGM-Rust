@@ -50,38 +50,56 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue';
+import type { Component } from 'vue';
 import { Play, Shuffle, Sparkles, Coffee, Clock, Flame, Feather, Sun, Music, Heart } from '@lucide/vue';
-import { CATEGORY_MAP } from '../utils/categories';
+import { CATEGORY_MAP } from '../utils/categories.ts';
+import type { CategoryId } from '../types/bgm.ts';
 
-const props = defineProps({
-  category: {
-    type: String,
-    default: 'all'
-  },
-  showFavoritesOnly: {
-    type: Boolean,
-    default: false
-  },
-  count: {
-    type: Number,
-    default: 83
-  }
+interface Props {
+  /** 当前分类（决定横幅文案与主题色） */
+  category?: CategoryId | 'all';
+  /** 只看收藏时改挂收藏夹文案 */
+  showFavoritesOnly?: boolean;
+  /** 当前筛选结果曲目数 */
+  count?: number;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  category: 'all',
+  showFavoritesOnly: false,
+  count: 0,
 });
 
-defineEmits(['play-all', 'shuffle-play']);
+defineEmits<{
+  'play-all': [];
+  'shuffle-play': [];
+}>();
 
-// 横幅专属文案（title / description / 图标）；分类 id、主题色、英文名以 categories.js 为准，
+/** 横幅最终渲染所需的信息 */
+interface HeroInfo {
+  title: string;
+  labelEn: string;
+  color: string;
+  description: string;
+  iconComponent: Component;
+}
+
+/** 分类专属文案：labelEn / color 由 categories.ts 提供，不在此重复登记 */
+type HeroCopy = Pick<HeroInfo, 'title' | 'description' | 'iconComponent'>;
+
+// 横幅专属文案（title / description / 图标）；分类 id、主题色、英文名以 categories.ts 为准，
 // 与侧边栏 / 曲目行 / 播放器保持同一来源。
-const CATEGORY_META = {
-  all: {
-    title: '全部精选视频剪辑 BGM',
-    labelEn: 'ALL BGM SOUNDTRACKS',
-    color: '#6366f1',
-    iconComponent: Music,
-    description: '汇集欢快、独处、回忆、史诗、古风、乡村等 6 大分类优质背景音乐，覆盖 Vlog、宣传片、故事片、卡点等全场景剪辑需求。'
-  },
+const ALL_HERO: HeroInfo = {
+  title: '全部精选视频剪辑 BGM',
+  labelEn: 'ALL BGM SOUNDTRACKS',
+  color: '#6366f1',
+  iconComponent: Music,
+  description: '汇集欢快、独处、回忆、史诗、古风、乡村等 6 大分类优质背景音乐，覆盖 Vlog、宣传片、故事片、卡点等全场景剪辑需求。'
+};
+
+const CATEGORY_META: Record<CategoryId, HeroCopy> = {
   cheerful: {
     title: '欢快节奏 · Cheerful & Upbeat',
     iconComponent: Sparkles,
@@ -114,7 +132,7 @@ const CATEGORY_META = {
   }
 };
 
-const activeCatInfo = computed(() => {
+const activeCatInfo = computed<HeroInfo>(() => {
   if (props.showFavoritesOnly) {
     return {
       title: '我的收藏夹 · Favorite Tracks',
@@ -124,11 +142,11 @@ const activeCatInfo = computed(() => {
       description: '你标记喜欢的配乐都在这里，方便在剪辑过程中随时试听与下载使用。'
     };
   }
+  if (props.category === 'all') return ALL_HERO;
+  // 「全部」横幅不挂分类，其余分类的主题色 / 英文标语统一取自 categories.ts
   const local = CATEGORY_META[props.category];
-  if (!local) return CATEGORY_META.all;
-  if (local.color) return local;   // 「全部」横幅不挂分类，保留自带颜色 / 英文名
-  const cat = CATEGORY_MAP[props.category];
-  return { ...cat, ...local };
+  if (!local) return ALL_HERO;
+  return { ...CATEGORY_MAP[props.category], ...local };
 });
 </script>
 
