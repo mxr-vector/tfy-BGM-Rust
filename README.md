@@ -17,7 +17,7 @@
 | 目录扫描器（构建期 + 发布脚本共用，含扫描结果告警） | `scripts/scan_bgm.ts` | ✅ |
 | 曲目运行时工具（地址解析 / 下载） | `src/utils/songSchema.ts` | ✅ |
 | 分类目录占位 | `public/bgm/<分类>/.gitkeep` | ✅ |
-| 音频本体 | `public/bgm/<分类>/*.mp3` | ❌ 体积大，按需本地/云盘分发 |
+| 音频本体 | `public/bgm/<分类>/*.mp3` | ✅ 随仓库入库 |
 | 云盘发布产物 | `dist-bgm/` | ❌ |
 
 ```
@@ -138,7 +138,7 @@ pnpm bgm:publish
 
 ### 5. 音频地址（云盘分发）
 
-音频本体不进 git，三种部署方式：
+音频本体随仓库入库，三种部署方式：
 
 1. **音频随应用一起上线**：把 `dist-bgm/public/bgm` 拷进 `dist/`，无需额外配置（走 Vite `BASE_URL`）。
 2. **云盘目录直链**：`VITE_BGM_BASE=https://host/public pnpm build`，只部署 `dist/` 里的应用本体。

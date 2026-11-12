@@ -27,12 +27,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# 音频素材不进 git（体积大），本地/云盘分发均可；构建期由 vite 直接扫描
-# public/bgm/<分类>/*.mp3 的曲名生成清单（无索引文件），替换 / 增删 mp3 即刻生效。
-# 各分类目录以 .gitkeep 占位入库，克隆后按目录放入音频即可。
-public/bgm/**
-!public/bgm/*/
-!public/bgm/*/.gitkeep
+# public/bgm/<分类>/*.mp3 随仓库入库；构建期由 vite 直接扫描目录生成清单（无索引文件）
 
 # 云盘发布产物
 dist-bgm/
