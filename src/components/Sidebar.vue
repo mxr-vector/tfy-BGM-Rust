@@ -72,7 +72,7 @@
         </div>
         <span class="status-percent">{{ totalSongs }} 首</span>
       </div>
-      <p class="status-detail">构建期由 public/bgm 目录扫描生成，音频本体随本地/云盘分发</p>
+      <p class="status-detail">构建期由 public/bgm 目录扫描生成，音频本体随仓库入库</p>
     </div>
   </aside>
 </template>
