@@ -1,0 +1,15 @@
+[package]
+name = "tfy-bgm-gpui"
+version = "0.1.0"
+edition = "2024"
+description = "听风吟 BGM 曲库的 GPUI 桌面客户端"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bgm-core = { path = "core" }
+dirs = "6"
+gpui = "0.2.2"
+rodio = "0.23"
+unicode-segmentation = "1"
