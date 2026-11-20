@@ -13,6 +13,7 @@
 # CodeGraph tooling
 .codegraph/
 .workbuddy/
+
 # 曲库软删除回收站
 /bgm/.tfy-trash/
 
