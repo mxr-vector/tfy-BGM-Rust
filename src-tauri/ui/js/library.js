@@ -160,6 +160,10 @@ export function initLibraryUI() {
     btnClearSearch: $('btn-clear-search'),
     btnClearSearch2: $('btn-clear-search-2'),
     sortSelect: $('sort-select'),
+    sortValue: $('sort-value'),
+    btnSort: $('btn-sort'),
+    sortMenu: $('sort-menu'),
+    sortCurrentIcon: $('sort-current-icon'),
     warningBanner: $('warning-banner'),
     hero: $('hero'),
     resultsTitle: $('results-title'),
@@ -185,7 +189,94 @@ export function initLibraryUI() {
     const category = tab ? categoryById(tab.dataset.categoryId) : null;
     openCategoryMenu(event, category);
   });
-  els.sortSelect.addEventListener('change', () => setSortBy(els.sortSelect.value));
+  const updateSortUi = (val) => {
+    const isName = val === 'name';
+    if (els.sortValue) {
+      els.sortValue.textContent = isName ? '按曲名 A–Z' : '默认推荐';
+    }
+    if (els.sortCurrentIcon) {
+      setIcon(els.sortCurrentIcon, isName ? 'sort-az' : 'sort');
+    }
+    if (els.sortSelect) {
+      els.sortSelect.value = val;
+    }
+    if (els.sortMenu) {
+      for (const item of els.sortMenu.querySelectorAll('.sort-menu-item')) {
+        const active = item.dataset.sort === val;
+        item.classList.toggle('is-active', active);
+        item.setAttribute('aria-selected', String(active));
+      }
+    }
+  };
+
+  const closeSortMenu = () => {
+    if (!els.sortMenu || els.sortMenu.hidden) return;
+    els.sortMenu.hidden = true;
+    els.btnSort?.classList.remove('is-open');
+    els.btnSort?.setAttribute('aria-expanded', 'false');
+  };
+
+  const openSortMenu = () => {
+    if (!els.sortMenu) return;
+    closeContextMenu();
+    els.sortMenu.hidden = false;
+    els.btnSort?.classList.add('is-open');
+    els.btnSort?.setAttribute('aria-expanded', 'true');
+    const active =
+      els.sortMenu.querySelector('.sort-menu-item.is-active') ??
+      els.sortMenu.querySelector('.sort-menu-item');
+    active?.focus();
+  };
+
+  els.btnSort?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (els.sortMenu?.hidden) openSortMenu();
+    else closeSortMenu();
+  });
+
+  els.sortMenu?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const item = event.target.closest('.sort-menu-item');
+    if (!item) return;
+    const val = item.dataset.sort;
+    if (val && val !== state.sortBy) {
+      setSortBy(val);
+      updateSortUi(val);
+    }
+    closeSortMenu();
+    els.btnSort?.focus();
+  });
+
+  els.sortMenu?.addEventListener('keydown', (event) => {
+    const items = Array.from(els.sortMenu.querySelectorAll('.sort-menu-item'));
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      const next = items[(index + 1) % items.length];
+      next?.focus();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      const prev = items[(index - 1 + items.length) % items.length];
+      prev?.focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSortMenu();
+      els.btnSort?.focus();
+    }
+  });
+
+  document.addEventListener('click', closeSortMenu);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && els.sortMenu && !els.sortMenu.hidden) {
+      closeSortMenu();
+      els.btnSort?.focus();
+    }
+  });
+
+  els.sortSelect?.addEventListener('change', () => {
+    setSortBy(els.sortSelect.value);
+    updateSortUi(els.sortSelect.value);
+  });
   els.searchInput.addEventListener('input', () => {
     setSearch(els.searchInput.value);
   });
@@ -311,6 +402,7 @@ export function initLibraryUI() {
     renderHero();
     renderResults();
     renderList();
+    updateSortUi(state.sortBy);
   });
   on(EVENTS.search, () => {
     updateSearchUi();
@@ -327,7 +419,7 @@ export function initLibraryUI() {
   on(EVENTS.queue, renderQueueNav);
   on(EVENTS.player, renderList);
 
-  els.sortSelect.value = state.sortBy;
+  updateSortUi(state.sortBy);
   renderAll();
 }
 

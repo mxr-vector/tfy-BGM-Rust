@@ -94,6 +94,8 @@ impl AppState {
         if let Some(warning) = prefs_warning {
             warnings.push(warning);
         }
+        // 首屏就要显示自定义壁纸，启动阶段先把文件加进 asset 白名单。
+        crate::wallpapers::prime_custom(app, prefs.custom_wallpaper.as_deref());
 
         let categories_path = config_dir.join(CATEGORIES_FILE);
         let (categories, categories_warning) = Categories::load(&categories_path);

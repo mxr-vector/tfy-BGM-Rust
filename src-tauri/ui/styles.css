@@ -36,6 +36,12 @@
 
   --shadow-md: 0 12px 32px -16px rgba(0, 0, 0, 0.6);
   --shadow-lg: 0 28px 64px -24px rgba(0, 0, 0, 0.78);
+
+  /* 壁纸主题下的面板底色（RGB 分量，便于配合不同透明度使用）。 */
+  --panel-rgb: 12, 26, 21;
+  --panel-opacity: 0.72;
+  --wall-mask-opacity: 0.75;
+  --panel-blur: 20px;
 }
 
 * {
@@ -163,7 +169,7 @@ select:focus-visible,
   pointer-events: none;
   background: radial-gradient(
     1200px 260px at 50% 100%,
-    rgba(25, 217, 139, 0.045),
+    var(--wall-glow, rgba(25, 217, 139, 0.045)),
     transparent 70%
   );
 }
@@ -407,23 +413,44 @@ select:focus-visible,
   height: 15px;
 }
 
+.sort-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
 .sort-box {
-  display: flex;
+  position: relative;
+  display: inline-flex;
   align-items: center;
   gap: 7px;
   height: 36px;
-  padding: 0 9px 0 11px;
+  padding: 0 11px;
   border-radius: var(--radius-btn);
-  background: rgba(255, 255, 255, 0.035);
+  background: var(--surface);
   border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   color: var(--text-2);
   cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
+  user-select: none;
 }
 
 .sort-box:hover {
   border-color: var(--line-strong);
   background: var(--hover);
+  color: var(--text);
+}
+
+.sort-box:focus-visible,
+.sort-box.is-open {
+  border-color: rgba(25, 217, 139, 0.5);
+  background: var(--surface-2);
+  box-shadow: 0 0 0 2px rgba(111, 243, 188, 0.28);
+  color: var(--text);
+}
+
+.sort-box:active {
+  transform: translateY(1px);
 }
 
 .sort-icon,
@@ -432,29 +459,140 @@ select:focus-visible,
   width: 14px;
   height: 14px;
   color: var(--text-3);
+  pointer-events: none;
+  transition: color 0.14s ease;
 }
 
 .sort-caret {
   width: 13px;
   height: 13px;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.14s ease;
+}
+
+.sort-box:hover .sort-icon,
+.sort-box:hover .sort-caret,
+.sort-box:focus-visible .sort-icon,
+.sort-box:focus-visible .sort-caret,
+.sort-box.is-open .sort-icon,
+.sort-box.is-open .sort-caret {
+  color: var(--accent-bright);
+}
+
+.sort-box.is-open .sort-caret {
+  transform: rotate(180deg);
+}
+
+.sort-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: inherit;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 下拉菜单面板 */
+.sort-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1250;
+  min-width: 156px;
+  padding: 5px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: linear-gradient(180deg, rgba(16, 34, 28, 0.98) 0%, rgba(9, 21, 16, 0.98) 100%);
+  box-shadow:
+    0 18px 40px -12px rgba(0, 0, 0, 0.88),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(22px) saturate(130%);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: sortMenuIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes sortMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.sort-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  user-select: none;
+}
+
+.sort-menu-item:hover,
+.sort-menu-item:focus-visible {
+  background: rgba(25, 217, 139, 0.10);
+  border-color: rgba(25, 217, 139, 0.18);
+  color: var(--text);
+  outline: none;
+}
+
+.sort-menu-item.is-active {
+  background: rgba(25, 217, 139, 0.14);
+  border-color: rgba(25, 217, 139, 0.28);
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+.sort-menu-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  transition: color 0.12s ease;
+}
+
+.sort-menu-item:hover .sort-menu-icon,
+.sort-menu-item.is-active .sort-menu-icon {
+  color: var(--accent-bright);
+}
+
+.sort-menu-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.sort-menu-check {
+  display: inline-flex;
+  width: 13px;
+  height: 13px;
+  color: var(--accent-bright);
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  flex-shrink: 0;
+}
+
+.sort-menu-item.is-active .sort-menu-check {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .sort-select {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--text-2);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  padding-right: 2px;
-}
-
-.sort-select option {
-  background: #10241d;
-  color: var(--text);
+  display: none;
 }
 
 .top-divider {
@@ -484,6 +622,19 @@ select:focus-visible,
   color: var(--text);
   background: var(--hover);
   border-color: var(--line);
+}
+
+/* 已启用非默认壁纸时，顶栏的调色板按钮保持高亮，便于再次调整。 */
+.icon-tool.is-active {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border-color: rgba(25, 217, 139, 0.22);
+}
+
+.icon-tool.is-active:hover:not(:disabled) {
+  color: var(--accent-bright);
+  background: rgba(25, 217, 139, 0.18);
+  border-color: rgba(25, 217, 139, 0.34);
 }
 
 /* ============================================================
@@ -1461,7 +1612,7 @@ input[type="checkbox"]:indeterminate::after {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  padding: 6px 0 10px;
+  padding: 6px 0 28px;
 }
 
 .song-row {
@@ -3138,4 +3289,582 @@ input[type="checkbox"]:indeterminate::after {
   .audio-player.is-playing .track-cover::after {
     animation: none;
   }
+}
+
+/* ============================================================
+   Wallpaper —— 渐变主题 / 静态图 / MP4 动态壁纸 / 自定义文件
+   ============================================================ */
+
+.wallpaper-media {
+  position: absolute;
+  inset: 0;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* 渐变主题下这一层必须透明，否则会盖住 .app-shell 的渐变底色。 */
+  background: transparent;
+}
+
+.wallpaper-media.has-media {
+  background: #04100c;
+}
+
+.wallpaper-media img,
+.wallpaper-media video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: var(--wallpaper-fit, cover);
+  object-position: center;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  filter: brightness(0.92) saturate(1.04);
+}
+
+.wallpaper-media .is-ready {
+  opacity: 1;
+}
+
+/* 压暗 + 上下渐隐：动态响应透明度滑块调节，避免雪山等高亮壁纸冲掉文字。 */
+.wallpaper-media.has-media::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(4, 9, 12, 0.28) 0%,
+      rgba(4, 9, 12, 0.06) 38%,
+      rgba(4, 9, 12, 0.36) 100%
+    );
+  opacity: var(--wall-mask-opacity, 0.25);
+  transition: opacity 0.2s ease;
+}
+
+/* 内置壁纸与自定义壁纸：底色使用中性深色调，避免墨绿原色盖住壁纸真实色彩。 */
+.app-shell.wall-builtin-1,
+.app-shell.wall-builtin-2,
+.app-shell.wall-custom {
+  --panel-rgb: 8, 14, 18;
+  background: #04090c;
+}
+
+.app-shell.has-wallpaper::after {
+  display: none;
+}
+
+.app-shell.wall-gradient-blue {
+  --wall-glow: rgba(88, 170, 255, 0.12);
+  --panel-rgb: 10, 27, 48;
+  background:
+    radial-gradient(1200px 780px at 82% -10%, rgba(76, 166, 255, 0.5), transparent 58%),
+    radial-gradient(920px 620px at -6% 106%, rgba(38, 100, 210, 0.5), transparent 62%),
+    linear-gradient(165deg, #11406e 0%, #0a2038 48%, #050d17 100%);
+}
+
+.app-shell.wall-gradient-green {
+  --wall-glow: rgba(25, 217, 139, 0.12);
+  --panel-rgb: 8, 30, 21;
+  background:
+    radial-gradient(1200px 780px at 84% -10%, rgba(34, 226, 158, 0.34), transparent 58%),
+    radial-gradient(920px 620px at -6% 106%, rgba(12, 130, 92, 0.5), transparent 62%),
+    linear-gradient(165deg, #0f3f2c 0%, #081e15 50%, #040d09 100%);
+}
+
+.app-shell.wall-gradient-red {
+  --wall-glow: rgba(255, 122, 122, 0.12);
+  --panel-rgb: 38, 15, 22;
+  background:
+    radial-gradient(1200px 780px at 84% -10%, rgba(244, 92, 108, 0.42), transparent 58%),
+    radial-gradient(920px 620px at -6% 106%, rgba(150, 30, 64, 0.5), transparent 62%),
+    linear-gradient(165deg, #45151f 0%, #22090f 50%, #0d0407 100%);
+}
+
+/* 有壁纸时面板动态响应透明度调节，让底层颜色 / 画面透出来，但仍保持文字对比度。 */
+.app-shell.has-wallpaper .topbar {
+  background: linear-gradient(
+    180deg,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.72)) 0%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.48)) 100%
+  );
+}
+
+.app-shell.has-wallpaper .sort-box {
+  background: rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.55));
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
+.app-shell.has-wallpaper .sort-box:hover,
+.app-shell.has-wallpaper .sort-box.is-open {
+  background: rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.75));
+  border-color: rgba(25, 217, 139, 0.45);
+}
+
+.app-shell.has-wallpaper .sidebar {
+  background: linear-gradient(
+    180deg,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.5)) 0%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.2)) 100%
+  );
+}
+
+.app-shell.has-wallpaper .category-hero {
+  background: linear-gradient(
+    94deg,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.28)) 0%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.16)) 50%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.08)) 100%
+  );
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.app-shell.has-wallpaper .category-hero::after {
+  display: none;
+}
+
+.app-shell.has-wallpaper .hero-art {
+  display: none;
+}
+
+.app-shell.has-wallpaper .songs-table {
+  background: linear-gradient(
+    180deg,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.08)) 0%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.16)) 100%
+  );
+  backdrop-filter: var(--table-blur, none);
+  -webkit-backdrop-filter: var(--table-blur, none);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.app-shell.has-wallpaper .songs-table::after {
+  opacity: 0.4;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.35)) 100%
+  );
+}
+
+/* 壁纸模式下，原本靠深色底衬托的小控件要自带底衬，否则压在明亮画面上会看不清。 */
+.app-shell.has-wallpaper .filter-chip {
+  background: rgba(var(--panel-rgb), 0.68);
+  border-color: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.app-shell.has-wallpaper .filter-chip:hover {
+  background: rgba(var(--panel-rgb), 0.82);
+}
+
+.app-shell.has-wallpaper .filter-chip.is-active {
+  background: linear-gradient(180deg, #2fe7a0 0%, #19d98b 100%);
+  border-color: transparent;
+}
+
+.app-shell.has-wallpaper .table-header {
+  background: rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.22));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #8da49a;
+}
+
+.app-shell.has-wallpaper .song-row:hover {
+  background: rgba(255, 255, 255, 0.065);
+}
+
+.app-shell.has-wallpaper .song-row.is-current {
+  background: linear-gradient(90deg, rgba(25, 217, 139, 0.18) 0%, rgba(25, 217, 139, 0.04) 100%);
+}
+
+.app-shell.has-wallpaper .results-title,
+.app-shell.has-wallpaper .results-count,
+.app-shell.has-wallpaper .legend,
+.app-shell.has-wallpaper .side-status {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+.app-shell.has-wallpaper .row-title {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+.app-shell.has-wallpaper .results-count {
+  color: #a9bdb3;
+}
+
+.app-shell.has-wallpaper .side-status {
+  background: rgba(var(--panel-rgb), 0.66);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.app-shell.has-wallpaper .player-wrapper {
+  background:
+    radial-gradient(70% 180% at 18% 0%, rgba(25, 217, 139, 0.05), transparent 60%),
+    linear-gradient(
+      180deg,
+      rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.70)) 0%,
+      rgba(var(--panel-rgb), calc(var(--panel-opacity, 0.72) * 0.80)) 100%
+    );
+  backdrop-filter: var(--table-blur, none);
+  -webkit-backdrop-filter: var(--table-blur, none);
+}
+
+/* ------------------------- 选择弹层 ------------------------- */
+
+.wallpaper-popover {
+  position: fixed;
+  z-index: 1300;
+  width: 356px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  width: 356px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: linear-gradient(180deg, rgba(16, 34, 28, 0.98) 0%, rgba(8, 19, 15, 0.98) 100%);
+  box-shadow:
+    0 30px 64px -24px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(26px) saturate(130%);
+  -webkit-backdrop-filter: blur(26px) saturate(130%);
+  animation: wallpaperIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes wallpaperIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.wallpaper-pop-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 4px 10px;
+}
+
+.wallpaper-pop-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wallpaper-pop-title strong {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.wallpaper-pop-title span {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.wallpaper-pop-icon {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  color: var(--text-3);
+  opacity: 0.75;
+}
+
+.wallpaper-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.wallpaper-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.028);
+  text-align: left;
+}
+
+.wallpaper-option:hover {
+  background: rgba(25, 217, 139, 0.09);
+  border-color: rgba(25, 217, 139, 0.2);
+}
+
+.wallpaper-option.is-active {
+  background: rgba(25, 217, 139, 0.13);
+  border-color: rgba(25, 217, 139, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(25, 217, 139, 0.12);
+}
+
+.wallpaper-preview {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 32px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #0a1712;
+}
+
+.wallpaper-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.preview-default {
+  background:
+    radial-gradient(120% 120% at 82% 0%, rgba(25, 217, 139, 0.28), transparent 60%),
+    linear-gradient(160deg, #0b2018, #06120d);
+}
+
+.preview-blue {
+  background:
+    radial-gradient(120% 120% at 82% 0%, rgba(86, 170, 255, 0.55), transparent 62%),
+    linear-gradient(160deg, #0a2a4d, #050d18);
+}
+
+.preview-green {
+  background:
+    radial-gradient(120% 120% at 82% 0%, rgba(40, 220, 160, 0.5), transparent 62%),
+    linear-gradient(160deg, #0a3021, #04120c);
+}
+
+.preview-red {
+  background:
+    radial-gradient(120% 120% at 82% 0%, rgba(255, 110, 120, 0.52), transparent 62%),
+    linear-gradient(160deg, #3a0d18, #12050a);
+}
+
+.wallpaper-preview.is-custom {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.wallpaper-preview .preview-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-3);
+}
+
+.wallpaper-preview.is-video .preview-icon {
+  color: var(--accent);
+}
+
+.wallpaper-badge {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 5px;
+  background: rgba(4, 12, 9, 0.72);
+  color: #ffffff;
+}
+
+.wallpaper-badge [data-icon] {
+  width: 9px;
+  height: 9px;
+}
+
+.wallpaper-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  /* 勾选徽标绝对定位在卡片右上角，文字不必再为它让位太多。 */
+  padding-right: 12px;
+}
+
+.wallpaper-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wallpaper-desc {
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wallpaper-option.is-active .wallpaper-desc {
+  color: #93e7c2;
+}
+
+.wallpaper-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.14s ease;
+}
+
+.wallpaper-check [data-icon] {
+  width: 14px;
+  height: 14px;
+}
+
+.wallpaper-option.is-active .wallpaper-check {
+  opacity: 1;
+}
+
+.wallpaper-pop-foot {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wallpaper-option-custom {
+  width: 100%;
+}
+
+.wallpaper-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px;
+}
+
+.wallpaper-control-group,
+.wallpaper-opacity-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 2px;
+}
+
+.wallpaper-control-head,
+.wallpaper-opacity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.wallpaper-control-label,
+.wallpaper-opacity-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.wallpaper-control-val,
+.wallpaper-opacity-val {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.wallpaper-fit-tabs {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 2px;
+}
+
+.wallpaper-fit-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+}
+
+.wallpaper-fit-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.wallpaper-fit-btn.is-active {
+  background: var(--accent);
+  color: #04120c;
+  font-weight: 650;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.wallpaper-slider-track {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.slider-hint {
+  font-size: 10.5px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.wallpaper-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+  cursor: pointer;
+}
+
+.wallpaper-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.wallpaper-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
 }

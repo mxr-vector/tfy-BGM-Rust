@@ -45,15 +45,33 @@
           <button type="button" class="toolbar-btn" id="btn-import" title="导入本地 MP3 到曲库">
             <span data-icon="upload"></span><span class="toolbar-label">导入音乐</span>
           </button>
-          <label class="sort-box" title="切换排序方式">
-            <span class="sort-icon" data-icon="sort"></span>
-            <select id="sort-select" class="sort-select">
+          <div class="sort-wrapper">
+            <button type="button" class="sort-box" id="btn-sort" aria-haspopup="listbox" aria-expanded="false" title="切换排序方式">
+              <span class="sort-icon" data-icon="sort" id="sort-current-icon"></span>
+              <span class="sort-value" id="sort-value">默认推荐</span>
+              <span class="sort-caret" data-icon="chevron-down"></span>
+            </button>
+            <div class="sort-menu" id="sort-menu" role="listbox" hidden>
+              <button type="button" class="sort-menu-item is-active" data-sort="default" role="option" aria-selected="true">
+                <span class="sort-menu-icon" data-icon="sparkles"></span>
+                <span class="sort-menu-label">默认推荐</span>
+                <span class="sort-menu-check" data-icon="check"></span>
+              </button>
+              <button type="button" class="sort-menu-item" data-sort="name" role="option" aria-selected="false">
+                <span class="sort-menu-icon" data-icon="sort-az"></span>
+                <span class="sort-menu-label">按曲名 A–Z</span>
+                <span class="sort-menu-check" data-icon="check"></span>
+              </button>
+            </div>
+            <select id="sort-select" class="sort-select" aria-label="排序方式" hidden>
               <option value="default">默认推荐</option>
               <option value="name">按曲名 A–Z</option>
             </select>
-            <span class="sort-caret" data-icon="chevron-down"></span>
-          </label>
+          </div>
           <span class="top-divider" aria-hidden="true"></span>
+          <button type="button" class="icon-tool" id="btn-wallpaper" title="界面壁纸" aria-label="界面壁纸" aria-haspopup="dialog" aria-expanded="false">
+            <span data-icon="palette"></span>
+          </button>
           <button type="button" class="icon-tool" id="btn-config" title="打开应用配置 config.json" aria-label="打开应用配置">
             <span data-icon="settings"></span>
           </button>

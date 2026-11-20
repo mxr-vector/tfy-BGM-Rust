@@ -9,6 +9,7 @@
 
 # 二进制资源，禁止任何换行转换。
 *.mp3 binary
+*.mp4 binary
 *.png binary
 *.jpg binary
 *.jpeg binary

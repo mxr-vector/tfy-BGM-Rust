@@ -13,6 +13,7 @@ export const EVENTS = Object.freeze({
   selection: 'selection',
   player: 'player',
   queue: 'queue',
+  wallpaper: 'wallpaper',
   error: 'error',
 });
 
@@ -34,6 +35,8 @@ export const COMMANDS = Object.freeze({
   updateTrack: 'update_track',
   moveTracks: 'move_tracks',
   deleteTracks: 'delete_tracks',
+  builtinWallpapers: 'builtin_wallpapers',
+  chooseWallpaperFile: 'choose_wallpaper_file',
 });
 
 /** 与 Rust `PlayMode` 的 kebab-case 序列化保持一致。 */

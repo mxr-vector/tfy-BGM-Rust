@@ -1,4 +1,4 @@
-//! 用户偏好：收藏、音量、倍速、播放模式与排序。
+//! 用户偏好：收藏、音量、倍速、播放模式、排序与界面壁纸。
 //!
 //! 所有来自前端的数据都会经过 `normalize`，落盘采用「临时文件 + 重命名」，
 //! 损坏的偏好文件回退为默认值而不是让应用启动失败。
@@ -16,6 +16,37 @@ use crate::persist::{PersistError, write_json};
 pub const PREFS_VERSION: u32 = 1;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
+pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
+/// 未选择壁纸时的默认样式（沿用应用自身的墨绿底色）。
+pub const DEFAULT_WALLPAPER: &str = "default";
+/// 界面透明度默认值（0.0 ~ 1.0，0.0 为完全实底，1.0 为最大通透）。
+pub const DEFAULT_WALLPAPER_OPACITY: f32 = 0.35;
+/// 界面毛玻璃模糊默认值（px，0 为完全不模糊）。
+pub const DEFAULT_WALLPAPER_BLUR: u32 = 0;
+/// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
+pub const DEFAULT_WALLPAPER_FIT: &str = "cover";
+/// 内置壁纸选项的合法 id；`custom` 需要搭配自定义文件路径才生效。
+pub const BUILTIN_WALLPAPER_IDS: [&str; 5] = [
+    "gradient-blue",
+    "gradient-green",
+    "gradient-red",
+    "builtin-1",
+    "builtin-2",
+];
+
+/// 自定义壁纸路径是否带受支持的扩展名（不检查文件是否存在，由调用方决定）。
+pub fn is_wallpaper_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            WALLPAPER_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,6 +76,16 @@ pub struct Prefs {
     pub playback_rate: f32,
     pub play_mode: PlayMode,
     pub sort_by: SortBy,
+    /// 当前界面壁纸 id：`default`、三个渐变色、两个内置资源或 `custom`。
+    pub wallpaper: String,
+    /// 上一次使用的自定义壁纸绝对路径，切换回内置壁纸后仍保留。
+    pub custom_wallpaper: Option<String>,
+    /// 界面透明度（0.0 ~ 1.0，0.0 为完全实底，1.0 为最大通透）。
+    pub wallpaper_opacity: f32,
+    /// 界面毛玻璃模糊半径（0 ~ 20 px）。
+    pub wallpaper_blur: u32,
+    /// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
+    pub wallpaper_fit: String,
 }
 
 impl Default for Prefs {
@@ -58,6 +99,11 @@ impl Default for Prefs {
             playback_rate: 1.0,
             play_mode: PlayMode::Sequence,
             sort_by: SortBy::Default,
+            wallpaper: DEFAULT_WALLPAPER.to_owned(),
+            custom_wallpaper: None,
+            wallpaper_opacity: DEFAULT_WALLPAPER_OPACITY,
+            wallpaper_blur: DEFAULT_WALLPAPER_BLUR,
+            wallpaper_fit: DEFAULT_WALLPAPER_FIT.to_owned(),
         }
     }
 }
@@ -106,6 +152,34 @@ impl Prefs {
                 rates.first().copied().unwrap_or(1.0)
             };
         }
+
+        // 自定义壁纸路径只保留带受支持扩展名的值；文件是否还在由运行时判断。
+        self.custom_wallpaper = self
+            .custom_wallpaper
+            .map(|path| path.trim().to_owned())
+            .filter(|path| is_wallpaper_path(path));
+
+        let wallpaper = self.wallpaper.trim().to_ascii_lowercase();
+        self.wallpaper = if BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str()) {
+            wallpaper
+        } else if wallpaper == "custom" && self.custom_wallpaper.is_some() {
+            wallpaper
+        } else {
+            DEFAULT_WALLPAPER.to_owned()
+        };
+
+        self.wallpaper_opacity = if self.wallpaper_opacity.is_finite() {
+            self.wallpaper_opacity.clamp(0.0, 1.0)
+        } else {
+            DEFAULT_WALLPAPER_OPACITY
+        };
+
+        self.wallpaper_blur = self.wallpaper_blur.min(20);
+
+        self.wallpaper_fit = match self.wallpaper_fit.trim().to_ascii_lowercase().as_str() {
+            "contain" => "contain".to_owned(),
+            _ => DEFAULT_WALLPAPER_FIT.to_owned(),
+        };
         self
     }
 
@@ -242,5 +316,106 @@ mod tests {
         }
         .normalize_with_rates(&rates);
         assert_eq!(fallback.playback_rate, 1.0);
+    }
+
+    #[test]
+    fn unknown_wallpaper_falls_back_to_default() {
+        let prefs = Prefs {
+            wallpaper: "  GRADIENT-BLUE ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper, "gradient-blue");
+
+        let broken = Prefs {
+            wallpaper: "gradient-purple".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(broken.wallpaper, DEFAULT_WALLPAPER);
+    }
+
+    #[test]
+    fn custom_wallpaper_requires_supported_file() {
+        let missing = Prefs {
+            wallpaper: "custom".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(missing.wallpaper, "default");
+        assert!(missing.custom_wallpaper.is_none());
+
+        let unsupported = Prefs {
+            wallpaper: "custom".into(),
+            custom_wallpaper: Some("C:/壁纸/动画.gif".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(unsupported.wallpaper, "default");
+        assert!(unsupported.custom_wallpaper.is_none());
+
+        let valid = Prefs {
+            wallpaper: "custom".into(),
+            custom_wallpaper: Some("  C:/壁纸/夜空.MP4 ".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(valid.wallpaper, "custom");
+        assert_eq!(valid.custom_wallpaper.as_deref(), Some("C:/壁纸/夜空.MP4"));
+    }
+
+    #[test]
+    fn custom_path_is_kept_after_switching_away() {
+        let prefs = Prefs {
+            wallpaper: "gradient-green".into(),
+            custom_wallpaper: Some("/pics/clouds.webp".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper, "gradient-green");
+        assert_eq!(prefs.custom_wallpaper.as_deref(), Some("/pics/clouds.webp"));
+    }
+
+    #[test]
+    fn wallpaper_opacity_clamped_and_defaulted() {
+        let prefs = Prefs {
+            wallpaper_opacity: 1.5,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper_opacity, 1.0);
+
+        let prefs_neg = Prefs {
+            wallpaper_opacity: -0.2,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs_neg.wallpaper_opacity, 0.0);
+
+        let prefs_nan = Prefs {
+            wallpaper_opacity: f32::NAN,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs_nan.wallpaper_opacity, DEFAULT_WALLPAPER_OPACITY);
+    }
+
+    #[test]
+    fn wallpaper_blur_and_fit_normalized() {
+        let prefs = Prefs {
+            wallpaper_blur: 50,
+            wallpaper_fit: "  CONTAIN  ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper_blur, 20);
+        assert_eq!(prefs.wallpaper_fit, "contain");
+
+        let invalid_fit = Prefs {
+            wallpaper_fit: "stretch".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(invalid_fit.wallpaper_fit, "cover");
     }
 }

@@ -23,12 +23,15 @@ import { COMMANDS, EVENTS } from './constants.js';
 import { applyDocumentCopy, playerConfig } from './config.js';
 import { invoke, isTauri } from './tauri.js';
 import { el, normalizeError, toast } from './ui.js';
+import { initWallpaper, syncWallpaperFromPrefs } from './wallpaper.js';
 import { initWindowChrome } from './window.js';
 
 applyStaticIcons();
 applyDocumentCopy();
 // 先把窗口按钮接上，即使曲库加载失败也能正常最小化/关闭窗口。
 initWindowChrome();
+// 壁纸层要在曲库渲染前铺好，避免首屏闪一下默认底色。
+initWallpaper();
 
 function showFatal(title, message) {
   const iconHost = el('span');
@@ -165,6 +168,7 @@ async function bootstrap() {
   applyBootstrap(boot);
   initPlayer();
   initLibraryUI();
+  syncWallpaperFromPrefs();
   on(EVENTS.error, (message) => toast(message, 'error'));
   window.addEventListener('keydown', handleGlobalKeydown);
 }

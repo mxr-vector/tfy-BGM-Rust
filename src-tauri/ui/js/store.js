@@ -209,6 +209,98 @@ export function setSortBy(sortBy) {
   emit(EVENTS.view);
 }
 
+/**
+ * 切换界面壁纸。
+ * `default` / `gradient-*` / `builtin-*` 只改 id；`custom` 需要同时给出本地文件路径。
+ * 具体的层渲染由 wallpaper 模块监听 EVENTS.wallpaper 完成。
+ */
+export function setWallpaper(id, path = null, options = {}) {
+  if (!state.prefs) return;
+  const customWallpaper =
+    id === 'custom' ? path ?? null : state.prefs.customWallpaper ?? null;
+  const wallpaperOpacity =
+    options.opacity !== null && options.opacity !== undefined
+      ? options.opacity
+      : state.prefs.wallpaperOpacity ?? 0.35;
+  const wallpaperBlur =
+    options.blur !== null && options.blur !== undefined
+      ? options.blur
+      : state.prefs.wallpaperBlur ?? 0;
+  const wallpaperFit =
+    options.fit !== null && options.fit !== undefined
+      ? options.fit
+      : state.prefs.wallpaperFit ?? 'cover';
+
+  state.prefs = {
+    ...state.prefs,
+    wallpaper: id,
+    customWallpaper,
+    wallpaperOpacity,
+    wallpaperBlur,
+    wallpaperFit,
+  };
+  emit(EVENTS.wallpaper, {
+    id,
+    path: customWallpaper,
+    opacity: wallpaperOpacity,
+    blur: wallpaperBlur,
+    fit: wallpaperFit,
+  });
+  persistPrefs(true);
+}
+
+/**
+ * 调整界面透明度（0.0 ~ 1.0）。
+ * 用户拖拽滑块时实时触发，先本地生效，停止拖拽后写盘持久化。
+ */
+export function setWallpaperOpacity(opacity) {
+  if (!state.prefs) return;
+  const clamped = Math.max(0, Math.min(1, Number(opacity) || 0));
+  state.prefs = { ...state.prefs, wallpaperOpacity: clamped };
+  emit(EVENTS.wallpaper, {
+    id: state.prefs.wallpaper,
+    path: state.prefs.customWallpaper ?? null,
+    opacity: clamped,
+    blur: state.prefs.wallpaperBlur ?? 0,
+    fit: state.prefs.wallpaperFit ?? 'cover',
+  });
+  persistPrefs(false);
+}
+
+/**
+ * 调整界面模糊度（0 ~ 20 px）。
+ */
+export function setWallpaperBlur(blur) {
+  if (!state.prefs) return;
+  const clamped = Math.max(0, Math.min(20, Math.round(Number(blur) || 0)));
+  state.prefs = { ...state.prefs, wallpaperBlur: clamped };
+  emit(EVENTS.wallpaper, {
+    id: state.prefs.wallpaper,
+    path: state.prefs.customWallpaper ?? null,
+    opacity: state.prefs.wallpaperOpacity ?? 0.35,
+    blur: clamped,
+    fit: state.prefs.wallpaperFit ?? 'cover',
+  });
+  persistPrefs(false);
+}
+
+/**
+ * 切换壁纸填充模式：`cover` 铺满裁剪，`contain` 完整居中展示。
+ */
+export function setWallpaperFit(fit) {
+  if (!state.prefs) return;
+  const valid = fit === 'contain' ? 'contain' : 'cover';
+  state.prefs = { ...state.prefs, wallpaperFit: valid };
+  emit(EVENTS.wallpaper, {
+    id: state.prefs.wallpaper,
+    path: state.prefs.customWallpaper ?? null,
+    opacity: state.prefs.wallpaperOpacity ?? 0.35,
+    blur: state.prefs.wallpaperBlur ?? 0,
+    fit: valid,
+  });
+  persistPrefs(true);
+}
+
 export function visibleSongs() {
   const list = filterSongs();
   return state.sortBy === SORT_KEYS.name
@@ -298,7 +390,25 @@ async function flushPrefs() {
   };
   try {
     const saved = await invoke(COMMANDS.savePrefs, { prefs: payload });
-    if (sequence === saveSequence) state.prefs = saved;
+    if (sequence === saveSequence) {
+      // 后端会丢弃不合法的壁纸选择（例如自定义文件被删除），此时以返回值为准。
+      const wallpaperChanged =
+        saved.wallpaper !== state.prefs.wallpaper ||
+        (saved.customWallpaper ?? null) !== (state.prefs.customWallpaper ?? null) ||
+        Math.abs((saved.wallpaperOpacity ?? 0.35) - (state.prefs.wallpaperOpacity ?? 0.35)) > 0.001 ||
+        (saved.wallpaperBlur ?? 0) !== (state.prefs.wallpaperBlur ?? 0) ||
+        (saved.wallpaperFit ?? 'cover') !== (state.prefs.wallpaperFit ?? 'cover');
+      state.prefs = saved;
+      if (wallpaperChanged) {
+        emit(EVENTS.wallpaper, {
+          id: saved.wallpaper,
+          path: saved.customWallpaper ?? null,
+          opacity: saved.wallpaperOpacity ?? 0.35,
+          blur: saved.wallpaperBlur ?? 0,
+          fit: saved.wallpaperFit ?? 'cover',
+        });
+      }
+    }
   } catch (error) {
     emit(EVENTS.error, `保存偏好设置失败：${error}`);
   }

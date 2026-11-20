@@ -15,6 +15,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
+use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -44,6 +45,44 @@ pub fn bootstrap(state: State<'_, AppState>) -> Bootstrap {
 #[tauri::command]
 pub fn reload_config(app: AppHandle, state: State<'_, AppState>) -> ConfigReload {
     state.reload_config(&app)
+}
+
+/// 内置壁纸清单；资源缺失的条目会被后端过滤，前端据此隐藏对应选项。
+#[tauri::command]
+pub fn builtin_wallpapers(app: AppHandle) -> Vec<WallpaperAsset> {
+    wallpapers::builtin_catalog(&app)
+}
+
+/// 选择本地自定义壁纸，只接受 jpg / png / webp / mp4。
+#[tauri::command]
+pub async fn choose_wallpaper_file(app: AppHandle) -> CommandResult<Option<WallpaperPick>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("选择界面壁纸")
+        .add_filter(
+            "壁纸（JPG / PNG / WebP / MP4）",
+            &["jpg", "jpeg", "png", "webp", "mp4"],
+        )
+        .blocking_pick_file();
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|error| format!("所选文件无效：{error}"))?;
+    if !path.is_file() {
+        return Err("所选壁纸文件不存在".to_owned());
+    }
+    if !wallpapers::is_supported(&path) {
+        return Err("仅支持 jpg / png / webp / mp4 格式的壁纸".to_owned());
+    }
+    wallpapers::allow_wallpaper_file(&app, &path).map_err(describe)?;
+    Ok(Some(WallpaperPick {
+        label: wallpapers::file_label(&path),
+        kind: wallpapers::kind_of(&path).to_owned(),
+        path: path.to_string_lossy().into_owned(),
+    }))
 }
 
 #[tauri::command]

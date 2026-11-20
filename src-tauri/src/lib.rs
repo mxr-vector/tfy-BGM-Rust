@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod wallpapers;
 
 use state::AppState;
 use tauri::Manager;
@@ -20,6 +21,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::reload_config,
+            commands::builtin_wallpapers,
+            commands::choose_wallpaper_file,
             commands::open_config_file,
             commands::save_prefs,
             commands::rescan_library,
