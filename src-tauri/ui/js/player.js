@@ -14,10 +14,12 @@ let dragTime = 0;
 let drawerOpen = false;
 let lastError = '';
 let exporting = false;
-let consecutiveFailures = 0;
-let lastFailureAt = 0;
+let failureStreak = 0;
+let sourceToken = 0;
+let sourceUrl = '';
 let loadedPath = '';
 
+const MAX_AUTO_SKIPS = 3;
 const RATE_CYCLE = [1.0, 1.25, 1.5, 2.0, 0.75];
 const MODE_CYCLE = ['sequence', 'repeat-one', 'shuffle'];
 
@@ -106,10 +108,12 @@ function bindAudio() {
 
   audio.addEventListener('play', () => {
     state.playing = true;
-    consecutiveFailures = 0;
     setError('');
     renderPlayer();
     emit('player');
+  });
+  audio.addEventListener('playing', () => {
+    failureStreak = 0;
   });
   audio.addEventListener('pause', () => {
     state.playing = false;
@@ -208,7 +212,9 @@ export function playSong(song, newQueue = null, forcePlay = false) {
   }
 
   if (state.currentKey === song.key && state.currentSong) {
-    if (forcePlay) {
+    if (!sourceUrl) {
+      void loadSongSource(song, { autoplay: true });
+    } else if (forcePlay) {
       audio.currentTime = 0;
       setProgressUi();
       audio.play().catch(() => {});
@@ -226,21 +232,71 @@ export function playSong(song, newQueue = null, forcePlay = false) {
   state.currentSong = song;
   state.playing = false;
   setError('');
-  loadedPath = song.path;
-  audio.src = assetUrl(song.path);
-  audio.playbackRate = state.prefs.playbackRate;
-  audio.volume = state.prefs.muted ? 0 : state.prefs.volume;
-  audio.play().catch(() => {
-    state.playing = false;
-    renderPlayer();
-    emit('player');
-  });
 
   renderPlayer();
   renderQueueBadge();
   if (drawerOpen) renderDrawer();
   emit('player');
   emit('queue');
+  void loadSongSource(song, { autoplay: true });
+}
+
+/**
+ * WebKitGTK 的媒体管线无法直接播放 `asset://` 自定义协议（会报
+ * MEDIA_ERR_SRC_NOT_SUPPORTED），这里先经 Asset Protocol 读取字节，
+ * 再交给 Blob URL 播放；仍保持本地读取，不经过网络。
+ */
+async function loadSongSource(song, { autoplay = true, restoreTime = 0 } = {}) {
+  const token = (sourceToken += 1);
+  try {
+    const blob = await fetchTrack(song.path);
+    if (token !== sourceToken) return;
+
+    const url = URL.createObjectURL(blob);
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    sourceUrl = url;
+    loadedPath = song.path;
+
+    applyPrefsToAudio();
+    if (restoreTime > 0) {
+      audio.addEventListener(
+        'loadedmetadata',
+        () => {
+          if (Number.isFinite(audio.duration) && audio.duration > 0) {
+            audio.currentTime = Math.min(restoreTime, audio.duration);
+          }
+        },
+        { once: true },
+      );
+    }
+    audio.src = url;
+    if (autoplay) {
+      audio.play().catch(() => {
+        if (token !== sourceToken) return;
+        state.playing = false;
+        renderPlayer();
+      });
+    }
+  } catch (error) {
+    if (token !== sourceToken) return;
+    failCurrent(`无法读取音频（${normalizeError(error)}）`);
+  }
+}
+
+async function fetchTrack(path) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(assetUrl(path), { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (blob.size === 0) throw new Error('音频文件为空');
+    return blob.type === 'audio/mpeg'
+      ? blob
+      : new Blob([blob], { type: 'audio/mpeg' });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 export function togglePlay() {
@@ -316,20 +372,25 @@ function handleEnded() {
 }
 
 function handleAudioError() {
-  if (!state.currentSong) return;
-  state.playing = false;
-  const title = state.currentSong.title;
-  const now = Date.now();
-  if (now - lastFailureAt > 1500) consecutiveFailures = 0;
-  lastFailureAt = now;
-  consecutiveFailures += 1;
+  failCurrent('音频加载失败');
+}
 
-  if (state.queue.length > 1 && consecutiveFailures <= 3) {
-    setError(`《${title}》加载失败，已自动跳到下一首`);
+/** 播放失败：连续失败不超过上限时自动跳下一首，否则停下来提示。 */
+function failCurrent(reason) {
+  const song = state.currentSong;
+  if (!song) return;
+  state.playing = false;
+  failureStreak += 1;
+
+  if (state.queue.length > 1 && failureStreak <= MAX_AUTO_SKIPS) {
+    setError(`《${song.title}》${reason}，已自动跳到下一首`);
+    renderPlayer();
+    emit('player');
     nextTrack(true);
-  } else {
-    setError(`《${title}》加载失败：文件可能已被移动或删除`);
+    return;
   }
+
+  setError(`《${song.title}》${reason}：文件可能已损坏或被移动`);
   renderPlayer();
   emit('player');
 }
@@ -367,15 +428,24 @@ function clearQueue() {
 }
 
 function stopPlayback() {
+  sourceToken += 1;
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
-  loadedPath = '';
+  releaseSource();
   state.currentSong = null;
   state.currentKey = null;
   state.playing = false;
   setError('');
   setProgressUi();
+}
+
+function releaseSource() {
+  if (sourceUrl) {
+    URL.revokeObjectURL(sourceUrl);
+    sourceUrl = '';
+  }
+  loadedPath = '';
 }
 
 /** 曲目被重命名或移动后，文件路径变化，按原进度重新加载。 */
@@ -384,20 +454,7 @@ function syncAudioSource() {
   if (!song || song.path === loadedPath) return;
   const time = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
   const wasPlaying = !audio.paused;
-  loadedPath = song.path;
-  audio.src = assetUrl(song.path);
-  audio.addEventListener(
-    'loadedmetadata',
-    () => {
-      if (time > 0) {
-        audio.currentTime = Number.isFinite(audio.duration)
-          ? Math.min(time, audio.duration)
-          : time;
-      }
-      if (wasPlaying) audio.play().catch(() => {});
-    },
-    { once: true },
-  );
+  void loadSongSource(song, { autoplay: wasPlaying, restoreTime: time });
 }
 
 export function setVolume(value) {

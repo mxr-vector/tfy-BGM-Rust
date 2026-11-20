@@ -7,7 +7,7 @@ pub mod library;
 pub mod ops;
 pub mod prefs;
 
-pub use categories::{CATEGORIES, Category};
+pub use categories::{Categories, Category};
 pub use library::{LibrarySnapshot, LibrarySource, Song, scan_library};
 pub use ops::{BatchOutcome, BatchReport, KeyChange};
 pub use prefs::{PlayMode, Prefs, SortBy};

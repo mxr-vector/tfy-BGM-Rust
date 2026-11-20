@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::categories::{CATEGORIES, Category};
+use crate::categories::Category;
 
 const MAX_KEY_LEN: usize = 512;
 
@@ -34,29 +34,29 @@ pub struct Song {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategorySummary {
-    pub id: &'static str,
-    pub name_zh: &'static str,
-    pub name_en: &'static str,
-    pub label_en: &'static str,
-    pub color: &'static str,
-    pub title: &'static str,
-    pub description: &'static str,
+    pub id: String,
+    pub name_zh: String,
+    pub name_en: String,
+    pub label_en: String,
+    pub color: String,
+    pub title: String,
+    pub description: String,
     pub count: usize,
 }
 
 impl CategorySummary {
-    fn new(category: &'static Category, count: usize) -> Self {
+    fn new(category: &Category, count: usize) -> Self {
         Self {
-            id: category.id,
-            name_zh: category.name_zh,
-            name_en: category.name_en,
-            label_en: category.label_en,
-            color: category.color,
-            title: category.title,
-            description: category.description,
+            id: category.id.clone(),
+            name_zh: category.name_zh.clone(),
+            name_en: category.name_en.clone(),
+            label_en: category.label_en.clone(),
+            color: category.color.clone(),
+            title: category.title.clone(),
+            description: category.description.clone(),
             count,
         }
     }
@@ -80,15 +80,19 @@ impl LibrarySnapshot {
 }
 
 /// 扫描曲库根目录。目录缺失或不可读不会返回错误，而是通过 `warnings` 上报。
-pub fn scan_library(root: &Path, source: LibrarySource) -> LibrarySnapshot {
+pub fn scan_library(
+    root: &Path,
+    source: LibrarySource,
+    categories: &[Category],
+) -> LibrarySnapshot {
     let mut warnings = Vec::new();
     let mut songs = Vec::new();
-    let mut categories = Vec::with_capacity(CATEGORIES.len());
+    let mut summaries = Vec::with_capacity(categories.len());
     let mut seen_keys = HashSet::new();
 
     if root.is_dir() {
-        for category in &CATEGORIES {
-            let dir = root.join(category.id);
+        for category in categories {
+            let dir = root.join(&category.id);
             let mut local = scan_category(&dir, category, &mut warnings, &mut seen_keys);
             local.sort_by(|a, b| {
                 a.title
@@ -96,10 +100,10 @@ pub fn scan_library(root: &Path, source: LibrarySource) -> LibrarySnapshot {
                     .cmp(&b.title.to_lowercase())
                     .then_with(|| a.file_name.cmp(&b.file_name))
             });
-            categories.push(CategorySummary::new(category, local.len()));
+            summaries.push(CategorySummary::new(category, local.len()));
             songs.extend(local);
         }
-        collect_stray_warnings(root, &mut warnings);
+        collect_stray_warnings(root, categories, &mut warnings);
         if songs.is_empty() {
             warnings.push(format!(
                 "曲库目录中未发现任何 mp3：{}（请把音频放入 <分类>/ 子目录）",
@@ -108,8 +112,8 @@ pub fn scan_library(root: &Path, source: LibrarySource) -> LibrarySnapshot {
         }
     } else {
         warnings.push(format!("曲库目录不存在或不是文件夹：{}", root.display()));
-        categories.extend(
-            CATEGORIES
+        summaries.extend(
+            categories
                 .iter()
                 .map(|category| CategorySummary::new(category, 0)),
         );
@@ -119,7 +123,7 @@ pub fn scan_library(root: &Path, source: LibrarySource) -> LibrarySnapshot {
         root: root.to_string_lossy().into_owned(),
         source,
         songs,
-        categories,
+        categories: summaries,
         warnings,
         scanned_at_ms: now_ms(),
     }
@@ -127,7 +131,7 @@ pub fn scan_library(root: &Path, source: LibrarySource) -> LibrarySnapshot {
 
 fn scan_category(
     dir: &Path,
-    category: &'static Category,
+    category: &Category,
     warnings: &mut Vec<String>,
     seen_keys: &mut HashSet<String>,
 ) -> Vec<Song> {
@@ -201,14 +205,14 @@ fn scan_category(
             key,
             title: stem.replace('_', " "),
             file_name,
-            category: category.id.to_owned(),
+            category: category.id.clone(),
             path: path_str.to_owned(),
         });
     }
     songs
 }
 
-fn collect_stray_warnings(root: &Path, warnings: &mut Vec<String>) {
+fn collect_stray_warnings(root: &Path, categories: &[Category], warnings: &mut Vec<String>) {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) => {
@@ -221,7 +225,7 @@ fn collect_stray_warnings(root: &Path, warnings: &mut Vec<String>) {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            if CATEGORIES.iter().any(|category| category.id == name) || name.starts_with('.') {
+            if categories.iter().any(|category| category.id == name) || name.starts_with('.') {
                 continue;
             }
             let stray_count = count_mp3(&path);
@@ -269,6 +273,10 @@ mod tests {
         fs::write(path, b"fake-mp3").expect("fixture file must be writable");
     }
 
+    fn categories() -> Vec<Category> {
+        crate::categories::defaults().items
+    }
+
     #[test]
     fn scans_registered_categories_in_declared_order() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -280,7 +288,7 @@ mod tests {
         touch(&root.join("cheerful/notes.txt"));
         touch(&root.join("epic/x.MP3"));
 
-        let snapshot = scan_library(root, LibrarySource::Bundled);
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
 
         let keys: Vec<_> = snapshot
             .songs
@@ -303,7 +311,7 @@ mod tests {
         touch(&root.join("unknown/stray.mp3"));
         touch(&root.join("root-level.mp3"));
 
-        let snapshot = scan_library(root, LibrarySource::Custom);
+        let snapshot = scan_library(root, LibrarySource::Custom, &categories());
 
         assert!(snapshot.songs.is_empty());
         assert_eq!(snapshot.warnings.len(), 3, "{:?}", snapshot.warnings);
@@ -327,7 +335,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let missing = dir.path().join("nope");
 
-        let snapshot = scan_library(&missing, LibrarySource::Custom);
+        let snapshot = scan_library(&missing, LibrarySource::Custom, &categories());
 
         assert!(snapshot.songs.is_empty());
         assert_eq!(snapshot.categories.len(), 6);
@@ -342,7 +350,7 @@ mod tests {
         touch(&root.join("cheerful/same.mp3"));
         touch(&root.join("cheerful/same.MP3"));
 
-        let snapshot = scan_library(root, LibrarySource::Bundled);
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
 
         assert_eq!(snapshot.songs.len(), 1);
         assert!(snapshot.warnings.iter().any(|w| w.contains("重复曲目标识")));

@@ -31,14 +31,13 @@ let initialized = false;
 let dragKey = null;
 let warningsDismissed = false;
 let selectionAnchor = null;
+let contextMenu = null;
 
 const ALL_HERO = {
   title: '全部精选视频剪辑 BGM',
   labelEn: 'ALL BGM SOUNDTRACKS',
   color: '#6366f1',
   icon: 'music',
-  description:
-    '汇集欢快、独处、回忆、史诗、古风、乡村等 6 大分类优质背景音乐，覆盖 Vlog、宣传片、故事片、卡点等全场景剪辑需求。',
 };
 
 const FAVORITES_HERO = {
@@ -61,9 +60,11 @@ export function initLibraryUI() {
     brandLogo: $('brand-logo'),
     navAll: $('nav-all'),
     navFavorites: $('nav-favorites'),
+    btnAddCategory: $('btn-add-category'),
     countAll: $('count-all'),
     countFavorites: $('count-favorites'),
     categoryNav: $('category-nav'),
+    tabStrip: document.querySelector('.tab-strip'),
     statusCount: $('status-count'),
     statusPath: $('status-path'),
     statusIndicator: document.querySelector('.status-indicator'),
@@ -95,6 +96,12 @@ export function initLibraryUI() {
 
   els.navAll.addEventListener('click', () => setCategory('all'));
   els.navFavorites.addEventListener('click', toggleFavoritesOnly);
+  els.btnAddCategory.addEventListener('click', () => void openCreateCategory());
+  els.tabStrip.addEventListener('contextmenu', (event) => {
+    const tab = event.target.closest('.category-item');
+    const category = tab ? categoryById(tab.dataset.categoryId) : null;
+    openCategoryMenu(event, category);
+  });
   els.sortSelect.addEventListener('change', () => setSortBy(els.sortSelect.value));
   els.searchInput.addEventListener('input', () => {
     setSearch(els.searchInput.value);
@@ -187,6 +194,21 @@ export function initLibraryUI() {
 
   bindSongList();
 
+  document.addEventListener('pointerdown', (event) => {
+    if (contextMenu && !contextMenu.contains(event.target)) closeContextMenu();
+  });
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key !== 'Escape' || !contextMenu) return;
+      event.stopPropagation();
+      closeContextMenu();
+    },
+    true,
+  );
+  document.addEventListener('scroll', closeContextMenu, true);
+  window.addEventListener('blur', closeContextMenu);
+
   on('library', () => {
     warningsDismissed = false;
     renderAll();
@@ -240,8 +262,122 @@ function handleSelectionClick(key, selected, range) {
 function categoryOptions() {
   return state.library.categories.map((category) => ({
     value: category.id,
-    label: `${category.nameZh} · ${category.nameEn}`,
+    label: category.nameEn && category.nameEn !== category.nameZh
+      ? `${category.nameZh} · ${category.nameEn}`
+      : category.nameZh,
   }));
+}
+
+function closeContextMenu() {
+  if (!contextMenu) return;
+  contextMenu.remove();
+  contextMenu = null;
+}
+
+function openCategoryMenu(event, category) {
+  event.preventDefault();
+  closeContextMenu();
+
+  const menu = el('div', { class: 'context-menu', attrs: { role: 'menu' } });
+  const item = (iconName, label, handler) => {
+    const button = el('button', {
+      class: 'context-menu-item',
+      attrs: { type: 'button', role: 'menuitem' },
+    });
+    const iconHost = el('span');
+    setIcon(iconHost, iconName);
+    button.append(iconHost, el('span', { text: label }));
+    button.addEventListener('click', () => {
+      closeContextMenu();
+      handler();
+    });
+    return button;
+  };
+
+  if (category) {
+    menu.append(item('edit', '重命名分类', () => void openRenameCategory(category)));
+  }
+  menu.append(item('plus', '新增分类', () => void openCreateCategory()));
+
+  menu.style.left = `${event.clientX}px`;
+  menu.style.top = `${event.clientY}px`;
+  document.body.append(menu);
+  contextMenu = menu;
+
+  const rect = menu.getBoundingClientRect();
+  if (event.clientX + rect.width > window.innerWidth - 8) {
+    menu.style.left = `${Math.max(8, event.clientX - rect.width)}px`;
+  }
+  if (event.clientY + rect.height > window.innerHeight - 8) {
+    menu.style.top = `${Math.max(8, event.clientY - rect.height)}px`;
+  }
+}
+
+async function openCreateCategory() {
+  const values = await showModal({
+    title: '新增分类',
+    description:
+      '新分类会出现在分类导航中，并在曲库目录下创建同名文件夹；之后可直接向该分类导入音频。',
+    fields: [
+      {
+        name: 'name',
+        label: '分类名称',
+        type: 'text',
+        placeholder: '例如：旅行',
+      },
+      {
+        name: 'id',
+        label: '目录名（可选）',
+        type: 'text',
+        placeholder: '留空则使用分类名称',
+      },
+    ],
+    confirmText: '创建',
+    validate: (input) => (input.name.trim() ? null : '分类名称不能为空'),
+  });
+  if (!values) return;
+
+  try {
+    const result = await invoke('create_category', {
+      name: values.name,
+      id: values.id.trim() || null,
+    });
+    replaceLibrary(result.library);
+    setCategory(result.categoryId);
+    const created = result.library.categories.find((c) => c.id === result.categoryId);
+    toast(`已新增分类：${created?.nameZh ?? result.categoryId}`, 'success');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openRenameCategory(category) {
+  const values = await showModal({
+    title: '重命名分类',
+    description: '只修改分类的显示名称，不会移动或重命名已导入的音频文件。',
+    fields: [
+      {
+        name: 'name',
+        label: '分类名称',
+        type: 'text',
+        value: category.nameZh,
+      },
+    ],
+    confirmText: '保存',
+    validate: (input) => (input.name.trim() ? null : '分类名称不能为空'),
+  });
+  if (!values || values.name.trim() === category.nameZh) return;
+
+  try {
+    const result = await invoke('rename_category', {
+      id: category.id,
+      name: values.name,
+    });
+    replaceLibrary(result.library);
+    toast('分类名称已更新', 'success');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
 }
 
 function preferredCategory() {
@@ -440,6 +576,7 @@ function renderSidebar() {
       {
         class: `cat-tab category-item${active ? ' is-active' : ''}`,
         attrs: { type: 'button', title: `${category.nameZh} · ${category.nameEn}` },
+        dataset: { categoryId: category.id },
       },
       [
         dot,
@@ -455,7 +592,13 @@ function renderSidebar() {
 
 function heroInfo() {
   if (state.favoritesOnly) return FAVORITES_HERO;
-  if (state.category === 'all') return ALL_HERO;
+  if (state.category === 'all') {
+    const names = state.library.categories.map((category) => category.nameZh).join('、');
+    return {
+      ...ALL_HERO,
+      description: `汇集${names}等分类的优质背景音乐，覆盖 Vlog、宣传片、故事片、卡点等全场景剪辑需求。`,
+    };
+  }
   const category = categoryById(state.category);
   if (!category) return ALL_HERO;
   return {
@@ -525,7 +668,13 @@ function renderResults() {
     title = '我的收藏夹';
   } else if (state.category !== 'all') {
     const category = categoryById(state.category);
-    title = category ? `${category.nameZh}音乐 (${category.nameEn})` : '音频列表';
+    if (!category) {
+      title = '音频列表';
+    } else if (category.nameEn && category.nameEn !== category.nameZh) {
+      title = `${category.nameZh}音乐 (${category.nameEn})`;
+    } else {
+      title = `${category.nameZh}音乐`;
+    }
   }
   els.resultsTitle.textContent = title;
   els.resultsCount.textContent = `${visibleSongs().length} 首配乐`;

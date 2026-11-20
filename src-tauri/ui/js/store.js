@@ -60,6 +60,15 @@ export function applyBootstrap(boot) {
 export function replaceLibrary(snapshot) {
   state.library = snapshot;
 
+  let viewChanged = false;
+  if (
+    state.category !== 'all' &&
+    !snapshot.categories.some((category) => category.id === state.category)
+  ) {
+    state.category = 'all';
+    viewChanged = true;
+  }
+
   const queue = [];
   for (const item of state.queue) {
     const fresh = snapshot.songs.find((song) => song.key === item.key);
@@ -88,6 +97,7 @@ export function replaceLibrary(snapshot) {
   emit('library');
   emit('queue');
   emit('player');
+  if (viewChanged) emit('view');
   if (pruned) emit('selection');
 }
 

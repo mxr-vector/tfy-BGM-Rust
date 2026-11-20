@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::state::{AppState, Bootstrap, LibraryMutation};
+use crate::state::{AppState, Bootstrap, CategoryOutcome, LibraryMutation};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -90,12 +90,33 @@ pub struct ExportBatchResult {
 }
 
 #[tauri::command]
+pub fn create_category(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    id: Option<String>,
+) -> CommandResult<CategoryOutcome> {
+    let id = id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+    state.create_category(&app, &name, id).map_err(describe)
+}
+
+#[tauri::command]
+pub fn rename_category(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> CommandResult<CategoryOutcome> {
+    state.rename_category(&app, &id, &name).map_err(describe)
+}
+
+#[tauri::command]
 pub async fn import_tracks(
     app: AppHandle,
     state: State<'_, AppState>,
     category: String,
 ) -> CommandResult<Option<LibraryMutation>> {
-    if bgm_core::categories::by_id(&category).is_none() {
+    if !state.has_category(&category) {
         return Err(format!("未注册的分类：{category}"));
     }
     let Some(files) = app

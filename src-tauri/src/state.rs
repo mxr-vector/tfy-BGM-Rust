@@ -10,15 +10,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use bgm_core::categories::Categories;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
-use bgm_core::{LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
+use bgm_core::{Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 pub struct AppState {
     prefs_path: PathBuf,
+    categories_path: PathBuf,
     prefs: RwLock<Prefs>,
+    categories: RwLock<Categories>,
     runtime: RwLock<Runtime>,
 }
 
@@ -46,6 +49,14 @@ pub struct LibraryMutation {
     pub report: BatchReport,
 }
 
+/// 分类新增 / 重命名后的结果；`category_id` 便于前端直接选中新分类。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryOutcome {
+    pub library: LibrarySnapshot,
+    pub category_id: String,
+}
+
 impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self> {
         let config_dir = app
@@ -55,19 +66,32 @@ impl AppState {
         let prefs_path = config_dir.join("prefs.json");
         let (prefs, prefs_warning) = Prefs::load(&prefs_path);
 
-        let (root, source, mut warnings) = resolve_root(app, &prefs);
+        let categories_path = config_dir.join("categories.json");
+        let (categories, categories_warning) = Categories::load(&categories_path);
+        let mut warnings = Vec::new();
         if let Some(warning) = prefs_warning {
             warnings.push(warning);
         }
+        if let Some(warning) = categories_warning {
+            warnings.push(warning);
+        }
+        if let Err(error) = categories.ensure_file(&categories_path) {
+            warnings.push(format!("无法写入分类配置文件：{error}"));
+        }
 
-        let mut library = scan_library(&root, source);
+        let (root, source, mut root_warnings) = resolve_root(app, &prefs);
+        warnings.append(&mut root_warnings);
+
+        let mut library = scan_library(&root, source, &categories.items);
         warnings.append(&mut library.warnings);
         library.warnings = warnings;
         allow_audio_scope(app, &root)?;
 
         Ok(Self {
             prefs_path,
+            categories_path,
             prefs: RwLock::new(prefs),
+            categories: RwLock::new(categories),
             runtime: RwLock::new(Runtime {
                 root,
                 source,
@@ -94,11 +118,69 @@ impl AppState {
     }
 
     pub fn rescan(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
+        let warnings = self.reload_categories();
         let (root, source) = {
             let runtime = self.runtime.read();
             (runtime.root.clone(), runtime.source)
         };
-        self.install_root(app, root, source, Vec::new())
+        self.install_root(app, root, source, warnings)
+    }
+
+    /// 新增分类：更新 categories.json，并尽量在曲库目录下创建同名文件夹。
+    pub fn create_category(
+        &self,
+        app: &AppHandle,
+        name: &str,
+        id: Option<&str>,
+    ) -> Result<CategoryOutcome> {
+        let mut warnings = self.reload_categories();
+        let mut next = self.categories.read().clone();
+        let category = next
+            .add(name, id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        next.save(&self.categories_path)
+            .context("保存分类配置失败")?;
+        *self.categories.write() = next;
+
+        let dir = self.root().join(&category.id);
+        if let Err(error) = fs::create_dir_all(&dir) {
+            warnings.push(format!(
+                "分类已添加，但无法创建曲库目录 {}：{error}",
+                dir.display()
+            ));
+        }
+
+        let mut library = self.refresh_library(app)?;
+        warnings.append(&mut library.warnings);
+        library.warnings = warnings;
+        Ok(CategoryOutcome {
+            library,
+            category_id: category.id,
+        })
+    }
+
+    /// 重命名分类只修改展示文案，不移动已导入的音频文件。
+    pub fn rename_category(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        name: &str,
+    ) -> Result<CategoryOutcome> {
+        let mut warnings = self.reload_categories();
+        let mut next = self.categories.read().clone();
+        next.rename(id, name)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        next.save(&self.categories_path)
+            .context("保存分类配置失败")?;
+        *self.categories.write() = next;
+
+        let mut library = self.refresh_library(app)?;
+        warnings.append(&mut library.warnings);
+        library.warnings = warnings;
+        Ok(CategoryOutcome {
+            library,
+            category_id: id.to_owned(),
+        })
     }
 
     pub fn choose_library_dir(
@@ -133,6 +215,21 @@ impl AppState {
         self.runtime.read().root.clone()
     }
 
+    pub fn has_category(&self, id: &str) -> bool {
+        self.categories.read().contains(id)
+    }
+
+    fn category_items(&self) -> Vec<Category> {
+        self.categories.read().items.clone()
+    }
+
+    /// 重新读取 categories.json；用于「重新扫描」和分类写操作前同步手工编辑。
+    fn reload_categories(&self) -> Vec<String> {
+        let (categories, warning) = Categories::load(&self.categories_path);
+        *self.categories.write() = categories;
+        warning.into_iter().collect()
+    }
+
     /// 导入音频到指定分类，完成后重新扫描曲库。
     pub fn import_tracks(
         &self,
@@ -143,10 +240,11 @@ impl AppState {
         if sources.is_empty() {
             bail!("未选择任何音频文件");
         }
-        if bgm_core::categories::by_id(category).is_none() {
+        if !self.has_category(category) {
             bail!("未注册的分类：{category}");
         }
-        let report = ops::import_files(&self.root(), category, &sources);
+        let categories = self.category_items();
+        let report = ops::import_files(&self.root(), &categories, category, &sources);
         let library = self.refresh_library(app)?;
         Ok(LibraryMutation {
             library,
@@ -167,8 +265,15 @@ impl AppState {
         let song = self
             .song(key)
             .ok_or_else(|| anyhow::anyhow!("曲目不存在：{key}"))?;
-        let change = ops::update_song(&self.root(), &song, Some(title), Some(category))
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let categories = self.category_items();
+        let change = ops::update_song(
+            &self.root(),
+            &categories,
+            &song,
+            Some(title),
+            Some(category),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
         let mut report = BatchReport {
             total: 1,
@@ -198,12 +303,13 @@ impl AppState {
         keys: &[String],
         category: &str,
     ) -> Result<LibraryMutation> {
-        if bgm_core::categories::by_id(category).is_none() {
+        if !self.has_category(category) {
             bail!("未注册的分类：{category}");
         }
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
-        let outcome = ops::move_songs(&self.root(), &refs, category);
+        let categories = self.category_items();
+        let outcome = ops::move_songs(&self.root(), &categories, &refs, category);
 
         let favorite_warning = self.sync_favorites(&outcome.changes, &[]);
         let mut library = self.refresh_library(app)?;
@@ -217,7 +323,8 @@ impl AppState {
     pub fn delete_tracks(&self, app: &AppHandle, keys: &[String]) -> Result<LibraryMutation> {
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
-        let outcome = ops::trash_songs(&self.root(), &refs);
+        let categories = self.category_items();
+        let outcome = ops::trash_songs(&self.root(), &categories, &refs);
 
         let favorite_warning = self.sync_favorites(&[], &outcome.removed);
         let mut library = self.refresh_library(app)?;
@@ -231,7 +338,13 @@ impl AppState {
     pub fn export_tracks(&self, keys: &[String], dest_dir: &Path) -> Result<BatchOutcome> {
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
-        Ok(ops::export_songs(&self.root(), dest_dir, &refs))
+        let categories = self.category_items();
+        Ok(ops::export_songs(
+            &self.root(),
+            &categories,
+            dest_dir,
+            &refs,
+        ))
     }
 
     fn songs_for_keys(&self, keys: &[String]) -> Result<Vec<Song>> {
@@ -305,7 +418,8 @@ impl AppState {
         mut warnings: Vec<String>,
     ) -> Result<LibrarySnapshot> {
         allow_audio_scope(app, &root)?;
-        let mut library = scan_library(&root, source);
+        let categories = self.category_items();
+        let mut library = scan_library(&root, source, &categories);
         warnings.append(&mut library.warnings);
         library.warnings = warnings;
         *self.runtime.write() = Runtime {

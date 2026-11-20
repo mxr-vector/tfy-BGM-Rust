@@ -22,6 +22,8 @@ pub fn run() {
             commands::reset_library_dir,
             commands::open_library_dir,
             commands::export_track,
+            commands::create_category,
+            commands::rename_category,
             commands::import_tracks,
             commands::update_track,
             commands::move_tracks,

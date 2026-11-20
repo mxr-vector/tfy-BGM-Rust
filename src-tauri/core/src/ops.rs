@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::categories;
+use crate::categories::Category;
 use crate::export::{ExportError, copy_validated, safe_file_name};
 use crate::library::Song;
 
@@ -97,14 +97,19 @@ pub enum OpError {
 }
 
 /// 把音频导入到指定分类目录。同名文件自动追加序号，不覆盖已有曲目。
-pub fn import_files(root: &Path, category_id: &str, sources: &[PathBuf]) -> BatchReport {
+pub fn import_files(
+    root: &Path,
+    categories: &[Category],
+    category_id: &str,
+    sources: &[PathBuf],
+) -> BatchReport {
     let mut report = BatchReport::new(sources.len());
 
-    let Some(category) = categories::by_id(category_id) else {
+    let Some(category) = find_category(categories, category_id) else {
         report.fail(format!("未注册的分类：{category_id}"));
         return report;
     };
-    let dir = root.join(category.id);
+    let dir = root.join(&category.id);
     if let Err(error) = fs::create_dir_all(&dir) {
         report.fail(format!("无法创建分类目录 {}：{error}", dir.display()));
         return report;
@@ -180,22 +185,37 @@ fn import_one(
 }
 
 /// 修改曲名（重命名文件），文件名冲突时返回错误而不是覆盖。
-pub fn rename_song(root: &Path, song: &Song, new_title: &str) -> Result<KeyChange, OpError> {
-    update_song(root, song, Some(new_title), None)
+pub fn rename_song(
+    root: &Path,
+    categories: &[Category],
+    song: &Song,
+    new_title: &str,
+) -> Result<KeyChange, OpError> {
+    update_song(root, categories, song, Some(new_title), None)
 }
 
 /// 把曲目移动到另一个分类，保留原文件名主干，重名时追加序号。
-pub fn move_song(root: &Path, song: &Song, target_category: &str) -> Result<KeyChange, OpError> {
-    update_song(root, song, None, Some(target_category))
+pub fn move_song(
+    root: &Path,
+    categories: &[Category],
+    song: &Song,
+    target_category: &str,
+) -> Result<KeyChange, OpError> {
+    update_song(root, categories, song, None, Some(target_category))
 }
 
 /// 批量移动曲目到目标分类，逐首记录成功与失败。
-pub fn move_songs(root: &Path, songs: &[&Song], target_category: &str) -> BatchOutcome {
+pub fn move_songs(
+    root: &Path,
+    categories: &[Category],
+    songs: &[&Song],
+    target_category: &str,
+) -> BatchOutcome {
     let mut outcome = BatchOutcome {
         report: BatchReport::new(songs.len()),
         ..BatchOutcome::default()
     };
-    if categories::by_id(target_category).is_none() {
+    if find_category(categories, target_category).is_none() {
         outcome
             .report
             .fail(format!("未注册的分类：{target_category}"));
@@ -203,7 +223,7 @@ pub fn move_songs(root: &Path, songs: &[&Song], target_category: &str) -> BatchO
     }
 
     for song in songs {
-        match move_song(root, song, target_category) {
+        match move_song(root, categories, song, target_category) {
             Ok(change) => {
                 outcome.report.succeeded += 1;
                 outcome.changes.push(change);
@@ -217,16 +237,17 @@ pub fn move_songs(root: &Path, songs: &[&Song], target_category: &str) -> BatchO
 /// 同时修改曲名与分类。曲名未变时保留原文件主干（含下划线）。
 pub fn update_song(
     root: &Path,
+    categories: &[Category],
     song: &Song,
     new_title: Option<&str>,
     new_category: Option<&str>,
 ) -> Result<KeyChange, OpError> {
     let target_category = new_category.unwrap_or(&song.category);
-    if categories::by_id(target_category).is_none() {
+    if find_category(categories, target_category).is_none() {
         return Err(OpError::UnknownCategory(target_category.to_owned()));
     }
 
-    let source = song_file_path(root, song)?;
+    let source = song_file_path(root, categories, song)?;
     let rename = match new_title {
         Some(title) => {
             let trimmed = title.trim();
@@ -285,7 +306,7 @@ pub fn update_song(
 }
 
 /// 软删除：移动到曲库根目录下的 `.tfy-trash/<批次>/`，返回被移除的 key。
-pub fn trash_songs(root: &Path, songs: &[&Song]) -> BatchOutcome {
+pub fn trash_songs(root: &Path, categories: &[Category], songs: &[&Song]) -> BatchOutcome {
     let mut outcome = BatchOutcome {
         report: BatchReport::new(songs.len()),
         ..BatchOutcome::default()
@@ -305,7 +326,7 @@ pub fn trash_songs(root: &Path, songs: &[&Song]) -> BatchOutcome {
     let mut used = HashSet::new();
 
     for song in songs {
-        let source = match song_file_path(root, song) {
+        let source = match song_file_path(root, categories, song) {
             Ok(path) => path,
             Err(error) => {
                 outcome.report.fail(format!("{}：{error}", song.title));
@@ -339,7 +360,12 @@ pub fn trash_songs(root: &Path, songs: &[&Song]) -> BatchOutcome {
 }
 
 /// 把曲目复制到指定目录，同名时追加序号，成功后校验字节数。
-pub fn export_songs(root: &Path, dest_dir: &Path, songs: &[&Song]) -> BatchOutcome {
+pub fn export_songs(
+    root: &Path,
+    categories: &[Category],
+    dest_dir: &Path,
+    songs: &[&Song],
+) -> BatchOutcome {
     let mut outcome = BatchOutcome {
         report: BatchReport::new(songs.len()),
         ..BatchOutcome::default()
@@ -353,7 +379,7 @@ pub fn export_songs(root: &Path, dest_dir: &Path, songs: &[&Song]) -> BatchOutco
     }
 
     for song in songs {
-        let source = match song_file_path(root, song) {
+        let source = match song_file_path(root, categories, song) {
             Ok(path) => path,
             Err(error) => {
                 outcome.report.fail(format!("{}：{error}", song.title));
@@ -398,8 +424,12 @@ fn validate_title(title: &str) -> Result<String, OpError> {
     Ok(stem)
 }
 
-fn song_file_path(root: &Path, song: &Song) -> Result<PathBuf, OpError> {
-    if categories::by_id(&song.category).is_none() {
+fn find_category<'a>(categories: &'a [Category], id: &str) -> Option<&'a Category> {
+    categories.iter().find(|category| category.id == id)
+}
+
+fn song_file_path(root: &Path, categories: &[Category], song: &Song) -> Result<PathBuf, OpError> {
+    if find_category(categories, &song.category).is_none() {
         return Err(OpError::UnknownCategory(song.category.clone()));
     }
     let file_name = Path::new(&song.file_name);
@@ -484,6 +514,10 @@ mod tests {
         }
     }
 
+    fn categories() -> Vec<Category> {
+        crate::categories::defaults().items
+    }
+
     fn fixture(root: &Path, category: &str, stem: &str) -> Song {
         let dir = root.join(category);
         fs::create_dir_all(&dir).unwrap();
@@ -501,7 +535,7 @@ mod tests {
         let source = dir.path().join("track.mp3");
         fs::write(&source, b"new-audio").unwrap();
 
-        let report = import_files(&root, "epic", &[source.clone(), source]);
+        let report = import_files(&root, &categories(), "epic", &[source.clone(), source]);
 
         assert_eq!(report.succeeded, 2);
         assert_eq!(report.failed, 0);
@@ -516,11 +550,16 @@ mod tests {
         let source = dir.path().join("notes.txt");
         fs::write(&source, b"text").unwrap();
 
-        let unknown = import_files(&root, "unknown", std::slice::from_ref(&source));
+        let unknown = import_files(
+            &root,
+            &categories(),
+            "unknown",
+            std::slice::from_ref(&source),
+        );
         assert_eq!(unknown.failed, 1);
         assert!(unknown.messages[0].contains("未注册"));
 
-        let unsupported = import_files(&root, "epic", &[source]);
+        let unsupported = import_files(&root, &categories(), "epic", &[source]);
         assert_eq!(unsupported.failed, 1);
         assert!(root.join("epic").is_dir());
     }
@@ -531,7 +570,7 @@ mod tests {
         let root = dir.path();
         let track = fixture(root, "memories", "old_name");
 
-        let change = rename_song(root, &track, "new name").unwrap();
+        let change = rename_song(root, &categories(), &track, "new name").unwrap();
         assert_eq!(change.to, "memories/new name");
         assert!(root.join("memories/new name.mp3").is_file());
         assert!(!root.join("memories/old_name.mp3").exists());
@@ -544,11 +583,11 @@ mod tests {
             path: String::new(),
         };
         assert!(matches!(
-            rename_song(root, &current, "../escape"),
+            rename_song(root, &categories(), &current, "../escape"),
             Err(OpError::InvalidTitle(_))
         ));
         assert!(matches!(
-            rename_song(root, &current, "   "),
+            rename_song(root, &categories(), &current, "   "),
             Err(OpError::EmptyTitle)
         ));
     }
@@ -560,7 +599,7 @@ mod tests {
         fixture(root, "epic", "one");
         let second = fixture(root, "epic", "two");
 
-        let error = rename_song(root, &second, "one").unwrap_err();
+        let error = rename_song(root, &categories(), &second, "one").unwrap_err();
 
         assert!(matches!(error, OpError::TargetExists(_)));
         assert!(root.join("epic/two.mp3").is_file());
@@ -573,7 +612,7 @@ mod tests {
         let track = fixture(root, "cheerful", "same_name");
         fixture(root, "country", "same_name");
 
-        let change = move_song(root, &track, "country").unwrap();
+        let change = move_song(root, &categories(), &track, "country").unwrap();
 
         assert_eq!(change.to, "country/same_name (2)");
         assert!(root.join("country/same_name (2).mp3").is_file());
@@ -586,7 +625,8 @@ mod tests {
         let root = dir.path();
         let track = fixture(root, "cheerful", "before");
 
-        let change = update_song(root, &track, Some("after"), Some("gufeng")).unwrap();
+        let change =
+            update_song(root, &categories(), &track, Some("after"), Some("gufeng")).unwrap();
 
         assert_eq!(change.from, "cheerful/before");
         assert_eq!(change.to, "gufeng/after");
@@ -600,7 +640,7 @@ mod tests {
         let first = fixture(root, "epic", "one");
         let second = fixture(root, "epic", "two");
 
-        let outcome = trash_songs(root, &[&first, &second]);
+        let outcome = trash_songs(root, &categories(), &[&first, &second]);
 
         assert_eq!(outcome.report.succeeded, 2);
         assert_eq!(outcome.removed.len(), 2);
@@ -636,7 +676,7 @@ mod tests {
         let first = same_title(&first);
         let second = same_title(&second);
 
-        let outcome = export_songs(&root, &dest, &[&first, &second]);
+        let outcome = export_songs(&root, &categories(), &dest, &[&first, &second]);
 
         assert_eq!(outcome.report.succeeded, 2);
         assert!(dest.join("a_b.mp3").is_file());
