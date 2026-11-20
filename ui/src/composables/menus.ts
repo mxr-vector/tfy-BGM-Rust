@@ -6,6 +6,7 @@ import {
   type MenuPoint,
 } from '@/lib/context-menu';
 import type { CategorySummary, Song } from '@/lib/types';
+import { guardLibraryPlayback } from '@/composables/useScheduler';
 import {
   deleteSongs,
   exportSelection,
@@ -63,16 +64,26 @@ export function openSongMenu(
   const list = visibleSongs.value;
 
   const items: ContextMenuEntry[] = [
-    { icon: 'play', label: '播放', action: () => playSong(song, list, true) },
+    {
+      icon: 'play',
+      label: '播放',
+      action: () => {
+        if (!guardLibraryPlayback()) playSong(song, list, true);
+      },
+    },
     {
       icon: 'repeat',
       label: '顺序播放',
-      action: () => playSongWithMode(song, list, PLAY_MODES.sequence),
+      action: () => {
+        if (!guardLibraryPlayback()) playSongWithMode(song, list, PLAY_MODES.sequence);
+      },
     },
     {
       icon: 'shuffle',
       label: '随机播放',
-      action: () => playSongWithMode(song, list, PLAY_MODES.shuffle),
+      action: () => {
+        if (!guardLibraryPlayback()) playSongWithMode(song, list, PLAY_MODES.shuffle);
+      },
     },
     separator(),
     {

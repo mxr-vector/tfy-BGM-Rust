@@ -5,6 +5,7 @@ import {
   currentProgramSong,
   nextProgram,
   schedulerNow,
+  syncToCurrentProgram,
 } from '@/composables/useScheduler';
 import { showModal } from '@/lib/modal';
 import { formatTime } from '@/lib/format';
@@ -216,14 +217,21 @@ async function saveDraft(): Promise<void> {
   saving.value = true;
   const ok = await persistSchedule(next);
   saving.value = false;
-  if (ok) cancelEdit();
+  if (ok) {
+    cancelEdit();
+    // 保存后立即按当前时间对齐：正在生效的节目无需等到下一次 tick。
+    syncToCurrentProgram();
+  }
 }
 
 async function toggleEntry(entry: ScheduleEntry): Promise<void> {
+  const enable = !entry.enabled;
   const next = state.schedule.map((item) =>
-    item.id === entry.id ? { ...item, enabled: !item.enabled } : item,
+    item.id === entry.id ? { ...item, enabled: enable } : item,
   );
-  await persistSchedule(next);
+  const ok = await persistSchedule(next);
+  // 启用后若已落在节目时段内，立即切到该时段应播的歌曲。
+  if (ok && enable) syncToCurrentProgram();
 }
 
 async function removeEntry(entry: ScheduleEntry): Promise<void> {

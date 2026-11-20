@@ -1,6 +1,7 @@
 /** 全局键盘快捷键：空格播放/暂停、方向键跳转与音量、M 静音、Esc 逐层退出、/ 聚焦搜索。 */
 
 import { playerConfig } from '@/lib/config';
+import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { clearSelection, setSearch } from '@/stores/library';
 import {
   adjustVolume,
@@ -51,6 +52,7 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
     case 'Space':
       event.preventDefault();
       if (!state.currentSong) {
+        if (guardLibraryPlayback()) break;
         const list = visibleSongs.value;
         if (list.length > 0) playSong(list[0]!, list, true);
       } else {

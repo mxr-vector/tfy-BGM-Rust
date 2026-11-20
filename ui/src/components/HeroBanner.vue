@@ -8,6 +8,7 @@ import {
   PLAY_MODES,
 } from '@/lib/constants';
 import { withAlpha } from '@/lib/format';
+import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { smartPickSong } from '@/stores/queue';
 import { playSong, playSongWithMode } from '@/stores/player';
 import { categoryById, state, visibleSongs } from '@/stores/state';
@@ -109,11 +110,13 @@ const info = computed(() => {
 });
 
 function playAll(): void {
+  if (guardLibraryPlayback()) return;
   const songs = list.value;
   if (songs.length > 0) playSong(songs[0]!, songs, true);
 }
 
 function shuffle(): void {
+  if (guardLibraryPlayback()) return;
   const songs = list.value;
   if (songs.length === 0) return;
   const pick = smartPickSong(songs, state.currentSong);

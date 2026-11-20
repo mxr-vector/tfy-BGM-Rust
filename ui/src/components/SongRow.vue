@@ -4,6 +4,7 @@ import { DEFAULT_ACCENT, SORT_KEYS } from '@/lib/constants';
 import { withAlpha } from '@/lib/format';
 import type { Song } from '@/lib/types';
 import { openCategoryMenu, openSongMenu } from '@/composables/menus';
+import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { playSong } from '@/stores/player';
 import { toggleFavorite } from '@/stores/prefs';
 import { categoryById, state, visibleSongs } from '@/stores/state';
@@ -37,6 +38,7 @@ const styleLabel = computed(() =>
 );
 
 function playRow(): void {
+  if (guardLibraryPlayback()) return;
   playSong(props.song, visibleSongs.value);
 }
 

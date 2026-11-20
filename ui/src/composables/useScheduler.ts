@@ -7,6 +7,7 @@
  */
 
 import { computed, ref } from 'vue';
+import { toast } from '@/lib/toast';
 import type { ScheduleEntry, ScheduleSong } from '@/lib/types';
 import { setEndedHandler } from '@/stores/player';
 import { applyScheduleEntry } from '@/stores/schedule';
@@ -136,6 +137,38 @@ export const currentProgramSong = computed<ScheduleSong | null>(() => {
   const date = schedulerNow.value;
   return latestSongBefore(entry, date.getHours() * 60 + date.getMinutes());
 });
+
+/** 处于节目单时段时拦截手动点播并提示；返回 true 表示已拦截。 */
+export function guardLibraryPlayback(): boolean {
+  const program = currentProgram.value;
+  if (!program) return false;
+  toast(
+    `当前处于节目单「${program.name}」播放时段（${program.start}–${program.end}），暂不能手动点播`,
+    'info',
+  );
+  return true;
+}
+
+/**
+ * 立即按当前时间对齐节目，供启用/保存节目后调用，无需等待下一秒的 tick。
+ * 时段内还没有歌曲到点时从节目第一首开始，避免启用后仍在播放音乐库曲目。
+ */
+export function syncToCurrentProgram(): boolean {
+  schedulerNow.value = new Date();
+  const program = currentProgram.value;
+  if (!program) return false;
+  const date = schedulerNow.value;
+  const due = latestSongBefore(program, date.getHours() * 60 + date.getMinutes());
+  const target = due ?? program.songs[0] ?? null;
+  if (!target) return false;
+
+  const switched = activeScheduleId.value !== program.id;
+  if (!applyScheduleEntry(program, { songKey: target.key, announce: switched, restart: false })) {
+    return false;
+  }
+  activeScheduleId.value = program.id;
+  return true;
+}
 
 /** 下一档节目；今天已无节目时指向明天的第一档。 */
 export const nextProgram = computed<{ entry: ScheduleEntry; tomorrow: boolean } | null>(() => {

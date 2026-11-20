@@ -5,7 +5,7 @@ import {
   playerPopover,
   togglePlayerPopover,
 } from '@/composables/usePlayerPopover';
-import { currentProgram } from '@/composables/useScheduler';
+import { currentProgram, guardLibraryPlayback } from '@/composables/useScheduler';
 import { playerConfig } from '@/lib/config';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
@@ -94,6 +94,7 @@ const coverStyle = computed(() =>
 
 function onPlayClick(): void {
   if (!song.value) {
+    if (guardLibraryPlayback()) return;
     const list = visibleSongs.value;
     if (list.length > 0) playSong(list[0]!, list, true);
     return;
