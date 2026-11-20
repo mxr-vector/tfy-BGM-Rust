@@ -86,6 +86,17 @@ jobs:
             ~/.cargo/.crates2.json
           key: tauri-cli-${{ runner.os }}-v2
 
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
 
@@ -148,6 +159,17 @@ jobs:
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
           key: tauri-cli-${{ runner.os }}-v2
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked

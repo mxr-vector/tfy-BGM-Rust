@@ -1,0 +1,6 @@
+packages:
+  - ui
+
+# pnpm 11 默认阻止依赖的安装脚本；esbuild 需要执行 postinstall 校验平台二进制。
+allowBuilds:
+  esbuild: true

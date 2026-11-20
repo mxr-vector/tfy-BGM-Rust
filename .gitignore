@@ -10,10 +10,16 @@
 # Generated Tauri schema
 /src-tauri/gen/
 
+
+node_modules/
+/ui/dist/
 # CodeGraph tooling
 .codegraph/
 .workbuddy/
-
+.agents/
+.claude/
+agent/
+skills-lock.json
 # 曲库软删除回收站
 /bgm/.tfy-trash/
 

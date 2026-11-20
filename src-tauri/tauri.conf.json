@@ -4,7 +4,10 @@
   "version": "1.0.0",
   "identifier": "com.yuanjie.tfybgm",
   "build": {
-    "frontendDist": "ui"
+    "beforeDevCommand": "pnpm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm run build",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "withGlobalTauri": true,

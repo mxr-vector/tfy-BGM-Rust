@@ -41,8 +41,19 @@ $zipPath = Join-Path $dist $zipName
 Assert-NotRunning -Path $package
 
 if (-not $SkipBuild) {
+    # cargo build 不会执行 tauri 的 beforeBuildCommand，先单独构建前端产物。
+    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+        throw "pnpm not found. Install Node.js 20+ and run: corepack enable"
+    }
     $cargo = Resolve-CargoExe
-    Write-Host "[1/4] cargo build --release"
+    Write-Host "[1/4] pnpm run build + cargo build --release"
+    Push-Location $repo
+    try {
+        & pnpm run build
+        if ($LASTEXITCODE -ne 0) { throw "frontend build failed (exit $LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
     Push-Location $srcTauri
     try {
         & $cargo build --release

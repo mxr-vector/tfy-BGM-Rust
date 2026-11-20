@@ -1,0 +1,310 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue';
+import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
+import { clamp, formatTime, withAlpha } from '@/lib/format';
+import {
+  audioState,
+  cyclePlayMode,
+  cycleRate,
+  drawerOpen,
+  exportSong,
+  exporting,
+  formatRate,
+  modeMeta,
+  nextTrack,
+  playbackError,
+  playSong,
+  prevTrack,
+  seekTo,
+  setVolume,
+  toggleCurrentFavorite,
+  toggleDrawer,
+  toggleMute,
+  togglePlay,
+} from '@/stores/player';
+import { categoryById, state, visibleSongs } from '@/stores/state';
+import Icon from './Icon.vue';
+
+const progressEl = ref<HTMLElement | null>(null);
+const dragging = ref(false);
+const dragTime = ref(0);
+const hoverVisible = ref(false);
+const hoverRatio = ref(0);
+
+const song = computed(() => state.currentSong);
+const category = computed(() =>
+  song.value ? categoryById(song.value.category) : null,
+);
+const color = computed(() => category.value?.color ?? DEFAULT_ACCENT);
+const duration = computed(() => audioState.duration);
+const displayTime = computed(() =>
+  dragging.value ? dragTime.value : audioState.currentTime,
+);
+const percent = computed(() =>
+  duration.value > 0 ? clamp((displayTime.value / duration.value) * 100, 0, 100) : 0,
+);
+const mode = computed(() => modeMeta(state.prefs?.playMode ?? PLAY_MODES.sequence));
+const effectiveVolume = computed(() =>
+  state.prefs ? (state.prefs.muted ? 0 : state.prefs.volume) : 0,
+);
+const volumeIcon = computed(() => {
+  if (effectiveVolume.value === 0) return 'volume-mute';
+  return effectiveVolume.value < 0.5 ? 'volume-low' : 'volume';
+});
+const isFavorite = computed(
+  () => Boolean(song.value) && state.favorites.has(song.value!.key),
+);
+const coverStyle = computed(() =>
+  song.value
+    ? {
+        '--cover-soft': withAlpha(color.value, 0.6),
+        '--cover-line': withAlpha(color.value, 0.3),
+      }
+    : {},
+);
+
+function onPlayClick(): void {
+  if (!song.value) {
+    const list = visibleSongs.value;
+    if (list.length > 0) playSong(list[0]!, list, true);
+    return;
+  }
+  togglePlay();
+}
+
+function ratioFromEvent(event: PointerEvent): number {
+  const rect = progressEl.value?.getBoundingClientRect();
+  if (!rect || rect.width === 0) return 0;
+  return clamp((event.clientX - rect.left) / rect.width, 0, 1);
+}
+
+function onPointerDown(event: PointerEvent): void {
+  if (!Number.isFinite(duration.value) || duration.value <= 0) return;
+  dragging.value = true;
+  dragTime.value = ratioFromEvent(event) * duration.value;
+  progressEl.value?.setPointerCapture(event.pointerId);
+  hoverVisible.value = false;
+}
+
+function onPointerMove(event: PointerEvent): void {
+  if (!Number.isFinite(duration.value) || duration.value <= 0) return;
+  const ratio = ratioFromEvent(event);
+  if (dragging.value) {
+    dragTime.value = ratio * duration.value;
+  } else {
+    hoverVisible.value = true;
+    hoverRatio.value = ratio;
+  }
+}
+
+function finishDrag(event: PointerEvent): void {
+  if (!dragging.value) return;
+  if (progressEl.value?.hasPointerCapture(event.pointerId)) {
+    progressEl.value.releasePointerCapture(event.pointerId);
+  }
+  dragging.value = false;
+  seekTo(dragTime.value);
+}
+
+function onVolumeInput(event: Event): void {
+  setVolume(Number((event.target as HTMLInputElement).value));
+}
+</script>
+
+<template>
+  <footer
+    class="audio-player"
+    id="player"
+    :class="{ 'is-playing': Boolean(song) && state.playing }"
+  >
+    <div class="player-wrapper">
+      <div
+        ref="progressEl"
+        class="progress-bar"
+        :class="{ 'is-dragging': dragging, 'is-unready': duration <= 0 }"
+        id="progress"
+        role="slider"
+        aria-label="播放进度"
+        tabindex="0"
+        aria-valuemin="0"
+        :aria-valuemax="Math.round(duration)"
+        :aria-valuenow="Math.round(displayTime)"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="finishDrag"
+        @pointercancel="finishDrag"
+        @pointerleave="hoverVisible = false"
+      >
+        <div class="progress-track">
+          <div
+            class="progress-buffered"
+            id="progress-buffered"
+            :style="{ width: `${audioState.bufferedPercent}%` }"
+          ></div>
+          <div
+            class="progress-played"
+            id="progress-played"
+            :style="{ width: `${percent}%` }"
+          ></div>
+        </div>
+        <div
+          class="progress-thumb"
+          id="progress-thumb"
+          :style="{ left: `clamp(7px, ${percent}%, calc(100% - 7px))` }"
+        ></div>
+        <div
+          v-if="hoverVisible"
+          class="hover-tooltip"
+          id="hover-tooltip"
+          :style="{ left: `${hoverRatio * 100}%` }"
+        >
+          {{ formatTime(hoverRatio * duration) }}
+        </div>
+      </div>
+
+      <div class="player-content">
+        <div class="track-info">
+          <div class="track-cover" id="now-cover" :style="coverStyle">
+            <span class="cover-icon" id="now-cover-icon">
+              <Icon :name="song ? (category?.icon || 'music') : 'disc'" />
+            </span>
+          </div>
+          <div class="track-meta">
+            <div class="title-row">
+              <span class="track-title" id="now-title" :title="song?.title ?? ''">
+                {{ song?.title ?? '未在播放' }}
+              </span>
+              <span
+                v-if="song"
+                class="category-badge"
+                id="now-category"
+                :style="{
+                  '--tag-color': color,
+                  '--tag-bg': withAlpha(color, 0.13),
+                  '--tag-line': withAlpha(color, 0.32),
+                }"
+              >
+                {{ category?.nameZh ?? song.category }}
+              </span>
+            </div>
+            <span class="track-sub" id="now-sub" :title="song?.fileName ?? ''">
+              {{ song ? (category?.labelEn ?? song.category) : '从曲库中选择一首配乐' }}
+            </span>
+          </div>
+          <button
+            v-if="song"
+            type="button"
+            class="action-btn now-fav"
+            id="btn-now-favorite"
+            :class="{ 'is-favorite': isFavorite }"
+            title="收藏当前曲目"
+            @click="toggleCurrentFavorite"
+          >
+            <Icon name="heart" />
+          </button>
+        </div>
+
+        <div class="controls-section">
+          <div class="buttons-row">
+            <button
+              type="button"
+              class="control-btn"
+              :class="{ 'is-active': (state.prefs?.playMode ?? 'sequence') !== PLAY_MODES.sequence }"
+              id="btn-mode"
+              :title="mode.title"
+              @click="cyclePlayMode"
+            >
+              <Icon :name="mode.icon" />
+            </button>
+            <button type="button" class="control-btn" id="btn-prev" title="上一首" @click="prevTrack()">
+              <Icon name="skip-back" />
+            </button>
+            <button
+              type="button"
+              class="play-main-btn"
+              id="btn-play"
+              :title="song ? (state.playing ? '暂停 (空格)' : '播放 (空格)') : '播放当前列表第一首 (空格)'"
+              @click="onPlayClick"
+            >
+              <Icon :name="state.playing ? 'pause-fill' : 'play-fill'" />
+            </button>
+            <button type="button" class="control-btn" id="btn-next" title="下一首" @click="nextTrack()">
+              <Icon name="skip-forward" />
+            </button>
+            <button
+              type="button"
+              class="speed-btn"
+              id="btn-rate"
+              :title="`当前 ${formatRate(state.prefs?.playbackRate ?? 1)}，点击切换倍速`"
+              @click="cycleRate"
+            >
+              {{ formatRate(state.prefs?.playbackRate ?? 1) }}
+            </button>
+          </div>
+          <div class="time-display">
+            <span class="time-current" id="time-current">{{ formatTime(displayTime) }}</span>
+            <span class="time-separator">/</span>
+            <span class="time-total" id="time-total">
+              {{ duration > 0 ? formatTime(duration) : '--:--' }}
+            </span>
+          </div>
+        </div>
+
+        <div class="utility-section">
+          <div class="volume-container">
+            <button
+              type="button"
+              class="action-btn"
+              id="btn-mute"
+              :title="state.prefs?.muted ? '取消静音 (M)' : '静音 (M)'"
+              @click="toggleMute"
+            >
+              <Icon :name="volumeIcon" />
+            </button>
+            <input
+              type="range"
+              class="volume-range"
+              id="volume-range"
+              min="0"
+              max="1"
+              step="0.01"
+              :value="effectiveVolume"
+              :style="{ '--volume': `${Math.round(effectiveVolume * 100)}%` }"
+              aria-label="音量"
+              @input="onVolumeInput"
+            />
+            <span class="volume-percent" id="volume-percent">
+              {{ Math.round(effectiveVolume * 100) }}%
+            </span>
+          </div>
+          <button
+            type="button"
+            class="action-btn"
+            id="btn-download"
+            title="导出当前音频 (.mp3)"
+            :disabled="exporting || !song"
+            @click="song && exportSong(song.key)"
+          >
+            <Icon name="download" />
+          </button>
+          <button
+            type="button"
+            class="action-btn queue-btn"
+            :class="{ 'is-open': drawerOpen }"
+            id="btn-queue"
+            title="播放队列"
+            @click="toggleDrawer"
+          >
+            <Icon name="list-music" />
+            <span class="queue-count" id="queue-count">{{ state.queue.length }}</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="playbackError" class="playback-error" id="playback-error">
+        <Icon name="alert" />
+        <span id="playback-error-text">{{ playbackError }}</span>
+      </div>
+    </div>
+  </footer>
+</template>

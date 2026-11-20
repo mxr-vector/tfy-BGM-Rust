@@ -1,8 +1,8 @@
 # 听风吟 · TFY BGM
 
 专为视频剪辑打造的本地 BGM 音频素材库桌面客户端，基于 **Rust + Tauri 2** 构建。
-分类扫描、收藏、检索、队列与全功能播放器全部在本地完成，离线可用、不含前端构建链；
-界面为 `src-tauri/ui/` 下的原生 HTML / CSS / ES Modules，业务逻辑集中在 Rust。
+分类扫描、收藏、检索、队列与全功能播放器全部在本地完成，离线可用；
+界面为 `ui/` 下的 **Vite + Vue 3 + TypeScript**，业务逻辑集中在 Rust 核心库，前端只负责展示与 IPC。
 
 ---
 
@@ -42,7 +42,7 @@
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、导入/重命名/移动/软删除、分类元数据、应用配置、偏好持久化、导出校验；可独立测试 |
 | 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 内置 6 个分类的默认文案与图标，编译期嵌入 |
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
-| 原生前端 | `src-tauri/ui/` | 无构建步骤的 HTML / CSS / ES Modules |
+| 前端 | `ui/` | Vite + Vue 3 + TypeScript；`pnpm run build` 产物 `ui/dist/` 由 Tauri 内嵌 |
 | 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、Asset Protocol（音频不打包） |
 | 打包脚本 | `scripts/` | 绿色版 / NSIS 安装包 / Linux deb·rpm，统一产物命名并生成 SHA-256 校验值 |
 | CI | `.github/workflows/package.yml` | 推 `v*` 标签自动构建全平台产物并发布 Release |
@@ -51,7 +51,7 @@
 | 界面截图 | `assets/` | README 使用的界面预览图，不参与打包 |
 
 ```
-tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC──▶ 原生 UI 渲染
+tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC──▶ Vue 3 界面
               └─ bgm/<分类>/*.mp3（exe 同级外置目录，不打进程序）
 ```
 
@@ -167,7 +167,7 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
    - 前端事件名、Tauri 命令名、播放模式等契约字符串统一收敛在 `js/constants.js`，
      内置分类模板位于 `core/assets/categories.default.json`，修改文案不需要改代码。
 8. **桌面体验**
-   - 无 Node / npm 依赖，离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
+   - 运行时不依赖 Node / pnpm（前端在构建期打包），离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
    - 中文本地字体栈，不请求任何远程字体或第三方资源。
 
 ### 键盘快捷键
@@ -189,6 +189,7 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 ### 环境要求
 
 - Rust **1.90+**（`rustup` 安装稳定版即可）。
+- **Node.js 20+ 与 pnpm 11**：仅构建期需要，用于 Vite + Vue 3 + TypeScript（推荐 `corepack enable` 启用 pnpm）。
 - Tauri 2 桌面依赖：
   - **Fedora**
     ```bash
@@ -208,19 +209,31 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 
 ### 启动开发版
 
-任选一种方式（项目本身不含前端构建链）：
+先在仓库根目录安装前端依赖：
+
+```bash
+corepack enable            # 首次使用 pnpm 时
+pnpm install               # 安装根工作区与 ui/ 的全部依赖
+```
+
+然后任选一种方式启动：
 
 ```bash
 # 方式一：Rust 原生 CLI（推荐，首次需安装）
 cargo install tauri-cli --version "^2" --locked
 cd src-tauri && cargo tauri dev
 
-# 方式二：临时调用官方 CLI，不往项目里装前端依赖（仓库根目录执行）
+# 方式二：官方 CLI（仓库根目录执行）
 pnpm dlx @tauri-apps/cli@^2 dev
 ```
 
-`tauri.conf.json` 的 `frontendDist` 直接指向 `ui/`，由 Tauri 内置服务器读取静态文件：
-修改 `src-tauri/ui/` 后刷新窗口（`Ctrl+R`）即可，无需前端构建；Rust 改动会自动重编译。
+`tauri.conf.json` 已配置：
+
+- `beforeDevCommand: "pnpm run dev"` — Tauri 自动启动 Vite（`http://localhost:1420`），Vue 组件改动热更新；
+- `beforeBuildCommand: "pnpm run build"` — 打包前自动执行 `vue-tsc` 类型检查与 Vite 生产构建；
+- `frontendDist: "../ui/dist"` — 生产产物目录。
+
+Rust 改动仍由 Tauri 自动重编译；只改前端时热更新即可，不需要重启窗口。
 
 ### 打包与分发
 
@@ -229,9 +242,10 @@ pnpm dlx @tauri-apps/cli@^2 dev
 
 #### 方式一：绿色版（exe + 外置 bgm，推荐）
 
-只编译 exe（不需要 Tauri CLI）：
+只编译 exe（不需要 Tauri CLI，但要先构建前端）：
 
 ```powershell
+pnpm run build
 cd src-tauri
 cargo build --release
 ```
@@ -271,6 +285,7 @@ dist/
 
 打包脚本的几条约定：
 
+- 构建前会先执行 `pnpm run build`（需要 Node.js 20+ 与 pnpm），确保 `ui/dist` 与 exe 同批次更新。
 - `-WithBgm` 仍可传入，等同于默认行为。
 - 重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。
 - `-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。

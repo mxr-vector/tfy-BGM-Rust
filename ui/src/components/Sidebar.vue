@@ -1,0 +1,122 @@
+<script setup lang="ts">
+import { ALL_CATEGORY } from '@/lib/constants';
+import {
+  busyAction,
+  chooseLibrary,
+  openLibraryDir,
+  rescanLibrary,
+  resetLibraryDir,
+} from '@/stores/actions';
+import { setCategory, toggleFavoritesOnly } from '@/stores/library';
+import { toggleDrawer } from '@/stores/player';
+import { favoriteCount, sourceLabel, state } from '@/stores/state';
+import Icon from './Icon.vue';
+
+function isBusy(): boolean {
+  return busyAction.value !== null;
+}
+</script>
+
+<template>
+  <aside class="sidebar">
+    <nav class="side-nav" aria-label="曲库导航">
+      <span class="nav-section-label">浏览</span>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ 'is-active': state.category === ALL_CATEGORY && !state.favoritesOnly }"
+        id="nav-all"
+        title="音乐库"
+        @click="setCategory(ALL_CATEGORY)"
+      >
+        <Icon name="music" class="nav-icon" />
+        <span class="nav-label">音乐库</span>
+        <span class="nav-count" id="count-all">{{ state.library.songs.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="nav-item nav-item-fav"
+        :class="{ 'is-active': state.favoritesOnly }"
+        id="nav-favorites"
+        title="我的收藏"
+        @click="toggleFavoritesOnly"
+      >
+        <Icon name="heart" class="nav-icon nav-icon-heart" />
+        <span class="nav-label">我的收藏</span>
+        <span class="nav-count is-pink" id="count-favorites">{{ favoriteCount }}</span>
+      </button>
+      <button
+        type="button"
+        class="nav-item"
+        id="nav-queue"
+        title="播放队列"
+        @click="toggleDrawer"
+      >
+        <Icon name="list-music" class="nav-icon" />
+        <span class="nav-label">播放队列</span>
+        <span class="nav-count" id="count-queue">{{ state.queue.length }}</span>
+      </button>
+
+      <div class="nav-section">
+        <span class="nav-section-label">曲库管理</span>
+        <button
+          type="button"
+          class="nav-item is-sub"
+          id="btn-rescan"
+          title="重新扫描曲库目录并热加载配置"
+          :disabled="isBusy()"
+          @click="rescanLibrary"
+        >
+          <Icon name="refresh" class="nav-icon" />
+          <span class="nav-label">重新扫描</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item is-sub"
+          id="btn-choose"
+          title="选择其他曲库文件夹"
+          :disabled="isBusy()"
+          @click="chooseLibrary"
+        >
+          <Icon name="folder" class="nav-icon" />
+          <span class="nav-label">切换曲库目录</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item is-sub"
+          id="btn-open"
+          title="在文件管理器中打开曲库目录"
+          :disabled="isBusy()"
+          @click="openLibraryDir"
+        >
+          <Icon name="external" class="nav-icon" />
+          <span class="nav-label">打开曲库文件夹</span>
+        </button>
+        <button
+          v-show="state.library.source === 'custom'"
+          type="button"
+          class="nav-item is-sub"
+          id="btn-reset"
+          title="清除自定义目录，恢复程序同级的外置曲库"
+          :disabled="isBusy()"
+          @click="resetLibraryDir"
+        >
+          <Icon name="rotate" class="nav-icon" />
+          <span class="nav-label">恢复默认曲库</span>
+        </button>
+      </div>
+    </nav>
+
+    <div class="side-status">
+      <div class="status-row">
+        <span class="status-indicator" :class="{ 'is-warn': state.library.warnings.length > 0 }">
+          <i class="status-dot"></i>曲库就绪
+        </span>
+        <span class="status-count" id="status-count">{{ state.library.songs.length }} 首</span>
+      </div>
+      <span class="status-path" id="status-path" :title="state.library.root">
+        {{ sourceLabel() }} · {{ state.library.root || '未找到曲库目录' }}
+      </span>
+    </div>
+  </aside>
+</template>
