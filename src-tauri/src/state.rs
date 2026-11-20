@@ -1,7 +1,8 @@
 //! 应用运行期状态：偏好、曲库根目录与最近一次扫描结果。
 //!
-//! 曲库根目录解析优先级：`TFY_BGM_DIR` 环境变量 → 用户自选目录 → 当前工作目录下的
-//! `bgm/`（内置默认）→ 应用资源目录 → 开发仓库目录。
+//! 曲库根目录解析优先级：`TFY_BGM_DIR` 环境变量 → 用户自选目录 → 开发仓库 `bgm/`
+//! （仅 debug）→ exe 同级 `bgm/` → 当前工作目录 `bgm/` → 应用配置目录 `bgm/`。
+//! 外置挂载点缺失时自动创建（优先 exe 同级，无写入权限时退到配置目录），并补全分类子目录。
 //! 所有写操作先持久化再更新内存，并通过独立的命令修改曲库目录，避免前端偏好覆盖目录选择。
 
 use std::collections::{HashMap, HashSet};
@@ -104,6 +105,9 @@ impl AppState {
         }
 
         let (root, source, mut root_warnings) = resolve_root(app, &prefs);
+        if source == LibrarySource::External {
+            root_warnings.append(&mut ensure_category_dirs(&root, &categories.items));
+        }
         warnings.append(&mut root_warnings);
 
         let mut library = scan_library(&root, source, &categories.items);
@@ -252,7 +256,10 @@ impl AppState {
     pub fn reset_library_dir(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
         self.persist_library_dir(None)?;
         let prefs = self.prefs.read().clone();
-        let (root, source, warnings) = resolve_root(app, &prefs);
+        let (root, source, mut warnings) = resolve_root(app, &prefs);
+        if source == LibrarySource::External {
+            warnings.append(&mut ensure_category_dirs(&root, &self.category_items()));
+        }
         self.install_root(app, root, source, warnings)
     }
 
@@ -522,51 +529,83 @@ fn resolve_root(app: &AppHandle, prefs: &Prefs) -> (PathBuf, LibrarySource, Vec<
             return (absolute(path), LibrarySource::Custom, warnings);
         }
         warnings.push(format!(
-            "自定义曲库目录不存在，已回退到内置曲库：{}",
+            "自定义曲库目录不存在，已回退到外置曲库：{}",
             path.display()
         ));
     }
 
-    resolve_bundled_root(app, warnings)
-}
-
-fn resolve_bundled_root(
-    app: &AppHandle,
-    mut warnings: Vec<String>,
-) -> (PathBuf, LibrarySource, Vec<String>) {
-    // 内置曲库默认取当前工作目录下的 bgm/，便于 portable 分发与开发调试。
-    let current_root = env::current_dir()
-        .ok()
-        .map(|dir| dir.join(LIBRARY_DIR_NAME));
-    if let Some(root) = current_root.as_ref().filter(|root| root.is_dir()) {
-        return (absolute(root.clone()), LibrarySource::Bundled, warnings);
-    }
-
-    let resource_root = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|dir| dir.join(LIBRARY_DIR_NAME));
-    if let Some(root) = resource_root.as_ref().filter(|root| root.is_dir()) {
-        return (root.clone(), LibrarySource::Bundled, warnings);
-    }
-
+    // 开发模式优先使用仓库根目录的 bgm/，避免在 target/debug 下生成空曲库。
     #[cfg(debug_assertions)]
     {
         let dev_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../{LIBRARY_DIR_NAME}"));
         if dev_root.is_dir() {
-            return (dev_root, LibrarySource::Bundled, warnings);
+            return (absolute(dev_root), LibrarySource::Bundled, warnings);
         }
     }
 
-    let fallback = current_root
-        .or(resource_root)
+    resolve_external_root(app, warnings)
+}
+
+/// 外置曲库挂载点：优先 exe 同级，其次当前工作目录，最后应用配置目录。
+/// 都不存在时尝试在 exe 同级创建，失败则落到配置目录；分类子目录由调用方补全。
+fn resolve_external_root(
+    app: &AppHandle,
+    mut warnings: Vec<String>,
+) -> (PathBuf, LibrarySource, Vec<String>) {
+    let exe_root = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join(LIBRARY_DIR_NAME));
+    let cwd_root = env::current_dir()
+        .ok()
+        .map(|dir| dir.join(LIBRARY_DIR_NAME));
+    let config_root = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(LIBRARY_DIR_NAME));
+
+    if let Some(root) = [&exe_root, &cwd_root, &config_root]
+        .into_iter()
+        .flatten()
+        .find(|root| root.is_dir())
+    {
+        return (absolute(root.clone()), LibrarySource::External, warnings);
+    }
+
+    for root in [&exe_root, &config_root].into_iter().flatten() {
+        match fs::create_dir_all(root) {
+            Ok(()) => return (absolute(root.clone()), LibrarySource::External, warnings),
+            Err(error) => warnings.push(format!(
+                "无法创建外置曲库目录 {}：{error}",
+                root.display()
+            )),
+        }
+    }
+
+    let fallback = exe_root
+        .or(cwd_root)
+        .or(config_root)
         .unwrap_or_else(|| PathBuf::from(LIBRARY_DIR_NAME));
     warnings.push(format!(
-        "未找到内置曲库目录（当前路径下的 {LIBRARY_DIR_NAME}/），请通过「更换目录」选择文件夹：{}",
-        fallback.display()
+        "未找到可用的外置曲库目录，请在程序同级创建 {LIBRARY_DIR_NAME}/，或通过「切换曲库目录」选择文件夹"
     ));
-    (fallback, LibrarySource::Bundled, warnings)
+    (fallback, LibrarySource::External, warnings)
+}
+
+/// 在外置曲库中补齐分类子目录，首次启动即可直接往对应目录放音频。
+fn ensure_category_dirs(root: &Path, categories: &[Category]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for category in categories {
+        let dir = root.join(&category.id);
+        if dir.is_dir() {
+            continue;
+        }
+        if let Err(error) = fs::create_dir_all(&dir) {
+            warnings.push(format!("无法创建分类目录 {}：{error}", dir.display()));
+        }
+    }
+    warnings
 }
 
 fn absolute(path: PathBuf) -> PathBuf {

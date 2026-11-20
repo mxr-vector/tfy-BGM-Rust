@@ -25,11 +25,14 @@ pub fn has_audio_extension(name: &str) -> bool {
         && bytes[bytes.len() - ext.len()..].eq_ignore_ascii_case(ext)
 }
 
-/// 曲库来源，供界面区分内置曲库与用户自选目录。
+/// 曲库来源，供界面区分外置曲库、用户自选目录与开发仓库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LibrarySource {
+    /// 随应用/开发仓库提供的曲库（仅开发模式使用）。
     Bundled,
+    /// 程序同级或应用配置目录下的外置曲库挂载点。
+    External,
     Custom,
     Env,
 }

@@ -259,7 +259,7 @@ export function initLibraryUI() {
     void runStatusTask(els.btnReset, async () => {
       const snapshot = await invoke(COMMANDS.resetLibraryDir);
       replaceLibrary(snapshot);
-      toast('已恢复内置曲库', 'success');
+      toast('已恢复默认曲库', 'success');
     });
   });
   els.btnOpen.addEventListener('click', () => {

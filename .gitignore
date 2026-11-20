@@ -4,6 +4,9 @@
 **/*.rs.bk
 *.pdb
 
+# 绿色版打包产物
+/dist/
+
 # Generated Tauri schema
 /src-tauri/gen/
 

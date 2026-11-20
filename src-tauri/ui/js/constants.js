@@ -52,6 +52,7 @@ export const SORT_KEYS = Object.freeze({
 /** 与 Rust `LibrarySource` 保持一致。 */
 export const LIBRARY_SOURCES = Object.freeze({
   bundled: 'bundled',
+  external: 'external',
   custom: 'custom',
   env: 'env',
 });

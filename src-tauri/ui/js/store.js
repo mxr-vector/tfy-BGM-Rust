@@ -308,6 +308,8 @@ export function sourceLabel() {
   switch (state.library.source) {
     case LIBRARY_SOURCES.custom:
       return '自定义目录';
+    case LIBRARY_SOURCES.external:
+      return '外置曲库';
     case LIBRARY_SOURCES.env:
       return '环境变量目录';
     default:

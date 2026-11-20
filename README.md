@@ -13,18 +13,18 @@
 
 | 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
-| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名，随应用打包为资源 |
+| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名；外置挂载，不打进 exe / 安装包 |
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、导入/重命名/移动/软删除、分类元数据、应用配置、偏好持久化、导出校验；可独立测试 |
 | 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 内置 6 个分类的默认文案与图标，编译期嵌入 |
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
 | 原生前端 | `src-tauri/ui/` | 无构建步骤的 HTML / CSS / ES Modules |
-| 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、资源打包、Asset Protocol |
+| 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、Asset Protocol（音频不打包） |
 | 权限 | `src-tauri/capabilities/default.json` | 仅授予 `core:default` |
 | 图标 | `src-tauri/icons/` | 由 `app-icon.svg` 生成的各平台图标 |
 
 ```
-bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC──▶ 原生 UI 渲染
-        └── Tauri 打包 ──▶ $RESOURCE/bgm/（安装后即可离线使用）
+tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC──▶ 原生 UI 渲染
+              └─ bgm/<分类>/*.mp3（exe 同级外置目录，不打进程序）
 ```
 
 ---
@@ -85,12 +85,16 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
 ### 曲库根目录解析顺序
 
 1. 环境变量 `TFY_BGM_DIR`（适合开发与可移动硬盘）；
-2. 界面上「更换目录」选择并持久化的文件夹；
-3. **当前工作目录下的 `bgm/`**（内置默认，便于 portable 分发）；
-4. 打包进应用的资源目录 `$RESOURCE/bgm`；
-5. 开发模式下回退到仓库的 `bgm/` 目录。
+2. 界面上「切换曲库目录」选择并持久化的文件夹；
+3. 开发模式（debug）下的仓库根目录 `bgm/`；
+4. **exe 同级的 `bgm/`**（绿色版默认外置挂载点）；
+5. 当前工作目录下的 `bgm/`；
+6. 应用配置目录 `%APPDATA%\com.yuanjie.tfybgm\bgm`。
 
-左侧栏「曲库管理」可随时「重新扫描」「切换曲库目录」「打开曲库文件夹」；使用自定义目录时可「恢复内置曲库」。
+外置目录不存在时，程序会优先在 exe 同级创建 `bgm/` 并补齐分类子目录；若该位置不可写，则退到应用配置目录。
+音频始终在外部，替换 / 增删文件后点「重新扫描」即可，无需重新打包。
+
+左侧栏「曲库管理」可随时「重新扫描」「切换曲库目录」「打开曲库文件夹」；使用自定义目录时可「恢复默认曲库」。
 
 ---
 
@@ -183,17 +187,66 @@ pnpm dlx @tauri-apps/cli@^2 dev
 前端是 `frontendDist` 目录中的静态文件，由 Tauri 内置服务器直接读取：
 修改 `src-tauri/ui/` 后刷新窗口（`Ctrl+R`）即可，无需前端构建；Rust 改动会自动重编译。
 
-### 打包
+### 打包 Windows 可运行程序
 
-```bash
+音频不进入 exe，也不进入安装包；程序运行时从外置 `bgm/` 读取。
+
+#### 方式一：绿色版（exe + 外置 bgm，推荐）
+
+只编译 exe（不需要 Tauri CLI）：
+
+```powershell
 cd src-tauri
-cargo tauri build
+cargo build --release
 ```
 
-产物位于 `src-tauri/target/release/bundle/`（平台对应 deb/rpm/AppImage、dmg、msi/nsis）。
-音频目录通过 `bundle.resources` 打进安装包，因此安装后离线即用；由于曲库约 350 MB，
-安装包会相应较大。若希望安装包保持精简，可删除 `tauri.conf.json` 中的 `bundle.resources`，
-改用「更换目录」或 `TFY_BGM_DIR` 指向外部曲库。
+产物为 `src-tauri/target/release/tfy-bgm.exe`。手动放置时，在它同级放一个 `bgm/` 目录（首次启动也会自动创建并补齐分类子目录）：
+
+```
+tfy-bgm/
+  tfy-bgm.exe
+  bgm/
+    cheerful/
+    solitude/
+    memories/
+    epic/
+    gufeng/
+    country/
+```
+
+更推荐从仓库根目录一键组装 `dist\tfy-bgm\`，**默认会把仓库的 `bgm/` 一起复制**，解压即带曲库：
+
+```powershell
+# 自带曲库的绿色版（约 350 MB）
+powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
+
+# 只要空曲库的精简包（约 3.7 MB），启动后自己指定曲库目录
+powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
+```
+
+旧的 `-WithBgm` 参数仍然可用，等同于默认行为。重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。`-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。脚本检测到 `dist\tfy-bgm` 下的程序正在运行时会提示先关闭，避免覆盖失败。
+
+把整个 `dist\tfy-bgm` 文件夹压缩后即可分发。目标机器需要 WebView2 Runtime（Windows 10/11 通常已自带；缺失时安装微软官方运行时即可）。
+
+#### 方式二：NSIS 安装包
+
+```powershell
+cargo install tauri-cli --version "^2" --locked   # 首次安装
+cd src-tauri
+cargo tauri build --bundles nsis
+```
+
+产物：`src-tauri/target/release/bundle/nsis/tfy-bgm_0.1.0_x64-setup.exe`。
+安装包不包含音频，体积与普通桌面应用相当；默认按当前用户安装到可写目录，首次启动会在 exe 同级创建 `bgm/`，也可通过「切换曲库目录」指向任意位置。
+
+> `cargo tauri build` 不带 `--bundles` 时会按 `tauri.conf.json` 的 `targets: "all"` 尝试 NSIS 与 MSI；MSI 依赖 WiX，日常分发用 NSIS 即可。
+
+#### 环境要求（Windows）
+
+- Rust 1.90+（MSVC toolchain）；
+- Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」；
+- WebView2 Runtime（Win10/11 一般已预装）；
+- 仅打安装包时需要 Tauri CLI。
 
 ---
 

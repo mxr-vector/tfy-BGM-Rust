@@ -10,7 +10,7 @@ pub const CATEGORIES_FILE: &str = "categories.json";
 /// 应用级配置（品牌文案、播放器参数、界面文案）。
 pub const CONFIG_FILE: &str = "config.json";
 
-/// 内置曲库目录名。
+/// 外置曲库目录名（默认位于 exe 同级）。
 pub const LIBRARY_DIR_NAME: &str = "bgm";
 /// 指定曲库目录的环境变量。
 pub const LIBRARY_ENV_VAR: &str = "TFY_BGM_DIR";
