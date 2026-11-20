@@ -102,7 +102,7 @@ jobs:
       rpm: ${{ steps.plan.outputs.rpm }}
       library: ${{ steps.plan.outputs.library }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve build plan
         id: plan
@@ -184,7 +184,7 @@ jobs:
     # arm64 走原生 ARM64 运行器，x64 走完整版 windows-latest；两者都自带 MSVC。
     runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -194,7 +194,7 @@ jobs:
 
       # tauri-cli 编译一次要几分钟；带上 .crates.toml，命中缓存时 cargo install 会直接跳过。
       # 只有打 NSIS 才需要，绿色版直接 cargo build。
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: needs.plan.outputs.nsis == 'true'
         with:
           path: |
@@ -203,9 +203,9 @@ jobs:
             ~/.cargo/.crates2.json
           key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-v2
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -234,7 +234,7 @@ jobs:
           powershell @cmd
 
       # 只传最终文件，dist/tfy-bgm/ 组装目录不进 artifact，省一次几百 MB 的上传。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.arch }}
           path: |
@@ -253,7 +253,7 @@ jobs:
         arch: ${{ fromJSON(needs.plan.outputs.linux_arch) }}
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -284,7 +284,7 @@ jobs:
             librsvg2-dev \
             pkg-config
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin
@@ -292,9 +292,9 @@ jobs:
             ~/.cargo/.crates2.json
           key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-v2
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -317,7 +317,7 @@ jobs:
           if [ "$RPM" = "true" ]; then formats+=(rpm); fi
           bash scripts/package-linux.sh "${formats[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |
@@ -332,7 +332,7 @@ jobs:
     needs: [windows, linux]
     runs-on: ubuntu-slim
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -344,7 +344,7 @@ jobs:
           sha256sum tfy-bgm-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           fail_on_unmatched_files: true
