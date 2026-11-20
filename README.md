@@ -1,159 +1,201 @@
-# TFY · 视频剪辑 BGM 音频素材库与试听平台
+# 听风吟 · TFY BGM
 
-专为视频剪辑量身定制的高颜值背景音乐库与试听平台，采用 **Vue 3 + TypeScript + Vite** 构建，拥有现代化暗黑磨砂玻璃（Glassmorphism）UI、沉浸式交互与全功能音频播放器。
+专为视频剪辑打造的本地 BGM 音频素材库桌面客户端，基于 **Rust + Tauri 2** 构建。
+分类扫描、收藏、检索、队列与全功能播放器全部在本地完成，不依赖浏览器与 Node 运行时。
+
+> 本仓库已从 Vue 3 + Vite Web 应用迁移为 Rust + Tauri 桌面客户端：
+> 旧的 `src/`、`public/`、`package.json`、`vite.config.ts` 等 Web 实现已移除，
+> 前端改为 `src-tauri/ui/` 下的原生 HTML / CSS / ES Modules，业务逻辑集中在 Rust。
 
 ---
 
-## 📦 仓库结构与素材分发
+## 📦 仓库结构
 
-曲库以 **`public/bgm/` 目录本身为唯一事实来源**：文件名即曲名，不再有索引文件与元数据脚本。
-构建 / dev 期由 `vite.config.ts` 直接扫描各分类目录下的 `.mp3` 生成曲目清单（`virtual:bgm-manifest`），
-因此手动替换 / 增删音频后，页面展示的曲名即刻同步，不会出现时长、作者与实际音频不匹配的情况。
-
-| 内容 | 位置 | 是否进 git |
+| 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
-| 曲库共享类型（清单条目 / 曲目 / 分类，前后端与构建脚本共用） | `src/types/bgm.ts` | ✅ |
-| 分类元数据（目录名 ↔ 中文名 / 英文名 / 主题色，前端唯一事实来源） | `src/utils/categories.ts` | ✅ |
-| 目录扫描器（构建期 + 发布脚本共用，含扫描结果告警） | `scripts/scan_bgm.ts` | ✅ |
-| 曲目运行时工具（地址解析 / 下载） | `src/utils/songSchema.ts` | ✅ |
-| 分类目录占位 | `public/bgm/<分类>/.gitkeep` | ✅ |
-| 音频本体 | `public/bgm/<分类>/*.mp3` | ✅ 随仓库入库 |
-| 云盘发布产物 | `dist-bgm/` | ❌ |
+| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名，随应用打包为资源 |
+| 设备无关核心库 | `src-tauri/core/` | 目录扫描、分类元数据、偏好持久化、导出校验；可独立测试 |
+| Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
+| 原生前端 | `src-tauri/ui/` | 无构建步骤的 HTML / CSS / ES Modules |
+| 应用配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、资源打包、Asset Protocol |
+| 权限 | `src-tauri/capabilities/default.json` | 仅授予 `core:default` |
+| 图标 | `src-tauri/icons/` | 由 `app-icon.svg` 生成的各平台图标 |
 
 ```
-public/bgm/<分类>/*.mp3 ──vite 构建期扫描──▶ virtual:bgm-manifest ──▶ 前端渲染（仅曲名 + 分类）
-                       └────────pnpm bgm:publish────▶ dist-bgm/（打包上传云盘）
+bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC──▶ 原生 UI 渲染
+        └── Tauri 打包 ──▶ $RESOURCE/bgm/（安装后即可离线使用）
 ```
 
 ---
 
-## 📁 分类与英文目录规范
+## 🗂 分类与目录规范
 
-所有 BGM 按类别放入对应标准英文文件夹（曲目数量以 `public/bgm/<分类>/` 目录下的实际 mp3 为准）：
+曲名直接取文件名（下划线 `_` 显示为空格），增删 / 替换 mp3 后重新扫描即可生效，
+不再有 `songs.json` 或构建期虚拟清单。
 
-| 中文分类 | 英文目录名 | 适用剪辑场景 | 目录路径 |
-| :--- | :--- | :--- | :--- |
-| **欢快** | `cheerful` | 生活日常 Vlog、开箱解说、趣味搞笑、快节奏卡点 | `public/bgm/cheerful/` |
-| **独处** | `solitude` | 深夜独白、治愈流行、静心学习/工作、自律慢生活 | `public/bgm/solitude/` |
-| **回忆** | `memories` | 怀旧温情、青春毕业季、岁月光影、情感纪实 | `public/bgm/memories/` |
-| **史诗** | `epic` | 燃向混剪、大片战歌、高光集锦、企业宣传片 | `public/bgm/epic/` |
-| **古风** | `gufeng` | 国风雅韵、汉服走秀、仙剑经典、唯美武侠 | `public/bgm/gufeng/` |
-| **乡村** | `country` | 乡野烟火、农家田园、悠闲度假风景 | `public/bgm/country/` |
+| 中文分类 | 目录名 | 适用剪辑场景 |
+| :--- | :--- | :--- |
+| **欢快** | `cheerful` | 生活 Vlog、开箱解说、美食探店、快节奏卡点 |
+| **独处** | `solitude` | 深夜独白、治愈钢琴、学习工作、慢生活 |
+| **回忆** | `memories` | 怀旧故事、毕业季、岁月光影、情感纪实 |
+| **史诗** | `epic` | 燃向混剪、大片战歌、企业宣传、运动高光 |
+| **古风** | `gufeng` | 国风雅韵、汉服文旅、仙侠武侠 |
+| **乡村** | `country` | 乡野烟火、田园慢生活、度假风景 |
 
----
+注册分类与展示文案的唯一事实来源是 `src-tauri/core/src/categories.rs`。
+放入未注册目录或 `bgm/` 根目录的 mp3 会被忽略，并在界面上给出告警。
 
-## 🎵 曲库清单
+### 曲库根目录解析顺序
 
-以下为各分类目录下的实际曲目（共 92 首，以 `public/bgm/<分类>/` 目录为准；页面展示时下划线 `_` 显示为空格）：
+1. 环境变量 `TFY_BGM_DIR`（适合开发与可移动硬盘）；
+2. 界面上「更换目录」选择并持久化的文件夹；
+3. 打包进应用的资源目录 `$RESOURCE/bgm`；
+4. 开发模式下回退到仓库的 `bgm/` 目录。
 
-### 欢快 · cheerful（20 首）
-Starlight、buttercup、monkeys spring monkeys、monsieur melody、spring in my step、stranger、summer（菊次郎的夏天）、上春山、亲爱的共产主义请赐我前行的力量、可爱翻倍 吨吨吨、咏春、天下第一好、来杯好茶摇一摇、步步高、猪突猛进、竹林小曲（燕云）、答案、象王行、踏遍青山、风月吻眉梢
-
-### 独处 · solitude（19 首）
-flower dance、kiss the rain、little story、merry christmas mr.lawrence、oh you beat、on more time、river flow in you、the truth that you leave、windy hill、一个人过冬天、人生路漫漫、幻昼、悬溺、所念皆星河、爱人错过、爱的供养（伴奏）、稳稳的幸福（钢琴）、萤火虫之舞、虚拟
-
-### 回忆 · memories（11 首）
-asphyxia、你听啊秋末的落叶、告白之夜、城南花已开、山上的山花开呀、思绪回到那年秋、时间煮雨、樱花草、穿越时空的思念、阳光灿烂的日子（萨克斯）、风居住的街道
-
-### 史诗 · epic（28 首）
-EI Dorado、Empire of Angels、breath and life、conquest of paradise、go time、he's a pirate、heart of courage、intro、last reunion、pacific rim、requiem for a tower、rise、star sky、sunburst、三界四洲、天地缓缓、好一朵茉莉花、归零、惊涛日落（红警）、望月婵媛吟唱、水龙吟、浮光、相许、知我、空山野马、精卫、难解、bloody mary
-
-### 古风 · gufeng（13 首）
-九州同、云水禅心、偏爱、双面燕洵、忘记时间、明月引、此生不换、灼雪、莫失莫忘、醉忆仙乡、雪见-落入凡尘、青花瓷（纯音乐）、风云决
-
-### 乡村 · country（1 首）
-莫忙
+界面底部状态卡可随时「重新扫描」「更换目录」「打开目录」；使用自定义目录时可「恢复内置」。
 
 ---
 
-## ✨ 核心特性
+## ✨ 功能
 
-1. **现代化 UI 审美**
-   - 沉浸式暗色调 + 磨砂玻璃（Glassmorphism）质感。
-   - 各分类专属动态色彩流光（琥珀金、深邃紫、玫瑰粉、烈焰红、翡翠绿、青柠绿）。
-   - 正在播放时音频跳动可视化动效（Equalizer）与黑胶唱片旋转动效。
-2. **多维筛选与极速检索**
-   - 分类标签一键切换、收藏夹过滤。
-   - 实时响应式搜索（快捷键 `/` 快速聚焦搜索框）。
-   - 高密度列表视图，支持拖拽排序。
-   - 排序方式（默认推荐、按曲名 A-Z）。
-3. **全功能可拖拽底部音频播放器**
-   - **高精度时间轴拖拽**：鼠标悬停实时时间预览、支持随意点击与滑动拖拽精准跳转进度（Seek）。
-   - **全键盘快捷键控制**：
-     - `空格 (Space)`：播放 / 暂停
-     - `←` / `→`：快退 5 秒 / 快进 5 秒
-     - `↑` / `↓`：音量调节 (+10% / -10%)
-     - `M`：一键静音 / 恢复音量
-     - `/`：快速聚焦搜索框
-   - **播放模式切换**：支持顺序循环、单曲循环、随机播放。
-   - **多倍速播放**：0.75x、1.0x、1.25x、1.5x、2.0x 随意切换。
-   - **实时播放队列抽屉**：右侧滑入队列面板，支持快速切歌。
-   - **一键下载**：每首歌曲及播放器右侧均有一键下载本地 MP3 按钮。
+1. **本地曲库与分类检索**
+   - 6 大分类、收藏夹、实时搜索（曲名 / 中英文分类名 / 目录名）。
+   - 默认推荐排序与按曲名排序（`Intl.Collator` 中文排序）。
+   - 默认排序下支持拖动行调整顺序（仅内存，不写盘）。
+2. **全功能播放器**
+   - 播放 / 暂停、上一首 / 下一首、顺序 / 单曲 / 随机。
+   - 0.75x / 1.0x / 1.25x / 1.5x / 2.0x 倍速。
+   - 高精度进度条：悬停时间预览，按住拖动 Seek；缓冲进度显示。
+   - 音量滑杆、静音、播放队列抽屉、当前曲目收藏。
+   - 加载失败自动跳过（最多连续 3 首）并提示原因。
+3. **收藏与偏好持久化**
+   - 收藏、音量、静音、倍速、播放模式、排序由 Rust 写入应用配置目录的 `prefs.json`。
+   - 收藏使用稳定键 `分类/文件名主干`，替换同名文件不会丢失收藏。
+4. **音频导出**
+   - 每首曲目与播放器均可导出 mp3，弹出系统原生保存对话框。
+   - 复制后校验落盘字节数与源文件一致，失败会清理不完整文件。
+5. **桌面体验**
+   - 无 Node / npm 运行时依赖，离线可用；音频通过 Tauri Asset Protocol 本地流式读取。
+   - 中文本地字体栈，不请求任何远程字体或第三方资源。
+
+### 键盘快捷键
+
+| 按键 | 功能 |
+| :--- | :--- |
+| `空格` | 播放 / 暂停（未播放时从当前列表第一首开始） |
+| `←` / `→` | 后退 / 前进 5 秒 |
+| `↑` / `↓` | 音量 +10% / -10% |
+| `M` | 静音 / 恢复 |
+| `/` | 聚焦搜索框 |
+| `Esc` | 关闭队列抽屉；搜索框内清空搜索 |
 
 ---
 
-## 🚀 启动与使用指南
+## 🚀 开发与构建
 
-### 1. 启动本地开发服务
-```bash
-pnpm dev
-```
-启动后在浏览器中打开 `http://localhost:5173/` 即可尽情试听。
+### 环境要求
 
-### 2. 构建静态包（免服务器，双击即用）
-```bash
-pnpm build
-```
-产物 `dist/index.html` 为**单个自包含文件**（JS/CSS 全部内联），配合同目录的 `dist/bgm/` 音频，
-**直接双击 `dist/index.html` 即可在浏览器中打开使用，无需 nginx 等任何静态服务器**
-（基于 `vite-plugin-singlefile` + 相对 `base`，兼容 `file://` 协议）。
+- Rust **1.90+**（`rustup` 安装稳定版即可）。
+- Tauri 2 桌面依赖：
+  - **Fedora**
+    ```bash
+    sudo dnf install webkit2gtk4.1-devel gtk3-devel libsoup3-devel \
+      javascriptcoregtk4.1-devel openssl-devel librsvg2-devel \
+      libappindicator-gtk3-devel gcc gcc-c++ pkgconf-pkg-config
+    ```
+  - **Debian / Ubuntu**
+    ```bash
+    sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+    ```
+  - **macOS**：Xcode Command Line Tools；**Windows**：MSVC 生成工具 + WebView2 Runtime。
+- 音频由系统 WebView 解码，Linux 上如遇无声 / 无法拖动进度，请补装 GStreamer 插件：
+  `sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-ugly`（Debian/Ubuntu 对应 `gstreamer1.0-plugins-good` / `-ugly`）。
 
-> 说明：`file://` 下浏览器会拦截外部 ES 模块脚本，故构建期将脚本内联进 `index.html`；
-> 音频 `<audio>` 走相对路径加载本地文件，不受该限制。收藏 / 音量等仍用 `localStorage` 持久化。
+### 启动开发版
 
-如需本地起服务预览，也可用 `pnpm preview`。
-
-### 3. 类型检查
-```bash
-pnpm type-check
-```
-全仓已转为 TypeScript（`src/**` 含 `.vue` 均为 `<script setup lang="ts">`，构建脚本与 `vite.config.ts` 同为 TS），
-由 `vue-tsc` 做类型校验；`pnpm build` 已内置这一步，类型不通过则不产出。曲库清单的条目类型定义在 `src/types/bgm.ts`，
-扫描器与前端共用，清单结构一旦改动编译期即会报错。
-
-> `typescript` 请锁 5.x：vue-tsc 3.3 仍依赖 `typescript/lib/tsc` 入口，TypeScript 7（原生编译器）下无法运行。
-
-### 4. 曲库维护
-
-直接向对应分类目录 `public/bgm/<分类>/` 放入 / 替换 / 删除 `.mp3` 文件即可，**文件名就是页面上展示的曲名**（下划线 `_` 显示为空格）；
-`pnpm dev` 会监听 `public/bgm` 目录，改动即时刷新，生产构建则在打包时重新扫描。
-音频放入未注册目录（非 `categories.ts` 中登记的 6 个分类）或 `public/bgm` 根目录时不会进曲库，构建日志会给出告警。
+任选一种方式（项目本身不需要 Node 依赖）：
 
 ```bash
-# 重新扫描目录并打包云盘发布内容 -> dist-bgm/（可选 -- --clean / -- --zip）
-pnpm bgm:publish
+# 方式一：Rust 原生 CLI（推荐）
+cargo install tauri-cli --version "^2" --locked   # 首次安装
+cd src-tauri
+cargo tauri dev
+
+# 方式二：临时使用官方 CLI，不在项目中留下 node_modules
+pnpm dlx @tauri-apps/cli@^2 dev
 ```
 
-收藏（favorite）/ 播放队列以稳定的「分类/曲名」key 保存，替换同名文件不会错位；只要文件名不变，收藏与队列仍然有效。
+前端是 `frontendDist` 目录中的静态文件，由 Tauri 内置服务器直接读取：
+修改 `src-tauri/ui/` 后刷新窗口（`Ctrl+R`）即可，无需前端构建；Rust 改动会自动重编译。
 
-### 5. 音频地址（云盘分发）
+### 打包
 
-音频本体随仓库入库，三种部署方式：
-
-1. **音频随应用一起上线**：把 `dist-bgm/public/bgm` 拷进 `dist/`，无需额外配置（走 Vite `BASE_URL`）。
-2. **云盘目录直链**：`VITE_BGM_BASE=https://host/public pnpm build`，只部署 `dist/` 里的应用本体。
-3. **单文件模板**：`VITE_BGM_BASE=https://host/bgm/{file}`（支持 `{path}` / `{file}` 占位符）。
-
-本地临时调试也可以直接改运行时配置：
-```js
-localStorage.setItem('tfy_bgm_base', 'https://host/public')
+```bash
+cd src-tauri
+cargo tauri build
 ```
+
+产物位于 `src-tauri/target/release/bundle/`（平台对应 deb/rpm/AppImage、dmg、msi/nsis）。
+音频目录通过 `bundle.resources` 打进安装包，因此安装后离线即用；由于曲库约 350 MB，
+安装包会相应较大。若希望安装包保持精简，可删除 `tauri.conf.json` 中的 `bundle.resources`，
+改用「更换目录」或 `TFY_BGM_DIR` 指向外部曲库。
+
+---
+
+## 🧪 测试与检查
+
+```bash
+cd src-tauri
+
+cargo test -p bgm-core                 # 扫描 / 偏好 / 导出单元测试
+cargo clippy -p bgm-core --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo check --workspace                # 需要上面的 WebKitGTK 等系统依赖
+```
+
+`bgm-core` 不依赖 Tauri，可在无图形依赖的环境（如 CI 容器）里独立测试业务逻辑。
+
+---
+
+## 🔐 架构与安全
+
+- **状态与命令**：`AppState` 持有偏好（`parking_lot::RwLock`）与最近扫描结果；
+  前端只能通过命令读取快照、保存偏好、切换 / 扫描曲库与导出音频。
+- **偏好校验**：前端提交的偏好会经过 `Prefs::normalize`（音量 clamp、倍速白名单、
+  收藏去重与长度限制）；曲库目录只能由专门命令修改，普通偏好保存不能覆盖。
+- **最小权限**：`capabilities/default.json` 仅启用 `core:default`。
+  原生文件夹选择、保存对话框与「打开目录」全部在 Rust 侧调用插件，不向 WebView 暴露插件权限。
+- **资源授权**：Asset Protocol 仅授权当前曲库根目录（递归），可播放路径限定在扫描结果内。
+- **CSP**：默认仅允许本地脚本 / 样式，`media-src` 允许 `asset:` 与 `http://asset.localhost`，
+  不加载远程脚本、字体或图片。
+- **导出安全**：导出目标由系统保存对话框确定；复制后做大小校验，源路径来自曲库快照而非前端路径。
+
+### 偏好文件位置
+
+由 Tauri `app_config_dir` 决定，常见路径：
+
+- Linux：`~/.config/com.yuanjie.tfybgm/prefs.json`
+- macOS：`~/Library/Application Support/com.yuanjie.tfybgm/prefs.json`
+- Windows：`%APPDATA%\com.yuanjie.tfybgm\prefs.json`
+
+文件损坏或缺失时回退为默认偏好，不会阻止应用启动。
+
+---
+
+## 🔁 从旧 Web 版迁移
+
+- 曲库目录由 `public/bgm/` 迁移为仓库根目录的 `bgm/`，音频随桌面应用打包或指向任意本地目录。
+- 收藏、音量、倍速等状态从浏览器 `localStorage` 迁移到应用配置目录的 `prefs.json`；
+  旧浏览器里的收藏不会自动导入，可在客户端中重新收藏。
+- 旧的云盘地址配置（`VITE_BGM_BASE`）与静态站点发布方式已移除，桌面端直接读取本地文件。
+- 旧版 Vue/Vite 源码、`package.json`、`index.html` 等已从仓库删除，客户端不含 Node 构建链。
 
 ---
 
 ## 📄 许可与免责声明
 
 - 代码与文档采用 **Apache License 2.0** 授权（见 `LICENSE`，Copyright 2026 YuanJie）。
-- **音频素材与封面图片的版权归原权利人所有**。本仓库仅包含清单、生成脚本与应用代码，**不附带任何音频授权**，
-  也不得将 `public/bgm/` 下的音频视为 Apache-2.0 授权范围的一部分。
+- **音频素材版权归原权利人所有**。本仓库不附带任何音频授权，
+  `bgm/` 下的 mp3 不属于 Apache-2.0 授权范围。
 - 素材仅供个人学习与剪辑练手；商业发布前请自行向版权方取得授权。

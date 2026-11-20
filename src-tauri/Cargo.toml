@@ -1,0 +1,35 @@
+[package]
+name = "tfy-bgm"
+version = "0.1.0"
+description = "听风吟 · 视频剪辑 BGM 音频素材库（Rust + Tauri 桌面客户端）"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+publish = false
+default-run = "tfy-bgm"
+
+[workspace]
+members = ["core"]
+
+[lib]
+name = "tfy_bgm_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+bgm-core = { path = "core" }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+panic = "abort"

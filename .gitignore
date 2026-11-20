@@ -1,33 +1,23 @@
+# Rust / Tauri
+/target
+/src-tauri/target
+**/*.rs.bk
+*.pdb
+
+# Generated Tauri schema
+/src-tauri/gen/
+
+# CodeGraph tooling
+.codegraph/
+
 # Logs
 logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-*.tsbuildinfo
-.env
-.env.*
-!.env.example
-
-# Editor directories and files
-.vscode/*
+# Editor / OS
+.vscode/
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
-*.ntvs*
-*.njsproj
-*.sln
 *.sw?
-
-# public/bgm/<分类>/*.mp3 随仓库入库；构建期由 vite 直接扫描目录生成清单（无索引文件）
-
-# 云盘发布产物
-dist-bgm/

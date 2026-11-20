@@ -1,4 +1,0 @@
-# pnpm 构建脚本白名单：esbuild 的 postinstall 只用于 CLI 自举，
-# tsx / vite 通过平台包（@esbuild/linux-x64 等）直接取二进制，无需放行。
-allowBuilds:
-  esbuild: false

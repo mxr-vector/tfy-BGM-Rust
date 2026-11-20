@@ -1,0 +1,153 @@
+import { applyStaticIcons, setIcon } from './icons.js';
+import { initLibraryUI } from './library.js';
+import {
+  adjustVolume,
+  closeDrawer,
+  hasCurrentSong,
+  initPlayer,
+  isDrawerOpen,
+  playSong,
+  seekBy,
+  toggleMute,
+  togglePlay,
+} from './player.js';
+import { applyBootstrap, on, setSearch, state, visibleSongs } from './store.js';
+import { invoke, isTauri } from './tauri.js';
+import { el, normalizeError, toast } from './ui.js';
+
+applyStaticIcons();
+
+function showFatal(title, message) {
+  const iconHost = el('span');
+  setIcon(iconHost, 'alert');
+  const retry = el('button', {
+    class: 'reset-filter-btn',
+    attrs: { type: 'button' },
+    text: '重新加载',
+  });
+  retry.addEventListener('click', () => window.location.reload());
+  document.body.append(
+    el('div', { class: 'fatal-overlay' }, [
+      iconHost,
+      el('h1', { class: 'fatal-title', text: title }),
+      el('p', { class: 'fatal-text', text: message }),
+      retry,
+    ]),
+  );
+}
+
+function isTypingTarget(target) {
+  return (
+    target instanceof HTMLElement &&
+    (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
+  );
+}
+
+function focusSearch() {
+  const input = document.getElementById('search-input');
+  input?.focus();
+}
+
+function clearSearch() {
+  const input = document.getElementById('search-input');
+  if (input) input.value = '';
+  setSearch('');
+}
+
+function handleGlobalKeydown(event) {
+  const target = event.target;
+
+  if (event.key === '/' && !isTypingTarget(target)) {
+    event.preventDefault();
+    focusSearch();
+    return;
+  }
+
+  if (isTypingTarget(target)) {
+    if (event.key === 'Escape' && target instanceof HTMLElement) {
+      if (target.id === 'search-input') {
+        if (state.search) clearSearch();
+        else target.blur();
+        event.preventDefault();
+      }
+    }
+    return;
+  }
+
+  if (
+    event.code === 'Space' &&
+    target instanceof HTMLElement &&
+    target.closest('button, a, [role="button"]')
+  ) {
+    return;
+  }
+
+  switch (event.code) {
+    case 'Space':
+      event.preventDefault();
+      if (!hasCurrentSong()) {
+        const list = visibleSongs();
+        if (list.length > 0) playSong(list[0], list, true);
+      } else {
+        togglePlay();
+      }
+      break;
+    case 'ArrowLeft':
+      event.preventDefault();
+      seekBy(-5);
+      break;
+    case 'ArrowRight':
+      event.preventDefault();
+      seekBy(5);
+      break;
+    case 'ArrowUp':
+      event.preventDefault();
+      adjustVolume(0.1);
+      break;
+    case 'ArrowDown':
+      event.preventDefault();
+      adjustVolume(-0.1);
+      break;
+    case 'KeyM':
+      event.preventDefault();
+      toggleMute();
+      break;
+    case 'Escape':
+      if (isDrawerOpen()) {
+        event.preventDefault();
+        closeDrawer();
+      } else if (state.search) {
+        event.preventDefault();
+        clearSearch();
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+async function bootstrap() {
+  if (!isTauri) {
+    showFatal(
+      '请通过 Tauri 启动',
+      '这是桌面客户端界面，需要 Rust 侧提供曲库服务。请运行 cargo tauri dev 或安装打包后的应用。',
+    );
+    return;
+  }
+
+  let boot;
+  try {
+    boot = await invoke('bootstrap');
+  } catch (error) {
+    showFatal('曲库加载失败', normalizeError(error));
+    return;
+  }
+
+  applyBootstrap(boot);
+  initPlayer();
+  initLibraryUI();
+  on('error', (message) => toast(message, 'error'));
+  window.addEventListener('keydown', handleGlobalKeydown);
+}
+
+void bootstrap();
