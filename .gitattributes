@@ -1,0 +1,20 @@
+# 换行统一：仓库内一律 LF，检出也一律 LF。
+# Rust / PowerShell / Bash / 前端都能正常读 LF；CRLF 会让 Linux 上的 .sh 直接报
+# `$'\r': command not found`，也会让 CI 与本地 diff 产生大量噪音。
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析会出问题。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源，禁止任何换行转换。
+*.mp3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.zip binary

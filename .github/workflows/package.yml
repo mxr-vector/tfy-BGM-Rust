@@ -1,0 +1,190 @@
+# 在 GitHub 上构建各平台安装包，产物命名与本地脚本保持一致：
+#   tfy-bgm-<版本>-windows-<arch>-portable.zip
+#   tfy-bgm-<版本>-windows-<arch>-setup.exe
+#   tfy-bgm-<版本>-linux-<arch>.deb
+#   tfy-bgm-<版本>-linux-<arch>.rpm
+#
+# 触发方式：
+#   1. 推送 v* 标签（如 v1.0.0）——检查 + 构建 + 自动创建 Release 并挂上全部产物与 SHA256SUMS.txt
+#   2. 手动 workflow_dispatch——只构建，产物在 Run 页面底部下载
+#
+# 运行器选择（省资源）：
+#   guard / release 跑 ubuntu-slim：1 核容器，分钟数远低于 4 核 VM，只做检查、下载、上传，够用。
+#   打包必须用完整 VM：slim 镜像里没有 gcc / WebKitGTK，容器是非特权的装不了系统库，
+#   而且单 job 上限 15 分钟，Tauri 全量编译会直接超时。
+#
+# 注意：
+#   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 guard 直接失败。
+#   - 仓库里含 bgm/ 曲库（约 350 MB），with-library 会产出 346 MB 的 zip；
+#     不想占用 Actions 存储配额时，手动触发时选 empty-library。
+#   - Linux 用 ubuntu-22.04 而不是 ubuntu-latest：24.04 构建出的二进制要求 glibc 2.39，
+#     在 Debian 12 / Ubuntu 22.04 上跑不起来。该镜像 2026-09 起进入弃用期，
+#     2027-04 之后需要改成「ubuntu-24.04 + 容器内用 22.04 构建」这类方案。
+
+name: Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      library:
+        description: "Windows 绿色版是否内置曲库"
+        type: choice
+        options:
+          - with-library
+          - empty-library
+        default: with-library
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guard:
+    name: Check tag version
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match tauri.conf.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json',encoding='utf-8'))['version'])")
+          echo "tag=$tag version=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::标签 $tag 与 tauri.conf.json 的版本 $version 不一致，先改版本再打标签"
+            exit 1
+          fi
+
+  windows:
+    name: Windows portable + NSIS
+    needs: guard
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # tauri-cli 编译一次要几分钟；带上 .crates.toml，命中缓存时 cargo install 会直接跳过
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: tauri-cli-${{ runner.os }}-v2
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Portable package
+        shell: pwsh
+        run: |
+          if ('${{ inputs.library }}' -eq 'empty-library') {
+            powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
+          } else {
+            powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
+          }
+
+      - name: NSIS installer
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/tfy-bgm-*
+          if-no-files-found: error
+          retention-days: 3
+
+  linux:
+    name: Test + Linux deb/rpm
+    needs: guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # bgm-core 不依赖 Tauri，不用装 WebKitGTK；链接测试二进制需要 gcc（镜像自带）
+      # 仓库根目录没有 Cargo.toml，workspace 在 src-tauri/
+      - name: cargo test -p bgm-core
+        working-directory: src-tauri
+        run: cargo test -p bgm-core
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config \
+            patchelf \
+            rpm
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: tauri-cli-${{ runner.os }}-v2
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # rpm 打包依赖 rpmbuild（上面装了 rpm 包）；deb 依赖 dpkg-deb（镜像自带）
+      - name: Build deb and rpm
+        run: bash scripts/package-linux.sh deb rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/tfy-bgm-*
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # 两个 job 各自只对自己的产物算校验值，这里合成一份覆盖全平台的
+      - name: Write SHA256SUMS.txt
+        run: |
+          cd artifacts
+          sha256sum tfy-bgm-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

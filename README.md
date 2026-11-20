@@ -43,6 +43,8 @@
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
 | 原生前端 | `src-tauri/ui/` | 无构建步骤的 HTML / CSS / ES Modules |
 | 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、Asset Protocol（音频不打包） |
+| 打包脚本 | `scripts/` | 绿色版 / NSIS 安装包 / Linux deb·rpm，统一产物命名并生成 SHA-256 校验值 |
+| CI | `.github/workflows/package.yml` | 推 `v*` 标签自动构建全平台产物并发布 Release |
 | 权限 | `src-tauri/capabilities/default.json` | 仅授予 `core:default` |
 | 图标 | `src-tauri/icons/` | 由 `app-icon.svg` 生成的各平台图标 |
 | 界面截图 | `assets/` | README 使用的界面预览图，不参与打包 |
@@ -214,7 +216,7 @@ pnpm dlx @tauri-apps/cli@^2 dev
 `tauri.conf.json` 的 `frontendDist` 直接指向 `ui/`，由 Tauri 内置服务器读取静态文件：
 修改 `src-tauri/ui/` 后刷新窗口（`Ctrl+R`）即可，无需前端构建；Rust 改动会自动重编译。
 
-### 打包 Windows 可运行程序
+### 打包与分发
 
 音频不进入 exe，也不进入安装包；程序运行时从外置 `bgm/` 读取。
 绿色版包里的 `bgm/` 与 exe 并排，属于外置文件，整个文件夹可以替换或删除。
@@ -242,7 +244,7 @@ tfy-bgm/
     country/
 ```
 
-更推荐从仓库根目录一键组装 `dist\tfy-bgm\`，**默认会把仓库的 `bgm/` 一起复制**，解压即带曲库：
+更推荐从仓库根目录一键组装并压缩，**默认会把仓库的 `bgm/` 一起复制**，解压即带曲库：
 
 ```powershell
 # 自带曲库的绿色版（约 350 MB）
@@ -252,27 +254,100 @@ powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
 powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
 ```
 
+产物：
+
+```
+dist/
+  tfy-bgm-1.0.0-windows-x64-portable.zip   ← 对外分发这个
+  SHA256SUMS.txt                           ← SHA-256 校验值
+  tfy-bgm/                                 ← 组装目录（exe + bgm\），可直接运行调试
+```
+
 打包脚本的几条约定：
 
 - `-WithBgm` 仍可传入，等同于默认行为。
 - 重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。
 - `-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。
+- `-SkipBuild` 复用 `src-tauri\target\release\tfy-bgm.exe`，只重新组装与压缩；`-NoZip` 只组装不打 zip。
 - 检测到 `dist\tfy-bgm` 下的程序正在运行时会提示先关闭，避免覆盖失败。
+- zip 内是单层 `tfy-bgm/` 目录，解压后直接得到 `tfy-bgm.exe` 与 `bgm/`；空曲库包也会保留分类空目录。条目分隔符按规范写成 `/`，中文名按 UTF-8 存储并置 UTF-8 标志位，跨平台解压不乱码。
+- `dist\` 里旧版本的产物不会自动清理，`SHA256SUMS.txt` 也只覆盖当前版本，发版前顺手删掉旧文件，避免误传。
 
-把整个 `dist\tfy-bgm` 文件夹压缩后即可分发。目标机器需要 WebView2 Runtime（Windows 10/11 通常已自带；缺失时安装微软官方运行时即可）。
+目标机器需要 WebView2 Runtime（Windows 10/11 通常已自带；缺失时安装微软官方运行时即可）。
 
 #### 方式二：NSIS 安装包
 
 ```powershell
 cargo install tauri-cli --version "^2" --locked   # 首次安装
-cd src-tauri
-cargo tauri build --bundles nsis
+
+# 构建 + 归档到 dist\tfy-bgm-<版本>-windows-x64-setup.exe
+powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
 ```
 
-产物：`src-tauri/target/release/bundle/nsis/tfy-bgm_<版本>_x64-setup.exe`。
+脚本内部执行 `cargo tauri build --bundles nsis`，再把产物复制成规范名。`-SkipBuild` 可复用已有构建，但要求产物版本号与 `tauri.conf.json` 一致，避免把旧版本改名当成新版本发出去。
+
 安装包不包含音频，体积与普通桌面应用相当；默认按当前用户安装到可写目录，首次启动会在 exe 同级创建 `bgm/`，也可通过「切换曲库目录」指向任意位置。
 
-> `cargo tauri build` 不带 `--bundles` 时会按 `tauri.conf.json` 的 `targets: "all"` 尝试 NSIS 与 MSI；MSI 依赖 WiX，日常分发用 NSIS 即可。
+> 直接 `cargo tauri build`（不带 `--bundles`）会按 `targets: "all"` 尝试 NSIS 与 MSI；MSI 依赖 WiX，日常分发用 NSIS 即可。
+
+#### 方式三：Linux 安装包（deb / rpm）
+
+deb / rpm 无法在 Windows 上交叉构建，需在 Linux 上执行（或放进 CI 矩阵）：
+
+```bash
+bash scripts/package-linux.sh                    # 自动探测本机能打哪些格式
+bash scripts/package-linux.sh deb rpm            # 显式指定
+SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
+```
+
+产物：
+
+```
+dist/tfy-bgm-1.0.0-linux-amd64.deb
+dist/tfy-bgm-1.0.0-linux-x86_64.rpm
+```
+
+- 打包工具：Debian/Ubuntu 打 rpm 要 `sudo apt install rpm`，Fedora 打 deb 要 `sudo dnf install dpkg`。自动模式只打工具齐备的格式，显式指定缺失工具的格式会直接报错。
+- 首次需 `cargo install tauri-cli --version "^2" --locked`，并装好「环境要求」里的 WebKitGTK 依赖。
+- rpm 文件名去掉了 release 段以保持四段统一，包内元数据仍是 `Release: 1`；将来若直接拿构建目录里的产物做 dnf 仓库，原名也仍然可用。
+
+#### 产物命名规范
+
+统一为 `tfy-bgm-<版本>-<平台>-<架构>[-<类型>].<扩展名>`：
+
+| 平台 | 文件 |
+| --- | --- |
+| Windows 绿色版 | `tfy-bgm-1.0.0-windows-x64-portable.zip` |
+| Windows 安装版 | `tfy-bgm-1.0.0-windows-x64-setup.exe` |
+| Linux DEB | `tfy-bgm-1.0.0-linux-amd64.deb` |
+| Linux RPM | `tfy-bgm-1.0.0-linux-x86_64.rpm` |
+
+- 版本号唯一来源是 `src-tauri/tauri.conf.json`，脚本会校验 `Cargo.toml` 的 `[package].version` 是否一致，不一致直接报错，避免产物名与实际版本脱节。
+- 架构按平台惯例：Windows `x64` / `arm64`，deb `amd64` / `arm64`，rpm `x86_64` / `aarch64`——三者指同一架构，不要写成 `64bit`。
+- rpm 官方命名是 `name-version-release.arch.rpm`，这里按要求统一成四段；`Release` 保留在包元数据里，`createrepo` 读的是 header，改名不影响索引。
+- `SHA256SUMS.txt` 与 `sha256sum -c` 兼容（小写十六进制、两个空格、LF 换行），Windows 与 Linux 产物可以写进同一份。
+
+#### 用 GitHub Actions 打包
+
+`.github/workflows/package.yml` 分 4 个 job：`guard` 校验标签版本 → `windows` / `linux` 测试并打包 → `release` 发布，产物命名与本地脚本完全一致：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+推 `v*` 标签会构建全平台并自动创建 Release，附上全部产物和一份合并的 `SHA256SUMS.txt`；标签名（去掉 `v`）必须等于 `tauri.conf.json` 的 `version`，否则 `guard` 直接失败，不会白跑两套构建。
+
+也可以在 Actions 页面手动 `Run workflow`，只构建不发布，产物在运行页面底部下载。手动触发时可选 `empty-library` 跳过曲库：仓库里 `bgm/` 约 350 MB，带曲库的 zip 有 346 MB，私有仓库会明显消耗 Actions 存储配额。
+
+几点说明：
+
+- `guard` 和 `release` 跑 `ubuntu-slim`（1 核容器，分钟数远低于 4 核 VM）；打包必须用完整 VM——slim 镜像里没有 gcc 与 WebKitGTK、容器是非特权的、单 job 还有 15 分钟上限，Tauri 全量编译一定超时。
+- artifact 只保留 3 天（`retention-days: 3`），346 MB 的包不会长期占着存储。
+- Linux 用 `ubuntu-22.04` 而不是 `ubuntu-latest`：24.04 上构建的二进制要求 glibc 2.39，在 Debian 12 / Ubuntu 22.04 上跑不起来。该镜像 2026-09 起进入弃用期、2027-04 后失效，届时需要改成「24.04 runner + 22.04 容器内构建」这类方案。
+- `rpm` 依赖 `rpmbuild`（workflow 里 `apt install rpm`），`deb` 依赖镜像自带的 `dpkg-deb`。
+- `tauri-cli` 用 `cargo install` 装一次，`~/.cargo/bin` 与 `.crates.toml` 走缓存，命中后直接跳过编译。
+- 工作流只在 GitHub 上生效；当前 `origin` 是 Gitee，需要先推到 GitHub 镜像仓库才会触发。
 
 ---
 
