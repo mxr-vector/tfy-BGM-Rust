@@ -1,7 +1,8 @@
-//! 节目单（排程）模型：把「时间段 → 分类歌单 + 音量」持久化到 `schedule.json`。
+//! 节目单（排程）模型：把「每日时间范围 → 歌曲列表 + 音量」持久化到 `schedule.json`。
 //!
-//! 时间按本地系统时间解释；`days` 使用 ISO 周序（1 = 周一 … 7 = 周日），
-//! 七个值全选即为每日循环模板。文件缺失或损坏时回退为空节目单并附带告警。
+//! 时间按本地系统时间解释，每个节目只在当天 `[start, end)` 生效，不跨天、不重复日期。
+//! 节目之间时间范围禁止重叠；歌曲的起止时间会被裁剪到所属节目的范围内。
+//! 文件缺失或损坏时回退为空节目单并附带告警。
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,8 +13,21 @@ use serde::{Deserialize, Serialize};
 use crate::limits::MAX_NAME_CHARS;
 use crate::persist::{PersistError, write_json};
 
-pub const SCHEDULE_VERSION: u32 = 1;
+pub const SCHEDULE_VERSION: u32 = 2;
 pub const MAX_SCHEDULE_ENTRIES: usize = 64;
+pub const MAX_SCHEDULE_SONGS: usize = 500;
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScheduleSong {
+    /// 曲库曲目 key。
+    pub key: String,
+    /// 本地时间 `HH:MM`，必须落在所属节目范围内。
+    pub start: String,
+    /// 本地时间 `HH:MM`，必须晚于 `start`。
+    pub end: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -22,11 +36,11 @@ pub struct ScheduleEntry {
     pub name: String,
     /// 本地时间 `HH:MM`。
     pub start: String,
-    /// ISO 周序：1 = 周一 … 7 = 周日。
-    pub days: Vec<u8>,
-    /// 目标分类 id；`None` 表示全部曲目。
-    pub category: Option<String>,
-    /// 到点后应用的音量（0.0 ~ 1.0）；`None` 表示保持当前音量。
+    /// 本地时间 `HH:MM`，必须晚于 `start`。
+    pub end: String,
+    /// 按播放顺序排列的歌曲，每首都有自己的起止时间。
+    pub songs: Vec<ScheduleSong>,
+    /// 节目开始时应用的音量（0.0 ~ 1.0）；`None` 表示保持当前音量。
     pub volume: Option<f32>,
     pub enabled: bool,
 }
@@ -37,8 +51,8 @@ impl Default for ScheduleEntry {
             id: String::new(),
             name: String::new(),
             start: "09:00".to_owned(),
-            days: (1..=7).collect(),
-            category: None,
+            end: "10:00".to_owned(),
+            songs: Vec::new(),
             volume: None,
             enabled: true,
         }
@@ -69,7 +83,10 @@ impl Schedule {
 
         match serde_json::from_slice::<Self>(&bytes) {
             Ok(parsed) => {
-                let schedule = parsed.clone().normalize();
+                let mut schedule = parsed.clone().normalize();
+                if schedule.overlap_error().is_some() {
+                    schedule = schedule.drop_overlaps();
+                }
                 let warning =
                     (schedule != parsed).then(|| "节目单存在无效项，已自动修正或移除".to_owned());
                 (schedule, warning)
@@ -103,11 +120,52 @@ impl Schedule {
     pub fn entry(&self, id: &str) -> Option<&ScheduleEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
+
+    /// 返回第一对时间重叠的节目；调用前应先 [`Schedule::normalize`] 使时间规范化并排序。
+    pub fn overlap_error(&self) -> Option<String> {
+        self.entries.windows(2).find_map(|pair| {
+            let [left, right] = pair else { return None };
+            (minute_of(&right.start) < minute_of(&left.end)).then(|| {
+                format!(
+                    "节目「{}」（{}–{}）与「{}」（{}–{}）的时间范围重叠",
+                    left.name, left.start, left.end, right.name, right.start, right.end
+                )
+            })
+        })
+    }
+
+    /// 移除与前面节目重叠的条目；只用于修复历史数据，保存时仍会拒绝重叠。
+    fn drop_overlaps(mut self) -> Self {
+        let mut kept: Vec<ScheduleEntry> = Vec::new();
+        for entry in std::mem::take(&mut self.entries) {
+            let overlaps = kept.iter().any(|other| {
+                minute_of(&entry.start) < minute_of(&other.end)
+                    && minute_of(&other.start) < minute_of(&entry.end)
+            });
+            if !overlaps {
+                kept.push(entry);
+            }
+        }
+        self.entries = kept;
+        self
+    }
 }
 
 impl ScheduleEntry {
     fn normalize(mut self, index: usize, seen: &mut HashSet<String>) -> Option<Self> {
         self.start = normalize_start(&self.start)?;
+        let start_minutes = minute_of(&self.start);
+        // 当天至少需要留出 1 分钟，23:59 开始的节目无法构成有效范围。
+        if start_minutes + 1 >= MINUTES_PER_DAY {
+            return None;
+        }
+
+        self.end = normalize_start(&self.end)
+            .map(|end| minute_of(&end))
+            .filter(|end| *end > start_minutes)
+            .map(format_minutes)
+            .unwrap_or_else(|| format_minutes((start_minutes + 60).min(MINUTES_PER_DAY - 1)));
+        let end_minutes = minute_of(&self.end);
 
         let name: String = self.name.trim().chars().take(MAX_NAME_CHARS).collect();
         self.name = if name.is_empty() {
@@ -116,22 +174,30 @@ impl ScheduleEntry {
             name
         };
 
-        let mut days: Vec<u8> = self
-            .days
+        let mut seen_keys = HashSet::new();
+        self.songs = std::mem::take(&mut self.songs)
             .into_iter()
-            .filter(|day| (1..=7).contains(day))
+            .filter_map(|song| {
+                let key: String = song.key.trim().chars().take(200).collect();
+                if key.is_empty() || !seen_keys.insert(key.clone()) {
+                    return None;
+                }
+                let song_start = normalize_start(&song.start)
+                    .map(|time| minute_of(&time))
+                    .unwrap_or(start_minutes)
+                    .clamp(start_minutes, end_minutes - 1);
+                let song_end = normalize_start(&song.end)
+                    .map(|time| minute_of(&time))
+                    .unwrap_or(end_minutes)
+                    .clamp(song_start + 1, end_minutes);
+                Some(ScheduleSong {
+                    key,
+                    start: format_minutes(song_start),
+                    end: format_minutes(song_end),
+                })
+            })
+            .take(MAX_SCHEDULE_SONGS)
             .collect();
-        days.sort_unstable();
-        days.dedup();
-        if days.is_empty() {
-            days = (1..=7).collect();
-        }
-        self.days = days;
-
-        self.category = self
-            .category
-            .map(|category| category.trim().to_owned())
-            .filter(|category| !category.is_empty() && category.len() <= 120);
 
         self.volume = self
             .volume
@@ -160,18 +226,36 @@ fn normalize_start(raw: &str) -> Option<String> {
     if hour > 23 || minute > 59 {
         return None;
     }
-    Some(format!("{hour:02}:{minute:02}"))
+    Some(format_minutes(hour * 60 + minute))
+}
+
+fn minute_of(time: &str) -> u32 {
+    let (hour, minute) = time.split_once(':').unwrap_or(("0", "0"));
+    hour.parse::<u32>().unwrap_or(0) * 60 + minute.parse::<u32>().unwrap_or(0)
+}
+
+fn format_minutes(total: u32) -> String {
+    format!("{:02}:{:02}", total / 60, total % 60)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(start: &str, name: &str) -> ScheduleEntry {
+    fn entry(start: &str, end: &str, name: &str) -> ScheduleEntry {
         ScheduleEntry {
             start: start.into(),
+            end: end.into(),
             name: name.into(),
             ..ScheduleEntry::default()
+        }
+    }
+
+    fn song(key: &str, start: &str, end: &str) -> ScheduleSong {
+        ScheduleSong {
+            key: key.into(),
+            start: start.into(),
+            end: end.into(),
         }
     }
 
@@ -179,9 +263,9 @@ mod tests {
     fn normalizes_time_and_sorts_entries() {
         let schedule = Schedule {
             entries: vec![
-                entry("20:5", "晚上"),
-                entry("9:00", "早上"),
-                entry("12:00", "中午"),
+                entry("20:5", "21:00", "晚上"),
+                entry("9:00", "10:00", "早上"),
+                entry("12:00", "13:00", "中午"),
             ],
             ..Schedule::default()
         }
@@ -198,33 +282,52 @@ mod tests {
     }
 
     #[test]
-    fn drops_invalid_times_and_fills_days() {
+    fn fills_missing_end_and_drops_invalid_ranges() {
         let schedule = Schedule {
             entries: vec![
-                entry("25:00", "坏时间"),
-                ScheduleEntry {
-                    days: vec![],
-                    category: Some("  cheerful ".into()),
-                    volume: Some(4.0),
-                    ..entry("08:00", "早间")
-                },
+                entry("22:30", "", "缺失结束"),
+                entry("25:00", "26:00", "坏时间"),
+                entry("23:59", "", "没有空间"),
+                entry("18:00", "17:00", "结束早于开始"),
             ],
             ..Schedule::default()
         }
         .normalize();
 
-        assert_eq!(schedule.entries.len(), 1);
-        assert_eq!(schedule.entries[0].days, vec![1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(schedule.entries[0].category.as_deref(), Some("cheerful"));
-        assert_eq!(schedule.entries[0].volume, Some(1.0));
+        assert_eq!(schedule.entries.len(), 2);
+        assert_eq!(schedule.entries[0].end, "19:00");
+        assert_eq!(schedule.entries[1].start, "22:30");
+        assert_eq!(schedule.entries[1].end, "23:30");
     }
 
     #[test]
-    fn ids_stay_unique_and_days_dedupe() {
-        let mut first = entry("09:00", "A");
+    fn clamps_song_times_into_program_range() {
+        let schedule = Schedule {
+            entries: vec![ScheduleEntry {
+                songs: vec![
+                    song("a", "08:30", "10:30"),
+                    song("b", "09:50", "09:55"),
+                    song("c", "10:30", "09:00"),
+                    song("a", "09:00", "09:10"),
+                ],
+                ..entry("09:00", "10:00", "早间")
+            }],
+            ..Schedule::default()
+        }
+        .normalize();
+
+        let songs = &schedule.entries[0].songs;
+        assert_eq!(songs.len(), 3);
+        assert_eq!((songs[0].start.as_str(), songs[0].end.as_str()), ("09:00", "10:00"));
+        assert_eq!((songs[1].start.as_str(), songs[1].end.as_str()), ("09:50", "09:55"));
+        assert_eq!((songs[2].start.as_str(), songs[2].end.as_str()), ("09:59", "10:00"));
+    }
+
+    #[test]
+    fn ids_stay_unique() {
+        let mut first = entry("09:00", "10:00", "A");
         first.id = "same".into();
-        first.days = vec![1, 1, 2, 9];
-        let mut second = entry("10:00", "B");
+        let mut second = entry("10:00", "11:00", "B");
         second.id = "same".into();
 
         let schedule = Schedule {
@@ -234,8 +337,58 @@ mod tests {
         .normalize();
 
         assert_eq!(schedule.entries[0].id, "same");
-        assert_eq!(schedule.entries[0].days, vec![1, 2]);
         assert_eq!(schedule.entries[1].id, "same-2");
+    }
+
+    #[test]
+    fn detects_overlapping_ranges() {
+        let schedule = Schedule {
+            entries: vec![
+                entry("09:00", "10:30", "A"),
+                entry("10:00", "11:00", "B"),
+                entry("11:30", "12:00", "C"),
+            ],
+            ..Schedule::default()
+        }
+        .normalize();
+
+        let error = schedule.overlap_error().expect("应检测到重叠");
+        assert!(error.contains("A"));
+        assert!(error.contains("B"));
+    }
+
+    #[test]
+    fn repairs_overlaps_by_dropping_later_entries() {
+        let schedule = Schedule {
+            entries: vec![
+                entry("09:00", "11:00", "A"),
+                entry("10:00", "12:00", "B"),
+                entry("12:00", "13:00", "C"),
+            ],
+            ..Schedule::default()
+        }
+        .normalize()
+        .drop_overlaps();
+
+        assert_eq!(
+            schedule.entries.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        assert!(schedule.overlap_error().is_none());
+    }
+
+    #[test]
+    fn adjacent_ranges_do_not_overlap() {
+        let schedule = Schedule {
+            entries: vec![
+                entry("09:00", "10:00", "A"),
+                entry("10:00", "11:00", "B"),
+            ],
+            ..Schedule::default()
+        }
+        .normalize();
+
+        assert!(schedule.overlap_error().is_none());
     }
 
     #[test]
@@ -247,8 +400,8 @@ mod tests {
                 id: "shop-open".into(),
                 name: "开店轻快".into(),
                 start: "09:00".into(),
-                days: (1..=5).collect(),
-                category: Some("cheerful".into()),
+                end: "12:00".into(),
+                songs: vec![song("cheerful-a", "09:00", "09:03")],
                 volume: Some(0.55),
                 enabled: true,
             }],

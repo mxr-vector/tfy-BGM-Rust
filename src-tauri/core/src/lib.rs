@@ -23,4 +23,4 @@ pub use loudness::ExportPreset;
 pub use loops::{LoopBook, LoopPoint};
 pub use ops::{BatchOutcome, BatchReport, KeyChange};
 pub use prefs::{PlayMode, Prefs, SortBy};
-pub use schedule::{Schedule, ScheduleEntry};
+pub use schedule::{Schedule, ScheduleEntry, ScheduleSong};

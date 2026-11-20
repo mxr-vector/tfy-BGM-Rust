@@ -297,22 +297,11 @@ impl AppState {
         self.config_path.clone()
     }
 
-    /// 保存节目单；引用不存在的分类会直接拒绝，避免到点后切换到空歌单。
+    /// 保存节目单；时间范围重叠会直接拒绝，避免同一时刻触发多档节目。
     pub fn save_schedule(&self, incoming: Schedule) -> Result<Schedule> {
-        let categories: HashSet<String> = self
-            .categories
-            .read()
-            .items
-            .iter()
-            .map(|category| category.id.clone())
-            .collect();
         let schedule = incoming.normalize();
-        for entry in &schedule.entries {
-            if let Some(category) = &entry.category
-                && !categories.contains(category)
-            {
-                bail!("节目「{}」引用了不存在的分类：{category}", entry.name);
-            }
+        if let Some(error) = schedule.overlap_error() {
+            bail!("{error}");
         }
         schedule.save(&self.schedule_path).context("保存节目单失败")?;
         *self.schedule.write() = schedule.clone();

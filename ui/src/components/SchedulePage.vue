@@ -1,45 +1,29 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
-import { currentProgram, nextProgram, schedulerNow } from '@/composables/useScheduler';
-import { ALL_CATEGORY } from '@/lib/constants';
+import { computed, nextTick, reactive, ref } from 'vue';
+import {
+  currentProgram,
+  currentProgramSong,
+  nextProgram,
+  schedulerNow,
+} from '@/composables/useScheduler';
 import { showModal } from '@/lib/modal';
+import {
+  draftFromEntry,
+  emptyDraft,
+  minutesOf,
+  type Draft,
+} from '@/lib/schedule-draft';
 import type { ScheduleEntry } from '@/lib/types';
 import { applyScheduleEntry, persistSchedule } from '@/stores/schedule';
-import { categoryById, state } from '@/stores/state';
+import { categoryById, songByKey, state } from '@/stores/state';
 import Icon from './Icon.vue';
-
-interface Draft {
-  name: string;
-  start: string;
-  days: number[];
-  category: string;
-  volumeEnabled: boolean;
-  volume: number;
-  enabled: boolean;
-}
-
-const DAYS = [
-  { value: 1, label: '一' },
-  { value: 2, label: '二' },
-  { value: 3, label: '三' },
-  { value: 4, label: '四' },
-  { value: 5, label: '五' },
-  { value: 6, label: '六' },
-  { value: 7, label: '日' },
-];
+import ScheduleEditor from './ScheduleEditor.vue';
 
 const editing = ref(false);
 const saving = ref(false);
 const editingId = ref<string | null>(null);
-const draft = reactive<Draft>({
-  name: '',
-  start: '09:00',
-  days: [1, 2, 3, 4, 5, 6, 7],
-  category: ALL_CATEGORY,
-  volumeEnabled: false,
-  volume: 0.5,
-  enabled: true,
-});
+const expandedIds = ref(new Set<string>());
+const draft = reactive<Draft>(emptyDraft());
 
 const sortedEntries = computed(() =>
   [...state.schedule].sort((a, b) => a.start.localeCompare(b.start)),
@@ -52,62 +36,80 @@ const nowLabel = computed(() => {
     .join(':');
 });
 
-function pad(value: number): string {
-  return String(value).padStart(2, '0');
+const currentLabel = computed(() => {
+  const entry = currentProgram.value;
+  if (!entry) return '未编排';
+  const song = currentProgramSong.value;
+  return song ? `${entry.name} · ${songTitle(song.key)}` : entry.name;
+});
+
+const nextLabel = computed(() => {
+  const next = nextProgram.value;
+  if (!next) return '暂无节目';
+  return `${next.tomorrow ? '明天 ' : ''}${next.entry.start} ${next.entry.name}`;
+});
+
+function songTitle(key: string): string {
+  return songByKey(key)?.title ?? '曲目已移除';
 }
 
-function describeDays(days: number[]): string {
-  if (days.length === 7) return '每天';
-  if (days.length === 5 && days.every((day) => day <= 5)) return '工作日';
-  if (days.length === 2 && days.includes(6) && days.includes(7)) return '周末';
-  return days.map((day) => `周${DAYS[day - 1]?.label ?? ''}`).join('、');
+function songCategoryLabel(key: string): string {
+  const song = songByKey(key);
+  if (!song) return '不在曲库';
+  return categoryById(song.category)?.nameZh ?? song.category;
 }
 
-function categoryLabel(category: string | null): string {
-  if (!category) return '全部曲目';
-  const found = categoryById(category);
-  return found ? found.nameZh : category;
+function programHeadline(entry: ScheduleEntry): string {
+  if (entry.songs.length === 0) return '未添加歌曲';
+  return `${songTitle(entry.songs[0]!.key)} 等 ${entry.songs.length} 首`;
 }
 
-function categoryOptions(): { id: string; label: string }[] {
-  return state.library.categories.map((category) => ({
-    id: category.id,
-    label: category.nameZh,
-  }));
-}
-
-function nextHourStart(): string {
-  const date = new Date();
-  date.setHours(date.getHours() + 1, 0, 0, 0);
-  return `${pad(date.getHours())}:00`;
-}
-
-function resetDraft(): void {
-  draft.name = '';
-  draft.start = nextHourStart();
-  draft.days = [1, 2, 3, 4, 5, 6, 7];
-  draft.category = ALL_CATEGORY;
-  draft.volumeEnabled = false;
-  draft.volume = 0.5;
-  draft.enabled = true;
+function draftRange(): { start: number; end: number } | null {
+  const start = minutesOf(draft.start);
+  const end = minutesOf(draft.end);
+  if (start === null || end === null || end <= start) return null;
+  return { start, end };
 }
 
 function startCreate(): void {
   editingId.value = null;
-  resetDraft();
+  Object.assign(draft, emptyDraft());
   editing.value = true;
 }
 
 function startEdit(entry: ScheduleEntry): void {
   editingId.value = entry.id;
-  draft.name = entry.name;
-  draft.start = entry.start;
-  draft.days = [...entry.days];
-  draft.category = entry.category ?? ALL_CATEGORY;
-  draft.volumeEnabled = entry.volume !== null;
-  draft.volume = entry.volume ?? 0.5;
-  draft.enabled = entry.enabled;
+  Object.assign(draft, draftFromEntry(entry));
   editing.value = true;
+  if (expandedIds.value.has(entry.id)) {
+    const next = new Set(expandedIds.value);
+    next.delete(entry.id);
+    expandedIds.value = next;
+  }
+}
+
+function isEditing(entry: ScheduleEntry): boolean {
+  return editing.value && editingId.value === entry.id;
+}
+
+async function toggleEdit(entry: ScheduleEntry): Promise<void> {
+  if (isEditing(entry)) {
+    cancelEdit();
+    return;
+  }
+  startEdit(entry);
+  await nextTick();
+  const page = document.querySelector<HTMLElement>('.schedule-page');
+  const row = document.querySelector<HTMLElement>('.schedule-row.is-editing');
+  const header = document.querySelector<HTMLElement>('.schedule-head');
+  if (!page || !row) return;
+  const target =
+    row.getBoundingClientRect().top -
+    page.getBoundingClientRect().top +
+    page.scrollTop -
+    (header?.offsetHeight ?? 0) -
+    12;
+  page.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
 }
 
 function cancelEdit(): void {
@@ -115,19 +117,28 @@ function cancelEdit(): void {
   editingId.value = null;
 }
 
-function applyPreset(preset: 'daily' | 'workdays' | 'weekend'): void {
-  if (preset === 'daily') draft.days = [1, 2, 3, 4, 5, 6, 7];
-  else if (preset === 'workdays') draft.days = [1, 2, 3, 4, 5];
-  else draft.days = [6, 7];
+function isExpanded(id: string): boolean {
+  return expandedIds.value.has(id);
 }
 
-function toggleDay(day: number): void {
-  if (draft.days.includes(day)) {
-    if (draft.days.length === 1) return;
-    draft.days = draft.days.filter((value) => value !== day);
-  } else {
-    draft.days = [...draft.days, day].sort((a, b) => a - b);
-  }
+function toggleExpanded(id: string): void {
+  const next = new Set(expandedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedIds.value = next;
+}
+
+/** 左侧箭头与节目信息区都用于浏览节目歌曲；编辑中点击会先收起编辑面板。 */
+function toggleBrowse(entry: ScheduleEntry): void {
+  if (isEditing(entry)) cancelEdit();
+  toggleExpanded(entry.id);
+}
+
+function overlaps(range: { start: number; end: number }, entry: ScheduleEntry): boolean {
+  const start = minutesOf(entry.start);
+  const end = minutesOf(entry.end);
+  if (start === null || end === null) return false;
+  return range.start < end && start < range.end;
 }
 
 async function saveDraft(): Promise<void> {
@@ -136,15 +147,53 @@ async function saveDraft(): Promise<void> {
     void showModal({ title: '无法保存', description: '节目名称不能为空。', confirmText: '知道了' });
     return;
   }
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(draft.start)) return;
-  if (draft.days.length === 0) return;
+  const range = draftRange();
+  if (!range) {
+    void showModal({
+      title: '时间范围无效',
+      description: '结束时间必须晚于开始时间，且不能跨天。',
+      confirmText: '知道了',
+    });
+    return;
+  }
+  if (draft.songs.length === 0) {
+    void showModal({
+      title: '还未添加歌曲',
+      description: '请先通过「添加歌曲」从歌单中选择歌曲。',
+      confirmText: '知道了',
+    });
+    return;
+  }
+  for (const song of draft.songs) {
+    const start = minutesOf(song.start);
+    const end = minutesOf(song.end);
+    if (start === null || end === null || start >= end || start < range.start || end > range.end) {
+      void showModal({
+        title: '歌曲时间无效',
+        description: `《${songTitle(song.key)}》的起止时间必须落在 ${draft.start}–${draft.end} 内，且结束晚于开始。`,
+        confirmText: '知道了',
+      });
+      return;
+    }
+  }
+  const overlap = state.schedule.find(
+    (item) => item.id !== editingId.value && overlaps(range, item),
+  );
+  if (overlap) {
+    void showModal({
+      title: '时间范围重叠',
+      description: `与节目「${overlap.name}」（${overlap.start}–${overlap.end}）时间重叠，请调整后再保存。`,
+      confirmText: '知道了',
+    });
+    return;
+  }
 
   const entry: ScheduleEntry = {
     id: editingId.value ?? `slot-${Date.now().toString(36)}`,
     name,
     start: draft.start,
-    days: [...draft.days].sort((a, b) => a - b),
-    category: draft.category === ALL_CATEGORY ? null : draft.category,
+    end: draft.end,
+    songs: draft.songs.map((song) => ({ ...song })),
     volume: draft.volumeEnabled ? Math.round(draft.volume * 100) / 100 : null,
     enabled: draft.enabled,
   };
@@ -169,7 +218,7 @@ async function toggleEntry(entry: ScheduleEntry): Promise<void> {
 async function removeEntry(entry: ScheduleEntry): Promise<void> {
   const confirmed = await showModal({
     title: '删除节目',
-    description: `确定删除「${entry.name}」（${entry.start}）吗？不会影响曲库中的音频文件。`,
+    description: `确定删除「${entry.name}」（${entry.start}–${entry.end}）吗？不会影响曲库中的音频文件。`,
     confirmText: '删除',
     danger: true,
   });
@@ -191,18 +240,14 @@ function applyNow(entry: ScheduleEntry): void {
         </span>
         <h1 class="schedule-title">节目单 · 场景排程</h1>
         <p class="schedule-desc">
-          按系统时间自动切换分类歌单与音量，例如 9:00 轻快、12:00 中等能量、20:00 舒缓。
-          支持每天或按周循环；应用保持运行即可，到点自动生效。
+          每天按时间段自动切换节目歌曲与音量。每个节目需设置开始与结束时间，节目之间严禁重叠；
+          歌曲按顺序播放，也可以为每首歌曲指定节目范围内的起止时间。
         </p>
       </div>
       <div class="schedule-clock">
         <span class="clock-time">{{ nowLabel }}</span>
-        <span class="clock-current">
-          当前：{{ currentProgram ? currentProgram.name : '未编排' }}
-        </span>
-        <span class="clock-next">
-          下一档：{{ nextProgram ? `${nextProgram.start} ${nextProgram.name}` : '今天已无节目' }}
-        </span>
+        <span class="clock-current">当前：{{ currentLabel }}</span>
+        <span class="clock-next">下一档：{{ nextLabel }}</span>
       </div>
     </header>
 
@@ -211,80 +256,14 @@ function applyNow(entry: ScheduleEntry): void {
         <Icon name="plus" /> 新增节目
       </button>
       <span class="schedule-hint">
-        共 {{ state.schedule.length }} 个节目 · 同一分钟只触发一次
+        每天执行 · 共 {{ state.schedule.length }} 档 · 时间范围不可重叠
       </span>
     </div>
 
-    <div v-if="editing" class="schedule-editor">
-      <div class="editor-grid">
-        <label class="editor-field">
-          <span>节目名称</span>
-          <input v-model="draft.name" type="text" placeholder="例如：午后轻快" maxlength="40" />
-        </label>
-        <label class="editor-field">
-          <span>开始时间</span>
-          <input v-model="draft.start" type="time" step="60" />
-        </label>
-        <label class="editor-field">
-          <span>目标歌单</span>
-          <select v-model="draft.category">
-            <option :value="ALL_CATEGORY">全部曲目</option>
-            <option v-for="option in categoryOptions()" :key="option.id" :value="option.id">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label class="editor-check">
-          <input v-model="draft.enabled" type="checkbox" />
-          <span>启用这个节目</span>
-        </label>
-      </div>
-
-      <div class="editor-row">
-        <span class="editor-label">重复</span>
-        <div class="preset-group">
-          <button type="button" @click="applyPreset('daily')">每天</button>
-          <button type="button" @click="applyPreset('workdays')">工作日</button>
-          <button type="button" @click="applyPreset('weekend')">周末</button>
-        </div>
-        <div class="day-group">
-          <button
-            v-for="day in DAYS"
-            :key="day.value"
-            type="button"
-            class="day-chip"
-            :class="{ 'is-on': draft.days.includes(day.value) }"
-            @click="toggleDay(day.value)"
-          >
-            {{ day.label }}
-          </button>
-        </div>
-      </div>
-
-      <div class="editor-row">
-        <label class="editor-check">
-          <input v-model="draft.volumeEnabled" type="checkbox" />
-          <span>到点调整音量</span>
-        </label>
-        <input
-          class="schedule-range"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          v-model.number="draft.volume"
-          :disabled="!draft.volumeEnabled"
-        />
-        <span class="editor-volume">{{ Math.round(draft.volume * 100) }}%</span>
-      </div>
-
-      <div class="editor-footer">
-        <button type="button" class="schedule-ghost" @click="cancelEdit">取消</button>
-        <button type="button" class="schedule-primary" :disabled="saving" @click="saveDraft">
-          {{ saving ? '保存中…' : '保存节目' }}
-        </button>
-      </div>
-    </div>
+    <ScheduleEditor
+      v-if="editing && editingId === null"
+      :draft="draft"
+    />
 
     <ol class="schedule-list">
       <li
@@ -294,33 +273,103 @@ function applyNow(entry: ScheduleEntry): void {
         :class="{
           'is-current': entry.id === currentProgram?.id,
           'is-disabled': !entry.enabled,
+          'is-editing': isEditing(entry),
         }"
       >
-        <div class="slot-time">{{ entry.start }}</div>
-        <div class="slot-body">
-          <div class="slot-title">
-            {{ entry.name }}
-            <span v-if="entry.id === currentProgram?.id" class="slot-live">进行中</span>
-            <span v-if="!entry.enabled" class="slot-off">已停用</span>
+        <div class="schedule-row-main">
+          <button
+            type="button"
+            class="slot-toggle"
+            :class="{ 'is-open': isExpanded(entry.id) }"
+            :title="isExpanded(entry.id) ? '收起节目歌曲' : '展开节目歌曲'"
+            :aria-expanded="isExpanded(entry.id)"
+            @click="toggleBrowse(entry)"
+          >
+            <span class="collapse-caret" :class="{ 'is-open': isExpanded(entry.id) }">
+              <Icon name="chevron-down" />
+            </span>
+          </button>
+          <div class="slot-time">
+            <span class="slot-start">{{ entry.start }}</span>
+            <span class="slot-dash">–</span>
+            <span class="slot-end">{{ entry.end }}</span>
           </div>
-          <div class="slot-meta">
-            <span>{{ describeDays(entry.days) }}</span>
-            <i class="slot-dot"></i>
-            <span>{{ categoryLabel(entry.category) }}</span>
-            <i class="slot-dot"></i>
-            <span>{{ entry.volume === null ? '保持当前音量' : `音量 ${Math.round(entry.volume * 100)}%` }}</span>
+          <div
+            class="slot-body"
+            role="button"
+            tabindex="0"
+            title="点击查看节目歌曲"
+            @click="toggleBrowse(entry)"
+            @keydown.enter="toggleBrowse(entry)"
+            @keydown.space.prevent="toggleBrowse(entry)"
+          >
+            <div class="slot-title">
+              {{ entry.name }}
+              <span v-if="entry.id === currentProgram?.id" class="slot-live">进行中</span>
+              <span v-if="!entry.enabled" class="slot-off">已停用</span>
+            </div>
+            <div class="slot-meta">
+              <span>{{ programHeadline(entry) }}</span>
+              <i class="slot-dot"></i>
+              <span>
+                {{
+                  entry.volume === null
+                    ? '保持当前音量'
+                    : `音量 ${Math.round(entry.volume * 100)}%`
+                }}
+              </span>
+            </div>
+          </div>
+          <div class="slot-actions">
+            <button
+              type="button"
+              :class="{ 'is-active': isEditing(entry) }"
+              :title="isEditing(entry) ? '收起编辑面板' : '编辑节目'"
+              @click="toggleEdit(entry)"
+            >
+              编辑
+            </button>
+            <button type="button" :disabled="!entry.enabled" @click="applyNow(entry)">应用</button>
+            <button type="button" @click="toggleEntry(entry)">
+              {{ entry.enabled ? '停用' : '启用' }}
+            </button>
+            <button type="button" class="is-danger" @click="removeEntry(entry)">删除</button>
           </div>
         </div>
-        <div class="slot-actions">
-          <button type="button" :disabled="!entry.enabled" @click="applyNow(entry)">应用</button>
-          <button type="button" @click="toggleEntry(entry)">{{ entry.enabled ? '停用' : '启用' }}</button>
-          <button type="button" @click="startEdit(entry)">编辑</button>
-          <button type="button" class="is-danger" @click="removeEntry(entry)">删除</button>
+
+        <ScheduleEditor
+          v-if="isEditing(entry)"
+          :draft="draft"
+        />
+
+        <div v-if="isExpanded(entry.id) && !isEditing(entry)" class="slot-songs">
+          <p v-if="entry.songs.length === 0" class="slot-songs-empty">这个节目还没有歌曲。</p>
+          <div
+            v-for="(song, index) in entry.songs"
+            :key="`${entry.id}-${song.key}`"
+            class="slot-song"
+            :class="{ 'is-missing': !songByKey(song.key) }"
+          >
+            <span class="slot-song-index">{{ index + 1 }}</span>
+            <span class="slot-song-time">{{ song.start }}–{{ song.end }}</span>
+            <span class="slot-song-title">{{ songTitle(song.key) }}</span>
+            <span class="slot-song-cat">{{ songCategoryLabel(song.key) }}</span>
+          </div>
         </div>
       </li>
       <li v-if="state.schedule.length === 0" class="schedule-empty">
         还没有节目。点「新增节目」，把一天的时间轴排起来。
       </li>
     </ol>
+
+    <div v-if="editing" class="editor-footer is-sticky">
+      <span class="editor-footer-hint">
+        {{ draft.name.trim() || '新节目' }} · {{ draft.start }}–{{ draft.end }}
+      </span>
+      <button type="button" class="schedule-ghost" @click="cancelEdit">取消</button>
+      <button type="button" class="schedule-primary" :disabled="saving" @click="saveDraft">
+        {{ saving ? '保存中…' : '保存节目' }}
+      </button>
+    </div>
   </section>
 </template>

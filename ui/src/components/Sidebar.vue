@@ -62,7 +62,7 @@ function isBusy(): boolean {
         class="nav-item"
         :class="{ 'is-active': state.view === 'schedule' }"
         id="nav-schedule"
-        title="按时间自动切换歌单与音量"
+        title="按时间段自动切换节目歌曲与音量"
         @click="setView('schedule')"
       >
         <Icon name="clock" class="nav-icon" />

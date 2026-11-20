@@ -1,17 +1,17 @@
-import { ALL_CATEGORY, COMMANDS } from '@/lib/constants';
+import { COMMANDS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
-import type { Schedule, ScheduleEntry } from '@/lib/types';
-import { smartPickSong } from './queue';
-import { playSong, setVolume } from './player';
-import { state } from './state';
+import type { Schedule, ScheduleEntry, Song } from '@/lib/types';
+import { playSong, setVolume } from '@/stores/player';
+import { syncQueueForPlayback } from './queue';
+import { songByKey, state } from './state';
 
-/** 保存整张节目单；后端会按开始时间排序并校验分类是否存在。 */
+/** 保存整张节目单；后端会按开始时间排序、裁剪歌曲时间并校验范围重叠。 */
 export async function persistSchedule(entries: ScheduleEntry[]): Promise<boolean> {
   try {
     const saved = await invoke<Schedule>(COMMANDS.saveSchedule, {
-      schedule: { version: 1, entries },
+      schedule: { version: 2, entries },
     });
     state.schedule = saved.entries;
     toast('节目单已保存', 'success');
@@ -22,36 +22,60 @@ export async function persistSchedule(entries: ScheduleEntry[]): Promise<boolean
   }
 }
 
+/** 按节目内的顺序解析出仍在曲库中的歌曲；已移除的曲目会被跳过。 */
+export function resolveScheduleSongs(entry: ScheduleEntry): Song[] {
+  const seen = new Set<string>();
+  const songs: Song[] = [];
+  for (const item of entry.songs) {
+    if (seen.has(item.key)) continue;
+    const song = songByKey(item.key);
+    if (!song) continue;
+    seen.add(song.key);
+    songs.push(song);
+  }
+  return songs;
+}
+
 export interface ApplyOptions {
   announce?: boolean;
+  /** 从指定歌曲开始播放；缺失时顺延到后面的曲目。 */
+  songKey?: string | null;
+  /** 目标歌曲正在播放时是否从头重播。 */
+  restart?: boolean;
 }
 
 /**
- * 到点应用节目：切到目标分类的完整歌单并开始播放，同时应用该时段的音量。
+ * 应用节目：把节目歌曲设为播放队列并开始播放，同时应用该节目的音量。
  * 不改变当前页面（用户可能正在编辑节目单）。
  */
-export function applyScheduleEntry(entry: ScheduleEntry, { announce = true }: ApplyOptions = {}): boolean {
-  const category = entry.category;
-  const songs = category
-    ? state.library.songs.filter((song) => song.category === category)
-    : state.library.songs;
-  if (songs.length === 0) {
-    toast(
-      category
-        ? `节目「${entry.name}」的分类还没有曲目`
-        : `节目「${entry.name}」没有可播放的曲目`,
-      'error',
-    );
+export function applyScheduleEntry(
+  entry: ScheduleEntry,
+  { announce = true, songKey = null, restart = true }: ApplyOptions = {},
+): boolean {
+  // 先调音量再开播，避免新节目以旧音量突然响起。
+  if (entry.volume !== null) setVolume(entry.volume);
+
+  const queue = resolveScheduleSongs(entry);
+  if (queue.length === 0) {
+    if (announce) toast(`节目「${entry.name}」没有可播放的曲目`, 'error');
     return false;
   }
 
-  state.category = category ?? ALL_CATEGORY;
-  state.favoritesOnly = false;
+  let target: Song | undefined;
+  if (songKey) {
+    const order = entry.songs.map((item) => item.key);
+    const start = order.indexOf(songKey);
+    for (let index = Math.max(start, 0); index < order.length && !target; index += 1) {
+      target = queue.find((song) => song.key === order[index]);
+    }
+  }
+  target ??= queue[0]!;
 
-  // 先调音量再开播，避免新节目以旧音量突然响起。
-  if (entry.volume !== null) setVolume(entry.volume);
-  const first = smartPickSong(songs, state.currentSong) ?? songs[0]!;
-  playSong(first, songs, true);
+  if (state.currentKey === target.key && !restart) {
+    syncQueueForPlayback(target, queue);
+  } else {
+    playSong(target, queue, true);
+  }
 
   if (announce) {
     toast(

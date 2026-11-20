@@ -98,14 +98,24 @@ export interface Bootstrap {
   loops: LoopBook;
 }
 
+export interface ScheduleSong {
+  /** 曲库曲目 key。 */
+  key: string;
+  /** 本地时间 HH:MM，落在所属节目范围内。 */
+  start: string;
+  /** 本地时间 HH:MM，晚于 start。 */
+  end: string;
+}
+
 export interface ScheduleEntry {
   id: string;
   name: string;
   /** 本地时间 HH:MM。 */
   start: string;
-  /** ISO 周序：1 = 周一 … 7 = 周日。 */
-  days: number[];
-  category: string | null;
+  /** 本地时间 HH:MM，晚于 start。 */
+  end: string;
+  /** 按播放顺序排列的歌曲。 */
+  songs: ScheduleSong[];
   volume: number | null;
   enabled: boolean;
 }
