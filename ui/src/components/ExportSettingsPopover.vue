@@ -22,34 +22,22 @@ const panel = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 
 const enabled = computed(() => state.prefs?.loudnessNormalization ?? true);
-const scene = computed(() => state.prefs?.exportScene ?? '');
+// 历史偏好可能存空串；空串等价于默认目标，统一映射到默认场景。
+const scene = computed(() => state.prefs?.exportScene || DEFAULT_EXPORT_SCENE);
 const presets = computed(() => info.value?.presets ?? []);
-const basePreset = computed(
-  () =>
-    presets.value.find((preset) => preset.id === DEFAULT_EXPORT_SCENE) ??
-    presets.value[0] ??
-    null,
+const selectedPreset = computed(
+  () => presets.value.find((preset) => preset.id === scene.value) ?? presets.value[0] ?? null,
 );
-const activePreset = computed(
-  () => presets.value.find((preset) => preset.id === scene.value) ?? null,
-);
-const effectivePreset = computed(() => activePreset.value ?? basePreset.value);
 const triggerTitle = computed(() => {
   if (!enabled.value) return '导出设置：仅复制原文件';
-  if (activePreset.value) {
-    return `导出设置：响度归一化 · ${activePreset.value.label}（${activePreset.value.targetLufs} LUFS）`;
-  }
-  return effectivePreset.value
-    ? `导出设置：响度归一化 · 默认 ${effectivePreset.value.targetLufs} LUFS`
+  return selectedPreset.value
+    ? `导出设置：响度归一化 · ${selectedPreset.value.label}（${selectedPreset.value.targetLufs} LUFS）`
     : '导出设置：响度归一化';
 });
 const toggleHint = computed(() => {
   if (!enabled.value) return '已关闭 · 仅复制原文件';
-  if (activePreset.value) {
-    return `已开启 · 目标 ${activePreset.value.targetLufs} LUFS · ${activePreset.value.label}`;
-  }
-  return effectivePreset.value
-    ? `已开启 · 默认人耳响度 ${effectivePreset.value.targetLufs} LUFS`
+  return selectedPreset.value
+    ? `已开启 · 目标 ${selectedPreset.value.targetLufs} LUFS · ${selectedPreset.value.label}`
     : '已开启 · 人耳响度归一化';
 });
 
@@ -82,18 +70,14 @@ function toggleOpen(): void {
 
 function toggleNormalization(): void {
   if (!state.prefs) return;
-  // 场景预设是归一化之上的修饰；关闭归一化时保留已选场景，方便下次恢复。
+  // 场景预设决定归一化目标；关闭归一化时保留所选目标，方便下次恢复。
   setExportSettings(!enabled.value, scene.value);
 }
 
 function chooseScene(id: string): void {
   if (!state.prefs) return;
-  if (id === scene.value && enabled.value) {
-    // 再次点击当前场景：取消套用，回到默认人耳响度归一化。
-    setExportSettings(true, '');
-    return;
-  }
-  // 点选场景即表示要按该目标归一化，避免“选中了但没生效”的歧义。
+  // 点选场景即表示按该目标归一化；重复点击当前项不改变任何设置。
+  if (enabled.value && id === scene.value) return;
   setExportSettings(true, id);
 }
 
@@ -174,13 +158,13 @@ onBeforeUnmount(() => {
       </button>
 
       <div class="export-section-label">
-        场景预设
-        <span class="export-section-hint">可选 · 在默认归一化上调整</span>
+        归一化目标
+        <span class="export-section-hint">选择导出用途，决定目标响度</span>
       </div>
       <div v-if="loading && presets.length === 0" class="export-loading">
         正在检测 ffmpeg…
       </div>
-      <div v-else class="export-scenes" role="listbox" aria-label="场景预设">
+      <div v-else class="export-scenes" role="listbox" aria-label="归一化目标">
         <button
           v-for="preset in presets"
           :key="preset.id"
@@ -193,6 +177,10 @@ onBeforeUnmount(() => {
           @click="chooseScene(preset.id)"
         >
           <span class="export-scene-label">{{ preset.label }}</span>
+          <span
+            v-if="preset.id === DEFAULT_EXPORT_SCENE"
+            class="export-scene-default"
+          >默认</span>
           <span class="export-scene-lufs">{{ preset.targetLufs }} LUFS</span>
           <Icon name="check" class="export-scene-check" />
         </button>
@@ -207,13 +195,11 @@ onBeforeUnmount(() => {
       </div>
 
       <p v-if="!enabled" class="export-scene-desc is-muted">
-        当前仅复制原文件；开启后默认按人耳响度目标归一化。
+        当前仅复制原文件；开启后按所选目标归一化。
       </p>
-      <p v-else-if="!activePreset" class="export-scene-desc">
-        未套用场景预设，按默认人耳响度目标
-        {{ effectivePreset?.targetLufs ?? 14 }} LUFS 导出；点选上方场景可调整。
+      <p v-else-if="selectedPreset" class="export-scene-desc">
+        {{ selectedPreset.description }}
       </p>
-      <p v-else class="export-scene-desc">{{ activePreset.description }}</p>
 
       <div
         class="export-pop-foot"

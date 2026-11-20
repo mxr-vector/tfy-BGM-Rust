@@ -2733,6 +2733,21 @@ input[type="checkbox"]:indeterminate::after {
   font-weight: 600;
 }
 
+.export-scene-default {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-3);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.export-scene.is-active .export-scene-default {
+  background: rgba(25, 217, 139, 0.12);
+  color: var(--accent);
+}
+
 .export-scene-lufs {
   color: var(--text-3);
   font-size: 10.5px;
