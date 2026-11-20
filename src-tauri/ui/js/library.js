@@ -1,12 +1,18 @@
 import { invoke } from './tauri.js';
 import {
+  applyMutation,
   categoryById,
+  clearSelection,
   favoriteCount,
+  isSelected,
   on,
   replaceLibrary,
   resetFilters,
+  selectMany,
+  selectedKeys,
   setCategory,
   setSearch,
+  setSelected,
   setSortBy,
   sourceLabel,
   state,
@@ -15,6 +21,7 @@ import {
   visibleSongs,
 } from './store.js';
 import { CATEGORY_ICONS, equalizer, setIcon } from './icons.js';
+import { showModal } from './modal.js';
 import { el, normalizeError, toast, withAlpha } from './ui.js';
 import { exportSong, playSong } from './player.js';
 
@@ -23,6 +30,7 @@ const els = {};
 let initialized = false;
 let dragKey = null;
 let warningsDismissed = false;
+let selectionAnchor = null;
 
 const ALL_HERO = {
   title: '全部精选视频剪辑 BGM',
@@ -59,10 +67,14 @@ export function initLibraryUI() {
     statusCount: $('status-count'),
     statusPath: $('status-path'),
     statusIndicator: document.querySelector('.status-indicator'),
+    btnImport: $('btn-import'),
     btnRescan: $('btn-rescan'),
     btnChoose: $('btn-choose'),
     btnOpen: $('btn-open'),
     btnReset: $('btn-reset'),
+    batchBar: $('batch-bar'),
+    batchCount: $('batch-count'),
+    selectAll: $('select-all'),
     searchInput: $('search-input'),
     btnClearSearch: $('btn-clear-search'),
     btnClearSearch2: $('btn-clear-search-2'),
@@ -103,6 +115,36 @@ export function initLibraryUI() {
     }
   });
 
+  els.btnImport.addEventListener('click', () => {
+    void runStatusTask(els.btnImport, openImport);
+  });
+  els.batchBar.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-batch-action]');
+    if (!button) return;
+    switch (button.dataset.batchAction) {
+      case 'export':
+        void exportSelection();
+        break;
+      case 'move':
+        void openMove();
+        break;
+      case 'delete':
+        void deleteSongs(selectedKeys());
+        break;
+      case 'clear':
+        clearSelection();
+        break;
+      default:
+        break;
+    }
+  });
+  els.selectAll.addEventListener('change', () => {
+    selectMany(
+      visibleSongs().map((song) => song.key),
+      els.selectAll.checked,
+    );
+    selectionAnchor = null;
+  });
   els.btnRescan.addEventListener('click', () => {
     void runStatusTask(els.btnRescan, async () => {
       const snapshot = await invoke('rescan_library');
@@ -166,6 +208,7 @@ export function initLibraryUI() {
     renderHero();
     renderList();
   });
+  on('selection', updateSelectionUi);
   on('player', renderList);
 
   els.sortSelect.value = state.sortBy;
@@ -176,6 +219,177 @@ function clearSearch() {
   els.searchInput.value = '';
   setSearch('');
   els.searchInput.focus();
+}
+
+function handleSelectionClick(key, selected, range) {
+  if (!key) return;
+  if (range && selectionAnchor && selectionAnchor !== key) {
+    const keys = visibleSongs().map((song) => song.key);
+    const from = keys.indexOf(selectionAnchor);
+    const to = keys.indexOf(key);
+    if (from >= 0 && to >= 0) {
+      selectMany(keys.slice(Math.min(from, to), Math.max(from, to) + 1), selected);
+      selectionAnchor = key;
+      return;
+    }
+  }
+  setSelected(key, selected);
+  selectionAnchor = key;
+}
+
+function categoryOptions() {
+  return state.library.categories.map((category) => ({
+    value: category.id,
+    label: `${category.nameZh} · ${category.nameEn}`,
+  }));
+}
+
+function preferredCategory() {
+  if (!state.favoritesOnly && state.category !== 'all') return state.category;
+  return state.library.categories[0]?.id ?? '';
+}
+
+async function openImport() {
+  const values = await showModal({
+    title: '导入音乐',
+    description: '选择本地 MP3 文件，复制到曲库的指定分类目录；原文件不会被移动。',
+    fields: [
+      {
+        name: 'category',
+        label: '目标分类',
+        type: 'select',
+        value: preferredCategory(),
+        options: categoryOptions(),
+      },
+    ],
+    confirmText: '选择文件并导入',
+  });
+  if (!values) return;
+
+  try {
+    const result = await invoke('import_tracks', { category: values.category });
+    if (!result) return;
+    applyMutation(result);
+    if (result.report.succeeded > 0) {
+      setCategory(values.category);
+      els.searchInput.value = '';
+      setSearch('');
+    }
+    reportToast(result.report, '导入完成');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openEdit(song) {
+  const values = await showModal({
+    title: '编辑曲目',
+    description: '修改曲名会重命名音频文件，修改分类会移动文件；收藏会自动跟随。',
+    fields: [
+      {
+        name: 'title',
+        label: '曲名',
+        type: 'text',
+        value: song.title,
+        placeholder: '输入新的曲名',
+      },
+      {
+        name: 'category',
+        label: '风格分类',
+        type: 'select',
+        value: song.category,
+        options: categoryOptions(),
+      },
+    ],
+    confirmText: '保存',
+    validate: (input) => (input.title.trim() ? null : '曲名不能为空'),
+  });
+  if (!values) return;
+  if (values.title.trim() === song.title && values.category === song.category) return;
+
+  try {
+    const result = await invoke('update_track', {
+      key: song.key,
+      title: values.title,
+      category: values.category,
+    });
+    applyMutation(result);
+    reportToast(result.report, '曲目已更新');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openMove() {
+  const keys = selectedKeys();
+  if (keys.length === 0) return;
+  const values = await showModal({
+    title: `移动 ${keys.length} 首曲目`,
+    description: '选择目标分类；目标目录中已有同名文件时会自动追加序号。',
+    fields: [
+      {
+        name: 'category',
+        label: '目标分类',
+        type: 'select',
+        value: preferredCategory(),
+        options: categoryOptions(),
+      },
+    ],
+    confirmText: '移动',
+  });
+  if (!values) return;
+
+  try {
+    const result = await invoke('move_tracks', {
+      keys,
+      category: values.category,
+    });
+    applyMutation(result);
+    clearSelection();
+    reportToast(result.report, '移动完成');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function exportSelection() {
+  const keys = selectedKeys();
+  if (keys.length === 0) return;
+  try {
+    const result = await invoke('export_tracks', { keys });
+    if (!result) return;
+    reportToast(result.report, `导出完成 · ${result.dir}`);
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function deleteSongs(keys) {
+  if (!keys || keys.length === 0) return;
+  try {
+    const result = await invoke('delete_tracks', { keys });
+    if (!result) return;
+    applyMutation(result);
+    reportToast(result.report, '删除完成');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+function reportToast(report, fallback) {
+  if (!report) return;
+  const parts = [];
+  if (report.succeeded) parts.push(`${report.succeeded} 首成功`);
+  if (report.skipped) parts.push(`${report.skipped} 首跳过`);
+  if (report.failed) parts.push(`${report.failed} 首失败`);
+  let message = parts.length > 0 ? `${fallback}：${parts.join('，')}` : fallback;
+  if (report.notice) {
+    message += `。${report.notice}`;
+  }
+  if (report.failed > 0 && report.failures?.length > 0) {
+    message += `。${report.failures[0]}`;
+  }
+  toast(message, report.failed > 0 && report.succeeded === 0 ? 'error' : 'success');
 }
 
 async function chooseLibrary() {
@@ -340,11 +554,35 @@ function renderList() {
   if (isEmpty) {
     els.songList.replaceChildren();
     renderEmptyState();
+    updateSelectionUi();
     return;
   }
 
   const rows = list.map((song, index) => buildRow(song, index));
   els.songList.replaceChildren(...rows);
+  updateSelectionUi();
+}
+
+function updateSelectionUi() {
+  const list = visibleSongs();
+  const count = state.selected.size;
+  els.batchBar.hidden = count === 0;
+  els.batchCount.textContent = `已选 ${count} 首`;
+
+  const visibleSelected = list.reduce(
+    (total, song) => total + (state.selected.has(song.key) ? 1 : 0),
+    0,
+  );
+  els.selectAll.disabled = list.length === 0;
+  els.selectAll.checked = list.length > 0 && visibleSelected === list.length;
+  els.selectAll.indeterminate = visibleSelected > 0 && visibleSelected < list.length;
+
+  for (const row of els.songList.querySelectorAll('.song-row')) {
+    const selected = state.selected.has(row.dataset.key);
+    row.classList.toggle('is-selected', selected);
+    const checkbox = row.querySelector('.row-checkbox');
+    if (checkbox) checkbox.checked = selected;
+  }
 }
 
 function renderEmptyState() {
@@ -392,6 +630,12 @@ function buildRow(song, index) {
   const isPlaying = isCurrent && state.playing;
   const isFavorite = state.favorites.has(song.key);
 
+  const checkbox = el('input', {
+    class: 'row-checkbox',
+    attrs: { type: 'checkbox', 'aria-label': `选择 ${song.title}` },
+  });
+  checkbox.checked = isSelected(song.key);
+
   const indexCell = el('div', { class: 'row-index' });
   if (isPlaying) {
     indexCell.append(equalizer(color));
@@ -424,6 +668,13 @@ function buildRow(song, index) {
   });
   setIcon(favorite, 'heart');
 
+  const edit = el('button', {
+    class: 'action-icon-btn',
+    attrs: { type: 'button', title: '编辑曲名 / 分类' },
+    dataset: { action: 'edit', key: song.key },
+  });
+  setIcon(edit, 'edit');
+
   const download = el('button', {
     class: 'action-icon-btn',
     attrs: { type: 'button', title: '导出音频' },
@@ -431,11 +682,18 @@ function buildRow(song, index) {
   });
   setIcon(download, 'download');
 
+  const remove = el('button', {
+    class: 'action-icon-btn is-danger',
+    attrs: { type: 'button', title: '删除（移到回收站）' },
+    dataset: { action: 'delete', key: song.key },
+  });
+  setIcon(remove, 'trash');
+
   const canDrag = state.sortBy === 'default';
   return el(
     'div',
     {
-      class: `song-row${isCurrent ? ' is-current' : ''}`,
+      class: `song-row${isCurrent ? ' is-current' : ''}${isSelected(song.key) ? ' is-selected' : ''}`,
       dataset: { key: song.key },
       attrs: {
         draggable: canDrag ? 'true' : 'false',
@@ -444,23 +702,38 @@ function buildRow(song, index) {
       },
     },
     [
+      el('span', { class: 'row-check' }, [checkbox]),
       indexCell,
       el('div', { class: 'row-title-box' }, [title]),
       el('div', { class: 'row-category' }, [tag]),
-      el('div', { class: 'row-actions' }, [favorite, download]),
+      el('div', { class: 'row-actions' }, [favorite, edit, download, remove]),
     ],
   );
 }
 
 function bindSongList() {
   els.songList.addEventListener('click', (event) => {
+    const checkbox = event.target.closest('.row-checkbox');
+    if (checkbox) {
+      event.stopPropagation();
+      const row = checkbox.closest('.song-row');
+      handleSelectionClick(row?.dataset.key, checkbox.checked, event.shiftKey);
+      return;
+    }
+
     const action = event.target.closest('[data-action]');
     if (action) {
       event.stopPropagation();
-      if (action.dataset.action === 'favorite') {
-        toggleFavorite(action.dataset.key);
-      } else if (action.dataset.action === 'export') {
-        void exportSong(action.dataset.key);
+      const { action: kind, key } = action.dataset;
+      if (kind === 'favorite') {
+        toggleFavorite(key);
+      } else if (kind === 'export') {
+        void exportSong(key);
+      } else if (kind === 'edit') {
+        const song = state.library.songs.find((item) => item.key === key);
+        if (song) void openEdit(song);
+      } else if (kind === 'delete') {
+        void deleteSongs([key]);
       }
       return;
     }
@@ -472,7 +745,7 @@ function bindSongList() {
 
   els.songList.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
-    if (event.target.closest('button, a, [data-action]')) return;
+    if (event.target.closest('button, a, [data-action], input, select, textarea')) return;
     const row = event.target.closest('.song-row');
     if (!row) return;
     event.preventDefault();

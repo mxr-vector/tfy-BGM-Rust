@@ -1,17 +1,18 @@
 //! 暴露给前端的命令。所有命令只做参数校验、调用核心逻辑并序列化结果，
 //! 业务规则集中在 `bgm-core`，便于脱离 WebView 测试。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use bgm_core::BatchReport;
 use bgm_core::LibrarySnapshot;
 use bgm_core::Prefs;
 use bgm_core::export::copy_validated;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::state::{AppState, Bootstrap};
+use crate::state::{AppState, Bootstrap, LibraryMutation};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -79,6 +80,123 @@ pub fn open_library_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRe
 pub struct ExportResult {
     pub path: String,
     pub bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportBatchResult {
+    pub dir: String,
+    pub report: BatchReport,
+}
+
+#[tauri::command]
+pub async fn import_tracks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    category: String,
+) -> CommandResult<Option<LibraryMutation>> {
+    if bgm_core::categories::by_id(&category).is_none() {
+        return Err(format!("未注册的分类：{category}"));
+    }
+    let Some(files) = app
+        .dialog()
+        .file()
+        .set_title("导入音频到曲库")
+        .add_filter("MP3 音频", &["mp3"])
+        .blocking_pick_files()
+    else {
+        return Ok(None);
+    };
+    let paths: Vec<PathBuf> = files
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    state
+        .import_tracks(&app, &category, paths)
+        .map(Some)
+        .map_err(describe)
+}
+
+#[tauri::command]
+pub fn update_track(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+    title: String,
+    category: String,
+) -> CommandResult<LibraryMutation> {
+    state
+        .update_track(&app, &key, &title, &category)
+        .map_err(describe)
+}
+
+#[tauri::command]
+pub fn move_tracks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+    category: String,
+) -> CommandResult<LibraryMutation> {
+    state.move_tracks(&app, &keys, &category).map_err(describe)
+}
+
+#[tauri::command]
+pub async fn delete_tracks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+) -> CommandResult<Option<LibraryMutation>> {
+    if keys.is_empty() {
+        return Err("未选择任何曲目".to_owned());
+    }
+    let message = format!(
+        "将把选中的 {} 首曲目移动到曲库的 .tfy-trash 回收站目录，之后可在文件管理器中手动恢复。",
+        keys.len()
+    );
+    let confirmed = app
+        .dialog()
+        .message(message)
+        .title("删除曲目")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "移到回收站".to_owned(),
+            "取消".to_owned(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return Ok(None);
+    }
+    state.delete_tracks(&app, &keys).map(Some).map_err(describe)
+}
+
+#[tauri::command]
+pub async fn export_tracks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+) -> CommandResult<Option<ExportBatchResult>> {
+    if keys.is_empty() {
+        return Err("未选择任何曲目".to_owned());
+    }
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("选择批量导出文件夹")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let dir = folder
+        .into_path()
+        .map_err(|error| format!("导出目录无效：{error}"))?;
+    let outcome = state.export_tracks(&keys, &dir).map_err(describe)?;
+    Ok(Some(ExportBatchResult {
+        dir: dir.to_string_lossy().into_owned(),
+        report: outcome.report,
+    }))
 }
 
 #[tauri::command]

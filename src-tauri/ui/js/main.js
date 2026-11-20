@@ -11,7 +11,14 @@ import {
   toggleMute,
   togglePlay,
 } from './player.js';
-import { applyBootstrap, on, setSearch, state, visibleSongs } from './store.js';
+import {
+  applyBootstrap,
+  clearSelection,
+  on,
+  setSearch,
+  state,
+  visibleSongs,
+} from './store.js';
 import { invoke, isTauri } from './tauri.js';
 import { el, normalizeError, toast } from './ui.js';
 
@@ -116,6 +123,9 @@ function handleGlobalKeydown(event) {
       if (isDrawerOpen()) {
         event.preventDefault();
         closeDrawer();
+      } else if (state.selected.size > 0) {
+        event.preventDefault();
+        clearSelection();
       } else if (state.search) {
         event.preventDefault();
         clearSearch();

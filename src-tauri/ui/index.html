@@ -77,6 +77,9 @@
             <kbd class="search-kbd">/</kbd>
           </div>
           <div class="top-controls">
+            <button type="button" class="toolbar-btn" id="btn-import" title="导入本地 MP3 到曲库">
+              <span data-icon="upload"></span><span>导入音乐</span>
+            </button>
             <label class="sort-box">
               <span data-icon="sort"></span>
               <select id="sort-select" class="sort-select">
@@ -103,10 +106,34 @@
             </div>
           </div>
 
+          <section class="batch-bar" id="batch-bar" hidden>
+            <div class="batch-info">
+              <span class="batch-count" id="batch-count">已选 0 首</span>
+              <span class="batch-hint">对选中曲目执行批量操作</span>
+            </div>
+            <div class="batch-actions">
+              <button type="button" class="batch-btn" data-batch-action="export">
+                <span data-icon="download"></span><span>导出</span>
+              </button>
+              <button type="button" class="batch-btn" data-batch-action="move">
+                <span data-icon="folder"></span><span>移动分类</span>
+              </button>
+              <button type="button" class="batch-btn is-danger" data-batch-action="delete">
+                <span data-icon="trash"></span><span>删除</span>
+              </button>
+              <button type="button" class="batch-btn" data-batch-action="clear">
+                <span data-icon="x"></span><span>取消选择</span>
+              </button>
+            </div>
+          </section>
+
           <section class="empty-results glass-panel" id="empty-state" hidden></section>
 
           <section class="songs-table" id="song-table">
             <div class="table-header">
+              <span class="th-check">
+                <input type="checkbox" id="select-all" aria-label="全选当前列表" />
+              </span>
               <span class="th-index">#</span>
               <span class="th-title">曲名</span>
               <span class="th-category">风格分类</span>

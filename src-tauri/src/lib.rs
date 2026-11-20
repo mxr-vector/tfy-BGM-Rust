@@ -22,6 +22,11 @@ pub fn run() {
             commands::reset_library_dir,
             commands::open_library_dir,
             commands::export_track,
+            commands::import_tracks,
+            commands::update_track,
+            commands::move_tracks,
+            commands::delete_tracks,
+            commands::export_tracks,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run TFY BGM");

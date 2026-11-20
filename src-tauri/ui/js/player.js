@@ -16,6 +16,7 @@ let lastError = '';
 let exporting = false;
 let consecutiveFailures = 0;
 let lastFailureAt = 0;
+let loadedPath = '';
 
 const RATE_CYCLE = [1.0, 1.25, 1.5, 2.0, 0.75];
 const MODE_CYCLE = ['sequence', 'repeat-one', 'shuffle'];
@@ -69,6 +70,11 @@ export function initPlayer() {
   bindDrawer();
 
   on('library', () => {
+    if (!state.currentSong && audio.hasAttribute('src')) {
+      stopPlayback();
+    } else if (state.currentSong) {
+      syncAudioSource();
+    }
     renderPlayer();
     renderQueueBadge();
     if (drawerOpen) renderDrawer();
@@ -220,6 +226,7 @@ export function playSong(song, newQueue = null, forcePlay = false) {
   state.currentSong = song;
   state.playing = false;
   setError('');
+  loadedPath = song.path;
   audio.src = assetUrl(song.path);
   audio.playbackRate = state.prefs.playbackRate;
   audio.volume = state.prefs.muted ? 0 : state.prefs.volume;
@@ -363,11 +370,34 @@ function stopPlayback() {
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
+  loadedPath = '';
   state.currentSong = null;
   state.currentKey = null;
   state.playing = false;
   setError('');
   setProgressUi();
+}
+
+/** 曲目被重命名或移动后，文件路径变化，按原进度重新加载。 */
+function syncAudioSource() {
+  const song = state.currentSong;
+  if (!song || song.path === loadedPath) return;
+  const time = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  const wasPlaying = !audio.paused;
+  loadedPath = song.path;
+  audio.src = assetUrl(song.path);
+  audio.addEventListener(
+    'loadedmetadata',
+    () => {
+      if (time > 0) {
+        audio.currentTime = Number.isFinite(audio.duration)
+          ? Math.min(time, audio.duration)
+          : time;
+      }
+      if (wasPlaying) audio.play().catch(() => {});
+    },
+    { once: true },
+  );
 }
 
 export function setVolume(value) {

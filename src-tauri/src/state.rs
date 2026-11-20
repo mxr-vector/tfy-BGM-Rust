@@ -1,13 +1,16 @@
 //! 应用运行期状态：偏好、曲库根目录与最近一次扫描结果。
 //!
-//! 曲库根目录解析优先级：`TFY_BGM_DIR` 环境变量 → 用户自选目录 → 应用资源目录 → 开发仓库目录。
+//! 曲库根目录解析优先级：`TFY_BGM_DIR` 环境变量 → 用户自选目录 → 当前工作目录下的
+//! `bgm/`（内置默认）→ 应用资源目录 → 开发仓库目录。
 //! 所有写操作先持久化再更新内存，并通过独立的命令修改曲库目录，避免前端偏好覆盖目录选择。
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
 use bgm_core::{LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -30,6 +33,17 @@ struct Runtime {
 pub struct Bootstrap {
     pub prefs: Prefs,
     pub library: LibrarySnapshot,
+}
+
+/// 曲库写操作后的统一结果：新快照 + key 迁移 + 操作统计。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMutation {
+    pub library: LibrarySnapshot,
+    pub changes: Vec<KeyChange>,
+    /// 被删除曲目的旧 key，前端据此清理收藏与选择。
+    pub removed: Vec<String>,
+    pub report: BatchReport,
 }
 
 impl AppState {
@@ -119,6 +133,161 @@ impl AppState {
         self.runtime.read().root.clone()
     }
 
+    /// 导入音频到指定分类，完成后重新扫描曲库。
+    pub fn import_tracks(
+        &self,
+        app: &AppHandle,
+        category: &str,
+        sources: Vec<PathBuf>,
+    ) -> Result<LibraryMutation> {
+        if sources.is_empty() {
+            bail!("未选择任何音频文件");
+        }
+        if bgm_core::categories::by_id(category).is_none() {
+            bail!("未注册的分类：{category}");
+        }
+        let report = ops::import_files(&self.root(), category, &sources);
+        let library = self.refresh_library(app)?;
+        Ok(LibraryMutation {
+            library,
+            changes: Vec::new(),
+            removed: Vec::new(),
+            report,
+        })
+    }
+
+    /// 修改曲名与分类；文件名变化会同步迁移收藏 key。
+    pub fn update_track(
+        &self,
+        app: &AppHandle,
+        key: &str,
+        title: &str,
+        category: &str,
+    ) -> Result<LibraryMutation> {
+        let song = self
+            .song(key)
+            .ok_or_else(|| anyhow::anyhow!("曲目不存在：{key}"))?;
+        let change = ops::update_song(&self.root(), &song, Some(title), Some(category))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+        let mut report = BatchReport {
+            total: 1,
+            succeeded: 1,
+            ..BatchReport::default()
+        };
+        if change.from == change.to {
+            report.messages.push("曲目未发生变化".to_owned());
+        }
+
+        let favorite_warning = self.sync_favorites(std::slice::from_ref(&change), &[]);
+        let mut library = self.refresh_library(app)?;
+        if let Some(warning) = favorite_warning {
+            library.warnings.push(warning);
+        }
+        Ok(LibraryMutation {
+            library,
+            changes: vec![change],
+            removed: Vec::new(),
+            report,
+        })
+    }
+
+    pub fn move_tracks(
+        &self,
+        app: &AppHandle,
+        keys: &[String],
+        category: &str,
+    ) -> Result<LibraryMutation> {
+        if bgm_core::categories::by_id(category).is_none() {
+            bail!("未注册的分类：{category}");
+        }
+        let songs = self.songs_for_keys(keys)?;
+        let refs: Vec<&Song> = songs.iter().collect();
+        let outcome = ops::move_songs(&self.root(), &refs, category);
+
+        let favorite_warning = self.sync_favorites(&outcome.changes, &[]);
+        let mut library = self.refresh_library(app)?;
+        if let Some(warning) = favorite_warning {
+            library.warnings.push(warning);
+        }
+        Ok(mutation_from(library, outcome))
+    }
+
+    /// 软删除：移入曲库根目录下的 `.tfy-trash`，并清理对应收藏。
+    pub fn delete_tracks(&self, app: &AppHandle, keys: &[String]) -> Result<LibraryMutation> {
+        let songs = self.songs_for_keys(keys)?;
+        let refs: Vec<&Song> = songs.iter().collect();
+        let outcome = ops::trash_songs(&self.root(), &refs);
+
+        let favorite_warning = self.sync_favorites(&[], &outcome.removed);
+        let mut library = self.refresh_library(app)?;
+        if let Some(warning) = favorite_warning {
+            library.warnings.push(warning);
+        }
+        Ok(mutation_from(library, outcome))
+    }
+
+    /// 批量导出到指定文件夹，不改变曲库内容。
+    pub fn export_tracks(&self, keys: &[String], dest_dir: &Path) -> Result<BatchOutcome> {
+        let songs = self.songs_for_keys(keys)?;
+        let refs: Vec<&Song> = songs.iter().collect();
+        Ok(ops::export_songs(&self.root(), dest_dir, &refs))
+    }
+
+    fn songs_for_keys(&self, keys: &[String]) -> Result<Vec<Song>> {
+        if keys.is_empty() {
+            bail!("未选择任何曲目");
+        }
+        let runtime = self.runtime.read();
+        let songs: Vec<Song> = keys
+            .iter()
+            .filter_map(|key| runtime.library.song(key).cloned())
+            .collect();
+        if songs.is_empty() {
+            bail!("选中的曲目均已不在曲库中");
+        }
+        Ok(songs)
+    }
+
+    /// 把重命名/移动产生的 key 变化同步到收藏，删除的 key 直接移除。
+    fn sync_favorites(&self, changes: &[KeyChange], removed: &[String]) -> Option<String> {
+        let remap: HashMap<&str, &str> = changes
+            .iter()
+            .filter(|change| change.from != change.to)
+            .map(|change| (change.from.as_str(), change.to.as_str()))
+            .collect();
+        let removed: HashSet<&str> = removed.iter().map(String::as_str).collect();
+        if remap.is_empty() && removed.is_empty() {
+            return None;
+        }
+
+        let mut prefs = self.prefs.write();
+        let mut next = prefs.clone();
+        next.favorites = next
+            .favorites
+            .iter()
+            .map(|key| remap.get(key.as_str()).copied().unwrap_or(key))
+            .filter(|key| !removed.contains(key))
+            .map(str::to_owned)
+            .collect();
+        next = next.normalize();
+        match next.save(&self.prefs_path) {
+            Ok(()) => {
+                *prefs = next;
+                None
+            }
+            Err(error) => Some(format!("收藏列表同步失败：{error}")),
+        }
+    }
+
+    fn refresh_library(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
+        let (root, source) = {
+            let runtime = self.runtime.read();
+            (runtime.root.clone(), runtime.source)
+        };
+        self.install_root(app, root, source, Vec::new())
+    }
+
     fn persist_library_dir(&self, library_dir: Option<String>) -> Result<()> {
         let mut prefs = self.prefs.write();
         let mut next = prefs.clone();
@@ -145,6 +314,15 @@ impl AppState {
             library: library.clone(),
         };
         Ok(library)
+    }
+}
+
+fn mutation_from(library: LibrarySnapshot, outcome: BatchOutcome) -> LibraryMutation {
+    LibraryMutation {
+        library,
+        changes: outcome.changes,
+        removed: outcome.removed,
+        report: outcome.report,
     }
 }
 
@@ -180,6 +358,12 @@ fn resolve_bundled_root(
     app: &AppHandle,
     mut warnings: Vec<String>,
 ) -> (PathBuf, LibrarySource, Vec<String>) {
+    // 内置曲库默认取当前工作目录下的 bgm/，便于 portable 分发与开发调试。
+    let current_root = env::current_dir().ok().map(|dir| dir.join("bgm"));
+    if let Some(root) = current_root.as_ref().filter(|root| root.is_dir()) {
+        return (absolute(root.clone()), LibrarySource::Bundled, warnings);
+    }
+
     let resource_root = app.path().resource_dir().ok().map(|dir| dir.join("bgm"));
     if let Some(root) = resource_root.as_ref().filter(|root| root.is_dir()) {
         return (root.clone(), LibrarySource::Bundled, warnings);
@@ -193,9 +377,11 @@ fn resolve_bundled_root(
         }
     }
 
-    let fallback = resource_root.unwrap_or_else(|| PathBuf::from("bgm"));
+    let fallback = current_root
+        .or(resource_root)
+        .unwrap_or_else(|| PathBuf::from("bgm"));
     warnings.push(format!(
-        "未找到内置曲库目录，请通过「更换目录」选择文件夹：{}",
+        "未找到内置曲库目录（当前路径下的 bgm/），请通过「更换目录」选择文件夹：{}",
         fallback.display()
     ));
     (fallback, LibrarySource::Bundled, warnings)

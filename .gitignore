@@ -10,6 +10,9 @@
 # CodeGraph tooling
 .codegraph/
 
+# 曲库软删除回收站
+/bgm/.tfy-trash/
+
 # Logs
 logs
 *.log

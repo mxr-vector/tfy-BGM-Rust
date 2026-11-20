@@ -17,6 +17,7 @@ export const state = {
   favoritesOnly: false,
   search: '',
   sortBy: 'default',
+  selected: new Set(),
   queue: [],
   queueIndex: -1,
   currentKey: null,
@@ -48,25 +49,71 @@ export function applyBootstrap(boot) {
   state.prefs = boot.prefs;
   state.library = boot.library;
   state.favorites = new Set(boot.prefs.favorites);
+  state.selected = new Set();
   state.sortBy = boot.prefs.sortBy;
   emit('library');
   emit('favorites');
+  emit('selection');
   emit('view');
 }
 
 export function replaceLibrary(snapshot) {
   state.library = snapshot;
-  for (let index = 0; index < state.queue.length; index += 1) {
-    const fresh = snapshot.songs.find((song) => song.key === state.queue[index].key);
-    if (fresh) state.queue[index] = fresh;
+
+  const queue = [];
+  for (const item of state.queue) {
+    const fresh = snapshot.songs.find((song) => song.key === item.key);
+    if (fresh) queue.push(fresh);
   }
+  state.queue = queue;
+
   if (state.currentKey) {
     const fresh = snapshot.songs.find((song) => song.key === state.currentKey);
-    if (fresh) state.currentSong = fresh;
+    state.currentSong = fresh ?? null;
+    if (!fresh) {
+      state.currentKey = null;
+    } else {
+      state.queueIndex = queue.findIndex((song) => song.key === state.currentKey);
+    }
   }
+
+  let pruned = false;
+  for (const key of [...state.selected]) {
+    if (!snapshot.songs.some((song) => song.key === key)) {
+      state.selected.delete(key);
+      pruned = true;
+    }
+  }
+
   emit('library');
   emit('queue');
   emit('player');
+  if (pruned) emit('selection');
+}
+
+/** 应用曲库写操作结果：先迁移 key（队列/当前曲目/收藏/选择），再替换快照。 */
+export function applyMutation(result) {
+  const remap = new Map(
+    (result.changes ?? [])
+      .filter((change) => change.from !== change.to)
+      .map((change) => [change.from, change.to]),
+  );
+
+  if (remap.size > 0) {
+    const remapKey = (key) => remap.get(key) ?? key;
+    state.queue = state.queue.map((song) => ({ ...song, key: remapKey(song.key) }));
+    if (state.currentKey) state.currentKey = remapKey(state.currentKey);
+    state.favorites = new Set([...state.favorites].map(remapKey));
+    state.selected = new Set([...state.selected].map(remapKey));
+  }
+  for (const key of result.removed ?? []) {
+    state.favorites.delete(key);
+    state.selected.delete(key);
+  }
+
+  replaceLibrary(result.library);
+  if (remap.size > 0 || (result.removed ?? []).length > 0) emit('favorites');
+  emit('selection');
 }
 
 export function categoryById(id) {
@@ -132,6 +179,41 @@ export function visibleSongs() {
   return state.sortBy === 'name'
     ? [...list].sort((a, b) => collator.compare(a.title, b.title))
     : list;
+}
+
+export function isSelected(key) {
+  return state.selected.has(key);
+}
+
+export function setSelected(key, selected) {
+  const changed = selected ? !state.selected.has(key) : state.selected.has(key);
+  if (!changed) return;
+  if (selected) state.selected.add(key);
+  else state.selected.delete(key);
+  emit('selection');
+}
+
+export function selectMany(keys, selected) {
+  let changed = false;
+  for (const key of keys) {
+    if (selected && !state.selected.has(key)) {
+      state.selected.add(key);
+      changed = true;
+    } else if (!selected && state.selected.delete(key)) {
+      changed = true;
+    }
+  }
+  if (changed) emit('selection');
+}
+
+export function clearSelection() {
+  if (state.selected.size === 0) return;
+  state.selected.clear();
+  emit('selection');
+}
+
+export function selectedKeys() {
+  return [...state.selected];
 }
 
 function filterSongs() {
