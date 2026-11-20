@@ -1,5 +1,13 @@
 import { assetUrl, invoke } from './tauri.js';
-import { emit, on, persistPrefs, songByKey, state, toggleFavorite } from './store.js';
+import {
+  emit,
+  on,
+  persistPrefs,
+  songByKey,
+  state,
+  toggleFavorite,
+  visibleSongs,
+} from './store.js';
 import { COMMANDS, DEFAULT_ACCENT, EVENTS, PLAY_MODES } from './constants.js';
 import { playerConfig } from './config.js';
 import { equalizer, setIcon } from './icons.js';
@@ -127,7 +135,14 @@ function bindAudio() {
 }
 
 function bindControls() {
-  els.play.addEventListener('click', togglePlay);
+  els.play.addEventListener('click', () => {
+    if (!state.currentSong) {
+      const list = visibleSongs();
+      if (list.length > 0) playSong(list[0], list, true);
+      return;
+    }
+    togglePlay();
+  });
   els.prev.addEventListener('click', () => prevTrack());
   els.next.addEventListener('click', () => nextTrack());
   els.mode.addEventListener('click', cyclePlayMode);
@@ -479,6 +494,7 @@ function stopPlayback() {
   state.playing = false;
   setError('');
   setProgressUi();
+  renderPlayer();
 }
 
 function releaseSource() {
@@ -591,9 +607,24 @@ export function isDrawerOpen() {
 
 function renderPlayer() {
   const song = state.currentSong;
-  els.player.hidden = !song;
   els.player.classList.toggle('is-playing', Boolean(song) && state.playing);
+
   if (!song) {
+    els.title.textContent = '未在播放';
+    els.title.title = '';
+    els.sub.textContent = '从曲库中选择一首配乐';
+    els.sub.title = '';
+    els.category.hidden = true;
+    els.favorite.hidden = true;
+    if (els.cover) {
+      els.cover.style.removeProperty('--cover-soft');
+      els.cover.style.removeProperty('--cover-line');
+    }
+    setIcon(els.coverIcon, 'disc');
+    setIcon(els.play, 'play-fill');
+    els.play.title = '播放当前列表第一首 (空格)';
+    renderControls();
+    setProgressUi();
     renderQueueBadge();
     return;
   }
@@ -602,8 +633,8 @@ function renderPlayer() {
   const color = category?.color ?? DEFAULT_ACCENT;
 
   if (els.cover) {
-    els.cover.style.background = `radial-gradient(130% 130% at 22% 16%, ${withAlpha(color, 0.6)} 0%, rgba(9, 24, 16, 0.94) 56%, rgba(4, 10, 7, 1) 100%)`;
-    els.cover.style.boxShadow = `inset 0 0 0 1px ${withAlpha(color, 0.3)}, 0 10px 22px -16px rgba(0, 0, 0, 0.9)`;
+    els.cover.style.setProperty('--cover-soft', withAlpha(color, 0.6));
+    els.cover.style.setProperty('--cover-line', withAlpha(color, 0.3));
     setIcon(els.coverIcon, category?.icon || 'music');
   }
 
@@ -611,9 +642,9 @@ function renderPlayer() {
   els.title.title = song.title;
   els.category.hidden = false;
   els.category.textContent = category?.nameZh ?? song.category;
-  els.category.style.color = color;
-  els.category.style.backgroundColor = withAlpha(color, 0.13);
-  els.category.style.borderColor = withAlpha(color, 0.32);
+  els.category.style.setProperty('--tag-color', color);
+  els.category.style.setProperty('--tag-bg', withAlpha(color, 0.13));
+  els.category.style.setProperty('--tag-line', withAlpha(color, 0.32));
   els.sub.textContent = category?.labelEn ?? song.category;
   els.sub.title = song.fileName;
 
@@ -622,10 +653,13 @@ function renderPlayer() {
 
   setIcon(els.play, state.playing ? 'pause-fill' : 'play-fill');
   els.play.title = state.playing ? '暂停 (空格)' : '播放 (空格)';
-  els.play.style.boxShadow = state.playing
-    ? `inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 20px -6px ${withAlpha(DEFAULT_ACCENT, 0.6)}, 0 0 26px ${withAlpha(color, 0.45)}`
-    : '';
 
+  renderControls();
+  setProgressUi();
+}
+
+/** 播放器右/中部的偏好控件：无论是否有当前曲目都保持最新状态。 */
+function renderControls() {
   const mode = modeMeta(state.prefs.playMode);
   setIcon(els.mode, mode.icon);
   els.mode.title = mode.title;
@@ -646,11 +680,9 @@ function renderPlayer() {
   els.volume.style.setProperty('--volume', `${Math.round(effectiveVolume * 100)}%`);
   els.volumePercent.textContent = `${Math.round(effectiveVolume * 100)}%`;
 
-  els.download.disabled = exporting;
+  els.download.disabled = exporting || !state.currentSong;
   els.errorBar.hidden = !lastError;
   els.errorText.textContent = lastError;
-
-  setProgressUi();
 }
 
 function modeMeta(mode) {

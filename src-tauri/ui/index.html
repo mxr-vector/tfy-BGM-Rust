@@ -10,7 +10,7 @@
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <header class="topbar">
         <div class="brand">
           <div class="brand-logo" id="brand-logo"></div>
           <div class="brand-text">
@@ -19,7 +19,49 @@
           </div>
         </div>
 
+        <div class="search-box">
+          <span class="search-icon" data-icon="search"></span>
+          <input
+            id="search-input"
+            class="search-input"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="搜索曲名或风格，如 欢快 / 古风 / 史诗"
+          />
+          <button type="button" class="clear-search-btn" id="btn-clear-search" title="清除搜索" hidden>
+            <span data-icon="x"></span>
+          </button>
+          <kbd
+            class="search-kbd"
+            id="search-confirm-hint"
+            title="回车确认搜索 · 按 / 快速聚焦"
+            aria-label="按 / 快速聚焦搜索"
+          >/</kbd>
+        </div>
+
+        <div class="top-actions">
+          <button type="button" class="toolbar-btn" id="btn-import" title="导入本地 MP3 到曲库">
+            <span data-icon="upload"></span><span class="toolbar-label">导入音乐</span>
+          </button>
+          <label class="sort-box" title="切换排序方式">
+            <span class="sort-icon" data-icon="sort"></span>
+            <select id="sort-select" class="sort-select">
+              <option value="default">默认推荐</option>
+              <option value="name">按曲名 A–Z</option>
+            </select>
+            <span class="sort-caret" data-icon="chevron-down"></span>
+          </label>
+          <span class="top-divider" aria-hidden="true"></span>
+          <button type="button" class="icon-tool" id="btn-config" title="打开应用配置 config.json" aria-label="打开应用配置">
+            <span data-icon="settings"></span>
+          </button>
+        </div>
+      </header>
+
+      <aside class="sidebar">
         <nav class="side-nav" aria-label="曲库导航">
+          <span class="nav-section-label">浏览</span>
           <button type="button" class="nav-item" id="nav-all" title="音乐库">
             <span class="nav-icon" data-icon="music"></span>
             <span class="nav-label">音乐库</span>
@@ -65,44 +107,6 @@
           <span class="status-path" id="status-path">正在扫描曲库…</span>
         </div>
       </aside>
-
-      <header class="topbar">
-        <div class="search-box">
-          <span class="search-icon" data-icon="search"></span>
-          <input
-            id="search-input"
-            class="search-input"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="搜索曲名或分类关键词...（如：欢快 / 古风 / 史诗）"
-          />
-          <button type="button" class="clear-search-btn" id="btn-clear-search" title="清除搜索" hidden>
-            <span data-icon="x"></span>
-          </button>
-          <kbd class="search-kbd" id="search-confirm-hint" title="回车确认搜索 · 按 / 快速聚焦" aria-label="回车确认搜索">
-            <span data-icon="enter"></span>
-          </kbd>
-        </div>
-
-        <div class="top-actions">
-          <button type="button" class="toolbar-btn" id="btn-import" title="导入本地 MP3 到曲库">
-            <span data-icon="upload"></span><span>导入音乐</span>
-          </button>
-          <label class="sort-box" title="切换排序方式">
-            <span class="sort-icon" data-icon="sort"></span>
-            <select id="sort-select" class="sort-select">
-              <option value="default">默认推荐</option>
-              <option value="name">按曲名 (A-Z)</option>
-            </select>
-            <span class="sort-caret" data-icon="chevron-down"></span>
-          </label>
-          <span class="top-divider" aria-hidden="true"></span>
-          <button type="button" class="icon-tool" id="btn-config" title="打开应用配置 config.json" aria-label="打开应用配置">
-            <span data-icon="settings"></span>
-          </button>
-        </div>
-      </header>
 
       <main class="workspace">
         <section class="warning-banner" id="warning-banner" hidden></section>
@@ -163,15 +167,14 @@
               <input type="checkbox" id="select-all" aria-label="全选当前列表" />
             </span>
             <span class="th-index">#</span>
-            <span class="th-title">曲名</span>
-            <span class="th-category">风格分类</span>
+            <span class="th-title">曲目</span>
             <span class="th-actions">操作</span>
           </div>
           <div class="table-body" id="song-list"></div>
         </section>
       </main>
 
-      <footer class="audio-player" id="player" hidden>
+      <footer class="audio-player" id="player">
         <div class="player-wrapper">
           <div class="progress-bar" id="progress" role="slider" aria-label="播放进度" tabindex="0">
             <div class="progress-track">
@@ -194,7 +197,7 @@
                 </div>
                 <span class="track-sub" id="now-sub">从曲库中选择一首配乐</span>
               </div>
-              <button type="button" class="action-btn" id="btn-now-favorite" title="收藏当前曲目" hidden>
+              <button type="button" class="action-btn now-fav" id="btn-now-favorite" title="收藏当前曲目" hidden>
                 <span data-icon="heart"></span>
               </button>
             </div>

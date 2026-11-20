@@ -67,8 +67,8 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
 
 | 字段 | 说明 |
 | :--- | :--- |
-| `brand.title` | 侧栏品牌标题与文档标题 |
-| `brand.subtitle` | 侧栏品牌副标题 |
+| `brand.title` | 顶栏品牌标题与文档标题 |
+| `brand.subtitle` | 顶栏品牌副标题 |
 | `brand.windowTitle` | 系统窗口标题，启动与热加载时应用 |
 | `player.rates` | 倍速档位与循环顺序，如 `[0.75, 1, 1.25, 1.5, 2]` |
 | `player.volumeStep` | `↑` / `↓` 与音量滑杆的步进 |

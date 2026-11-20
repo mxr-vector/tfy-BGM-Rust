@@ -437,12 +437,12 @@ function openCategoryMenu(event, category) {
   showContextMenu(event, items);
 }
 
-function openSongMenu(event, song) {
-  if (!state.selected.has(song.key)) {
+function openSongMenu(event, song, selectOnOpen = true) {
+  if (selectOnOpen && !state.selected.has(song.key)) {
     clearSelection();
     setSelected(song.key, true);
   }
-  const keys = selectedKeys();
+  const keys = state.selected.has(song.key) ? selectedKeys() : [song.key];
   const multiple = keys.length > 1;
   const allFavorite = keys.every((key) => state.favorites.has(key));
   const list = visibleSongs();
@@ -817,6 +817,7 @@ function renderSidebar() {
     let marker;
     if (category.icon) {
       marker = el('span', { class: 'chip-icon' });
+      marker.style.setProperty('--chip-color', withAlpha(category.color, 0.9));
       setIcon(marker, category.icon);
     } else {
       marker = el('span', { class: 'chip-dot' });
@@ -873,13 +874,13 @@ function renderHero() {
   const tagIcon = el('span');
   setIcon(tagIcon, info.icon);
   const tag = el('span', { class: 'hero-tag' }, [tagIcon, info.labelEn]);
-  tag.style.color = info.color;
-  tag.style.backgroundColor = withAlpha(info.color, 0.13);
-  tag.style.borderColor = withAlpha(info.color, 0.24);
+  tag.style.setProperty('--tag-color', info.color);
+  tag.style.setProperty('--tag-bg', withAlpha(info.color, 0.13));
+  tag.style.setProperty('--tag-line', withAlpha(info.color, 0.24));
 
-  const source = el('span', {
-    class: 'hero-source',
-    text: sourceLabel(),
+  const stat = el('span', {
+    class: 'hero-stat',
+    text: `${list.length} 首 · ${state.library.categories.length} 种风格`,
   });
 
   const playButton = el('button', {
@@ -903,7 +904,7 @@ function renderHero() {
 
   const content = el('div', { class: 'hero-content' }, [
     el('div', { class: 'hero-heading' }, [
-      el('div', { class: 'hero-badges' }, [tag, source]),
+      el('div', { class: 'hero-badges' }, [tag, stat]),
       el('h1', { class: 'hero-title', text: info.title, title: info.title }),
     ]),
     el('div', { class: 'hero-actions' }, [playButton, shuffleButton]),
@@ -1051,18 +1052,23 @@ function buildRow(song, index) {
   checkbox.checked = isSelected(song.key);
 
   const indexCell = el('div', { class: 'row-index' });
+  indexCell.append(
+    el('span', {
+      class: 'index-number',
+      text: String(index + 1).padStart(2, '0'),
+    }),
+  );
+  const play = el('span', { class: 'row-play-btn' });
+  setIcon(play, isPlaying ? 'pause-fill' : 'play-fill');
+  indexCell.append(play);
+
+  const cover = el('div', { class: `row-cover${isPlaying ? ' is-playing' : ''}` });
+  cover.style.setProperty('--row-color', color);
+  cover.style.setProperty('--row-color-soft', withAlpha(color, 0.3));
   if (isPlaying) {
-    indexCell.append(equalizer(color));
+    cover.append(equalizer('#e9fff6'));
   } else {
-    indexCell.append(
-      el('span', {
-        class: 'index-number',
-        text: String(index + 1).padStart(2, '0'),
-      }),
-    );
-    const play = el('span', { class: 'row-play-btn' });
-    setIcon(play, 'play-fill');
-    indexCell.append(play);
+    setIcon(cover, category?.icon || 'music');
   }
 
   const title = el('span', { class: 'row-title', text: song.title, title: song.title });
@@ -1072,9 +1078,15 @@ function buildRow(song, index) {
     text: category?.nameZh ?? song.category,
     dataset: { categoryId: song.category },
   });
-  tag.style.color = withAlpha(color, 0.95);
-  tag.style.backgroundColor = withAlpha(color, 0.07);
-  tag.style.borderColor = withAlpha(color, 0.18);
+  tag.style.setProperty('--tag-color', withAlpha(color, 0.95));
+
+  const styleLabel = (category?.labelEn || category?.nameEn || '')
+    .split('/')[0]
+    .trim();
+  const meta = el('div', { class: 'row-meta' }, [
+    tag,
+    styleLabel ? el('span', { class: 'row-sub', text: styleLabel }) : null,
+  ]);
 
   const favorite = el('button', {
     class: `action-icon-btn fav-btn${isFavorite ? ' is-persistent is-favorite' : ''}`,
@@ -1083,26 +1095,12 @@ function buildRow(song, index) {
   });
   setIcon(favorite, 'heart');
 
-  const edit = el('button', {
-    class: 'action-icon-btn',
-    attrs: { type: 'button', title: '编辑曲名 / 分类' },
-    dataset: { action: 'edit', key: song.key },
+  const more = el('button', {
+    class: 'action-icon-btn is-more',
+    attrs: { type: 'button', title: '更多操作' },
+    dataset: { action: 'menu', key: song.key },
   });
-  setIcon(edit, 'edit');
-
-  const download = el('button', {
-    class: 'action-icon-btn is-persistent',
-    attrs: { type: 'button', title: '导出音频' },
-    dataset: { action: 'export', key: song.key },
-  });
-  setIcon(download, 'download');
-
-  const remove = el('button', {
-    class: 'action-icon-btn is-danger',
-    attrs: { type: 'button', title: '删除（移到回收站）' },
-    dataset: { action: 'delete', key: song.key },
-  });
-  setIcon(remove, 'trash');
+  setIcon(more, 'more');
 
   const canDrag = state.sortBy === SORT_KEYS.recommended;
   return el(
@@ -1119,9 +1117,11 @@ function buildRow(song, index) {
     [
       el('span', { class: 'row-check' }, [checkbox]),
       indexCell,
-      el('div', { class: 'row-title-box' }, [title]),
-      el('div', { class: 'row-category' }, [tag]),
-      el('div', { class: 'row-actions' }, [favorite, edit, download, remove]),
+      el('div', { class: 'row-main' }, [
+        cover,
+        el('div', { class: 'row-title-box' }, [title, meta]),
+      ]),
+      el('div', { class: 'row-actions' }, [favorite, more]),
     ],
   );
 }
@@ -1162,6 +1162,20 @@ function bindSongList() {
         if (song) void openEdit(song);
       } else if (kind === 'delete') {
         void deleteSongs([key]);
+      } else if (kind === 'menu') {
+        const song = state.library.songs.find((item) => item.key === key);
+        if (song) {
+          const rect = action.getBoundingClientRect();
+          openSongMenu(
+            {
+              clientX: rect.right - 6,
+              clientY: rect.bottom + 4,
+              preventDefault: () => {},
+            },
+            song,
+            false,
+          );
+        }
       }
       return;
     }
