@@ -1,26 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { applyDocumentCopy, playerConfig } from '@/lib/config';
+import { applyDocumentCopy } from '@/lib/config';
 import { COMMANDS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
 import { invoke, isTauri, getCurrentWindow } from '@/lib/tauri';
 import type { Bootstrap } from '@/lib/types';
+import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
-import {
-  adjustVolume,
-  closeDrawer,
-  drawerOpen,
-  playSong,
-  seekBy,
-  toggleMute,
-  togglePlay,
-} from '@/stores/player';
-import {
-  applyBootstrap,
-  clearSelection,
-  setSearch,
-} from '@/stores/library';
-import { state, visibleSongs } from '@/stores/state';
+import { applyBootstrap } from '@/stores/library';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import Icon from '@/components/Icon.vue';
@@ -38,7 +25,7 @@ const focused = ref(true);
 
 const appWindow = getCurrentWindow();
 let unlistenFocus: (() => void) | null = null;
-let hotkeysBound = false;
+let uninstallHotkeys: (() => void) | null = null;
 
 const shellStyle = computed<Record<string, string>>(() => {
   const view = wallpaperView.value;
@@ -50,87 +37,6 @@ const shellStyle = computed<Record<string, string>>(() => {
     '--wallpaper-fit': view.fit,
   };
 });
-
-function isTypingTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
-  );
-}
-
-function focusSearch(): void {
-  const input = document.querySelector<HTMLInputElement>('#search-input');
-  if (!input) return;
-  input.focus();
-  // 用 / 聚焦时直接选中已有查询，方便整段替换。
-  input.select();
-}
-
-function handleGlobalKeydown(event: KeyboardEvent): void {
-  const target = event.target;
-
-  if (event.key === '/' && !isTypingTarget(target)) {
-    event.preventDefault();
-    focusSearch();
-    return;
-  }
-
-  if (isTypingTarget(target)) return;
-
-  if (
-    event.code === 'Space' &&
-    target instanceof HTMLElement &&
-    target.closest('button, a, [role="button"]')
-  ) {
-    return;
-  }
-
-  switch (event.code) {
-    case 'Space':
-      event.preventDefault();
-      if (!state.currentSong) {
-        const list = visibleSongs.value;
-        if (list.length > 0) playSong(list[0]!, list, true);
-      } else {
-        togglePlay();
-      }
-      break;
-    case 'ArrowLeft':
-      event.preventDefault();
-      seekBy(-playerConfig().seekStepSeconds);
-      break;
-    case 'ArrowRight':
-      event.preventDefault();
-      seekBy(playerConfig().seekStepSeconds);
-      break;
-    case 'ArrowUp':
-      event.preventDefault();
-      adjustVolume(playerConfig().volumeStep);
-      break;
-    case 'ArrowDown':
-      event.preventDefault();
-      adjustVolume(-playerConfig().volumeStep);
-      break;
-    case 'KeyM':
-      event.preventDefault();
-      toggleMute();
-      break;
-    case 'Escape':
-      if (drawerOpen.value) {
-        event.preventDefault();
-        closeDrawer();
-      } else if (state.selected.size > 0) {
-        event.preventDefault();
-        clearSelection();
-      } else if (state.search) {
-        event.preventDefault();
-        setSearch('');
-      }
-      break;
-    default:
-      break;
-  }
-}
 
 async function bootstrap(): Promise<void> {
   if (!isTauri) {
@@ -145,10 +51,7 @@ async function bootstrap(): Promise<void> {
   try {
     const boot = await invoke<Bootstrap>(COMMANDS.bootstrap);
     applyBootstrap(boot);
-    if (!hotkeysBound) {
-      window.addEventListener('keydown', handleGlobalKeydown);
-      hotkeysBound = true;
-    }
+    uninstallHotkeys ??= installGlobalHotkeys();
   } catch (error) {
     fatal.value = { title: '曲库加载失败', message: normalizeError(error) };
   }
@@ -175,7 +78,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenFocus?.();
-  if (hotkeysBound) window.removeEventListener('keydown', handleGlobalKeydown);
+  uninstallHotkeys?.();
+  uninstallHotkeys = null;
 });
 </script>
 

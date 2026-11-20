@@ -46,7 +46,7 @@
 | 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、Asset Protocol（音频不打包） |
 | 打包脚本 | `scripts/` | 绿色版 / NSIS 安装包 / Linux deb·rpm，统一产物命名并生成 SHA-256 校验值 |
 | CI | `.github/workflows/package.yml` | 推 `v*` 标签自动构建全平台产物并发布 Release |
-| 权限 | `src-tauri/capabilities/default.json` | 仅授予 `core:default` |
+| 权限 | `src-tauri/capabilities/default.json` | `core:default` + 无边框窗口拖拽/最小化/最大化/关闭 |
 | 图标 | `src-tauri/icons/` | 由 `app-icon.svg` 生成的各平台图标 |
 | 界面截图 | `assets/` | README 使用的界面预览图，不参与打包 |
 
@@ -402,8 +402,9 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 - **分类配置**：新增 / 编辑分类由 Rust 校验名称与目录名必须是单个普通路径分量，
   主题色必须是 `#RRGGBB`，同名分类与重复目录名会被拒绝；配置写入应用配置目录的
   `categories.json`，手工编辑后重新扫描生效。
-- **最小权限**：`capabilities/default.json` 仅启用 `core:default`。
-  原生文件夹选择、保存对话框与「打开目录」全部在 Rust 侧调用插件，不向 WebView 暴露插件权限。
+- **最小权限**：`capabilities/default.json` 仅启用 `core:default` 与无边框窗口所需的
+  拖拽、最小化、最大化、关闭 4 项 window 权限；原生文件夹选择、保存对话框与「打开目录」
+  全部在 Rust 侧调用插件，不向 WebView 暴露插件权限。
 - **资源授权**：Asset Protocol 仅授权当前曲库根目录（递归），可播放路径限定在扫描结果内。
 - **CSP**：默认仅允许本地脚本 / 样式，`media-src` 允许 `asset:` 与 `http://asset.localhost`，
   不加载远程脚本、字体或图片。

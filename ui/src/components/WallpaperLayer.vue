@@ -42,7 +42,7 @@ function onVisibilityChange(): void {
 }
 
 watch(
-  () => [source.value?.path, source.value?.kind] as const,
+  () => source.value?.path ?? null,
   async () => {
     ready.value = false;
     await nextTick();

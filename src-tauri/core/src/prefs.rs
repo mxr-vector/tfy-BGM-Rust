@@ -160,9 +160,9 @@ impl Prefs {
             .filter(|path| is_wallpaper_path(path));
 
         let wallpaper = self.wallpaper.trim().to_ascii_lowercase();
-        self.wallpaper = if BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str()) {
-            wallpaper
-        } else if wallpaper == "custom" && self.custom_wallpaper.is_some() {
+        let is_builtin = BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str());
+        let is_custom = wallpaper == "custom" && self.custom_wallpaper.is_some();
+        self.wallpaper = if is_builtin || is_custom {
             wallpaper
         } else {
             DEFAULT_WALLPAPER.to_owned()

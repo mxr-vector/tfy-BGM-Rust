@@ -2,8 +2,8 @@
 import { computed, ref } from 'vue';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
+import { audioState } from '@/stores/audio-engine';
 import {
-  audioState,
   cyclePlayMode,
   cycleRate,
   drawerOpen,

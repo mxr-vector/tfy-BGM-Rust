@@ -1,4 +1,6 @@
 mod commands;
+mod library_root;
+mod settings;
 mod state;
 mod wallpapers;
 

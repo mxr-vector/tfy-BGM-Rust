@@ -82,7 +82,9 @@ fn candidates(app: &AppHandle, file_name: &str) -> Vec<PathBuf> {
 }
 
 pub fn resolve_asset(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
-    candidates(app, file_name).into_iter().find(|path| path.is_file())
+    candidates(app, file_name)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 /// 返回仓库内置的图片 / 视频壁纸，并顺带授权资源文件访问。

@@ -1,25 +1,23 @@
-//! 应用运行期状态：偏好、曲库根目录与最近一次扫描结果。
+//! 应用运行期状态：偏好、分类、配置与最近一次扫描结果。
 //!
-//! 曲库根目录解析优先级：`TFY_BGM_DIR` 环境变量 → 用户自选目录 → 开发仓库 `bgm/`
-//! （仅 debug）→ exe 同级 `bgm/` → 当前工作目录 `bgm/` → 应用配置目录 `bgm/`。
-//! 外置挂载点缺失时自动创建（优先 exe 同级，无写入权限时退到配置目录），并补全分类子目录。
-//! 所有写操作先持久化再更新内存，并通过独立的命令修改曲库目录，避免前端偏好覆盖目录选择。
+//! 曲库根目录由 [`crate::library_root`] 解析，启动配置由 [`crate::settings`] 加载；
+//! 本模块只负责持有多份运行时状态、串联核心写操作，并保证「先持久化再更新内存」。
+//! 所有写操作先落盘再更新内存，并通过独立的命令修改曲库目录，避免前端偏好覆盖目录选择。
 
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use bgm_core::categories::Categories;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
-use bgm_core::paths::{
-    CATEGORIES_FILE, CONFIG_FILE, LIBRARY_DIR_NAME, LIBRARY_ENV_VAR, PREFS_FILE,
-};
 use bgm_core::{AppConfig, Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
+
+use crate::library_root;
+use crate::settings::Settings;
 
 pub struct AppState {
     prefs_path: PathBuf,
@@ -74,48 +72,32 @@ pub struct CategoryOutcome {
 
 impl AppState {
     pub fn initialize(app: &AppHandle) -> Result<Self> {
-        let config_dir = app
-            .path()
-            .app_config_dir()
-            .context("无法定位应用配置目录")?;
-        let mut warnings = Vec::new();
+        let Settings {
+            config_path,
+            prefs_path,
+            categories_path,
+            config,
+            prefs,
+            categories,
+            mut warnings,
+        } = Settings::load(app)?;
 
-        let config_path = config_dir.join(CONFIG_FILE);
-        let (config, config_warning) = AppConfig::load(&config_path);
-        if let Some(warning) = config_warning {
-            warnings.push(warning);
-        }
-        if let Err(error) = config.ensure_file(&config_path) {
-            warnings.push(format!("无法写入应用配置文件：{error}"));
-        }
-
-        let prefs_path = config_dir.join(PREFS_FILE);
-        let (prefs, prefs_warning) = Prefs::load_with_rates(&prefs_path, &config.player.rates);
-        if let Some(warning) = prefs_warning {
-            warnings.push(warning);
-        }
         // 首屏就要显示自定义壁纸，启动阶段先把文件加进 asset 白名单。
         crate::wallpapers::prime_custom(app, prefs.custom_wallpaper.as_deref());
 
-        let categories_path = config_dir.join(CATEGORIES_FILE);
-        let (categories, categories_warning) = Categories::load(&categories_path);
-        if let Some(warning) = categories_warning {
-            warnings.push(warning);
-        }
-        if let Err(error) = categories.ensure_file(&categories_path) {
-            warnings.push(format!("无法写入分类配置文件：{error}"));
-        }
-
-        let (root, source, mut root_warnings) = resolve_root(app, &prefs);
+        let (root, source, mut root_warnings) = library_root::resolve(app, &prefs);
         if source == LibrarySource::External {
-            root_warnings.append(&mut ensure_category_dirs(&root, &categories.items));
+            root_warnings.append(&mut library_root::ensure_category_dirs(
+                &root,
+                &categories.items,
+            ));
         }
         warnings.append(&mut root_warnings);
 
         let mut library = scan_library(&root, source, &categories.items);
         warnings.append(&mut library.warnings);
         library.warnings = warnings;
-        allow_audio_scope(app, &root)?;
+        library_root::allow_audio_scope(app, &root)?;
 
         Ok(Self {
             prefs_path,
@@ -187,16 +169,14 @@ impl AppState {
         name: &str,
         id: Option<&str>,
     ) -> Result<CategoryOutcome> {
-        let mut warnings = self.reload_categories();
-        let mut next = self.categories.read().clone();
-        let category = next
-            .add(name, id)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        next.save(&self.categories_path)
-            .context("保存分类配置失败")?;
-        *self.categories.write() = next;
+        let (category_id, mut warnings) = self.save_categories(|next| {
+            let category = next
+                .add(name, id)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            Ok(category.id)
+        })?;
 
-        let dir = self.root().join(&category.id);
+        let dir = self.root().join(&category_id);
         if let Err(error) = fs::create_dir_all(&dir) {
             warnings.push(format!(
                 "分类已添加，但无法创建曲库目录 {}：{error}",
@@ -204,13 +184,7 @@ impl AppState {
             ));
         }
 
-        let mut library = self.refresh_library(app)?;
-        warnings.append(&mut library.warnings);
-        library.warnings = warnings;
-        Ok(CategoryOutcome {
-            library,
-            category_id: category.id,
-        })
+        self.finish_category_change(app, category_id, warnings)
     }
 
     /// 修改分类展示名称 / 主题色，不移动已导入的音频文件。
@@ -221,21 +195,12 @@ impl AppState {
         name: &str,
         color: Option<&str>,
     ) -> Result<CategoryOutcome> {
-        let mut warnings = self.reload_categories();
-        let mut next = self.categories.read().clone();
-        next.update(id, name, color)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        next.save(&self.categories_path)
-            .context("保存分类配置失败")?;
-        *self.categories.write() = next;
-
-        let mut library = self.refresh_library(app)?;
-        warnings.append(&mut library.warnings);
-        library.warnings = warnings;
-        Ok(CategoryOutcome {
-            library,
-            category_id: id.to_owned(),
-        })
+        let (category_id, warnings) = self.save_categories(|next| {
+            next.update(id, name, color)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            Ok(id.to_owned())
+        })?;
+        self.finish_category_change(app, category_id, warnings)
     }
 
     pub fn choose_library_dir(
@@ -258,9 +223,12 @@ impl AppState {
     pub fn reset_library_dir(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
         self.persist_library_dir(None)?;
         let prefs = self.prefs.read().clone();
-        let (root, source, mut warnings) = resolve_root(app, &prefs);
+        let (root, source, mut warnings) = library_root::resolve(app, &prefs);
         if source == LibrarySource::External {
-            warnings.append(&mut ensure_category_dirs(&root, &self.category_items()));
+            warnings.append(&mut library_root::ensure_category_dirs(
+                &root,
+                &self.category_items(),
+            ));
         }
         self.install_root(app, root, source, warnings)
     }
@@ -316,13 +284,7 @@ impl AppState {
         }
         let categories = self.category_items();
         let report = ops::import_files(&self.root(), &categories, category, &sources);
-        let library = self.refresh_library(app)?;
-        Ok(LibraryMutation {
-            library,
-            changes: Vec::new(),
-            removed: Vec::new(),
-            report,
-        })
+        self.finish_mutation(app, Vec::new(), Vec::new(), report)
     }
 
     /// 修改曲名与分类；文件名变化会同步迁移收藏 key。
@@ -355,17 +317,7 @@ impl AppState {
             report.messages.push("曲目未发生变化".to_owned());
         }
 
-        let favorite_warning = self.sync_favorites(std::slice::from_ref(&change), &[]);
-        let mut library = self.refresh_library(app)?;
-        if let Some(warning) = favorite_warning {
-            library.warnings.push(warning);
-        }
-        Ok(LibraryMutation {
-            library,
-            changes: vec![change],
-            removed: Vec::new(),
-            report,
-        })
+        self.finish_mutation(app, vec![change], Vec::new(), report)
     }
 
     pub fn move_tracks(
@@ -380,14 +332,12 @@ impl AppState {
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
         let categories = self.category_items();
-        let outcome = ops::move_songs(&self.root(), &categories, &refs, category);
-
-        let favorite_warning = self.sync_favorites(&outcome.changes, &[]);
-        let mut library = self.refresh_library(app)?;
-        if let Some(warning) = favorite_warning {
-            library.warnings.push(warning);
-        }
-        Ok(mutation_from(library, outcome))
+        let BatchOutcome {
+            changes,
+            removed,
+            report,
+        } = ops::move_songs(&self.root(), &categories, &refs, category);
+        self.finish_mutation(app, changes, removed, report)
     }
 
     /// 软删除：移入曲库根目录下的 `.tfy-trash`，并清理对应收藏。
@@ -395,14 +345,12 @@ impl AppState {
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
         let categories = self.category_items();
-        let outcome = ops::trash_songs(&self.root(), &categories, &refs);
-
-        let favorite_warning = self.sync_favorites(&[], &outcome.removed);
-        let mut library = self.refresh_library(app)?;
-        if let Some(warning) = favorite_warning {
-            library.warnings.push(warning);
-        }
-        Ok(mutation_from(library, outcome))
+        let BatchOutcome {
+            changes,
+            removed,
+            report,
+        } = ops::trash_songs(&self.root(), &categories, &refs);
+        self.finish_mutation(app, changes, removed, report)
     }
 
     /// 批量导出到指定文件夹，不改变曲库内容。
@@ -431,6 +379,27 @@ impl AppState {
             bail!("选中的曲目均已不在曲库中");
         }
         Ok(songs)
+    }
+
+    /// 写操作后的统一收尾：迁移收藏 key、重新扫描并组装返回结果。
+    fn finish_mutation(
+        &self,
+        app: &AppHandle,
+        changes: Vec<KeyChange>,
+        removed: Vec<String>,
+        report: BatchReport,
+    ) -> Result<LibraryMutation> {
+        let favorite_warning = self.sync_favorites(&changes, &removed);
+        let mut library = self.refresh_library(app)?;
+        if let Some(warning) = favorite_warning {
+            library.warnings.push(warning);
+        }
+        Ok(LibraryMutation {
+            library,
+            changes,
+            removed,
+            report,
+        })
     }
 
     /// 把重命名/移动产生的 key 变化同步到收藏，删除的 key 直接移除。
@@ -464,6 +433,35 @@ impl AppState {
         }
     }
 
+    /// 更新分类配置并返回新的分类 id；调用方负责后续目录操作与曲库刷新。
+    fn save_categories(
+        &self,
+        mutate: impl FnOnce(&mut Categories) -> Result<String>,
+    ) -> Result<(String, Vec<String>)> {
+        let warnings = self.reload_categories();
+        let mut next = self.categories.read().clone();
+        let category_id = mutate(&mut next)?;
+        next.save(&self.categories_path)
+            .context("保存分类配置失败")?;
+        *self.categories.write() = next;
+        Ok((category_id, warnings))
+    }
+
+    fn finish_category_change(
+        &self,
+        app: &AppHandle,
+        category_id: String,
+        mut warnings: Vec<String>,
+    ) -> Result<CategoryOutcome> {
+        let mut library = self.refresh_library(app)?;
+        warnings.append(&mut library.warnings);
+        library.warnings = warnings;
+        Ok(CategoryOutcome {
+            library,
+            category_id,
+        })
+    }
+
     fn refresh_library(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
         let (root, source) = {
             let runtime = self.runtime.read();
@@ -488,7 +486,7 @@ impl AppState {
         source: LibrarySource,
         mut warnings: Vec<String>,
     ) -> Result<LibrarySnapshot> {
-        allow_audio_scope(app, &root)?;
+        library_root::allow_audio_scope(app, &root)?;
         let categories = self.category_items();
         let mut library = scan_library(&root, source, &categories);
         warnings.append(&mut library.warnings);
@@ -500,125 +498,4 @@ impl AppState {
         };
         Ok(library)
     }
-}
-
-fn mutation_from(library: LibrarySnapshot, outcome: BatchOutcome) -> LibraryMutation {
-    LibraryMutation {
-        library,
-        changes: outcome.changes,
-        removed: outcome.removed,
-        report: outcome.report,
-    }
-}
-
-fn resolve_root(app: &AppHandle, prefs: &Prefs) -> (PathBuf, LibrarySource, Vec<String>) {
-    let mut warnings = Vec::new();
-
-    if let Some(dir) = env::var_os(LIBRARY_ENV_VAR) {
-        let path = PathBuf::from(dir);
-        if path.is_dir() {
-            return (absolute(path), LibrarySource::Env, warnings);
-        }
-        warnings.push(format!(
-            "环境变量 {LIBRARY_ENV_VAR} 指向的目录不存在，已忽略：{}",
-            path.display()
-        ));
-    }
-
-    if let Some(dir) = &prefs.library_dir {
-        let path = PathBuf::from(dir);
-        if path.is_dir() {
-            return (absolute(path), LibrarySource::Custom, warnings);
-        }
-        warnings.push(format!(
-            "自定义曲库目录不存在，已回退到外置曲库：{}",
-            path.display()
-        ));
-    }
-
-    // 开发模式优先使用仓库根目录的 bgm/，避免在 target/debug 下生成空曲库。
-    #[cfg(debug_assertions)]
-    {
-        let dev_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../{LIBRARY_DIR_NAME}"));
-        if dev_root.is_dir() {
-            return (absolute(dev_root), LibrarySource::Bundled, warnings);
-        }
-    }
-
-    resolve_external_root(app, warnings)
-}
-
-/// 外置曲库挂载点：优先 exe 同级，其次当前工作目录，最后应用配置目录。
-/// 都不存在时尝试在 exe 同级创建，失败则落到配置目录；分类子目录由调用方补全。
-fn resolve_external_root(
-    app: &AppHandle,
-    mut warnings: Vec<String>,
-) -> (PathBuf, LibrarySource, Vec<String>) {
-    let exe_root = env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|dir| dir.join(LIBRARY_DIR_NAME));
-    let cwd_root = env::current_dir()
-        .ok()
-        .map(|dir| dir.join(LIBRARY_DIR_NAME));
-    let config_root = app
-        .path()
-        .app_config_dir()
-        .ok()
-        .map(|dir| dir.join(LIBRARY_DIR_NAME));
-
-    if let Some(root) = [&exe_root, &cwd_root, &config_root]
-        .into_iter()
-        .flatten()
-        .find(|root| root.is_dir())
-    {
-        return (absolute(root.clone()), LibrarySource::External, warnings);
-    }
-
-    for root in [&exe_root, &config_root].into_iter().flatten() {
-        match fs::create_dir_all(root) {
-            Ok(()) => return (absolute(root.clone()), LibrarySource::External, warnings),
-            Err(error) => warnings.push(format!(
-                "无法创建外置曲库目录 {}：{error}",
-                root.display()
-            )),
-        }
-    }
-
-    let fallback = exe_root
-        .or(cwd_root)
-        .or(config_root)
-        .unwrap_or_else(|| PathBuf::from(LIBRARY_DIR_NAME));
-    warnings.push(format!(
-        "未找到可用的外置曲库目录，请在程序同级创建 {LIBRARY_DIR_NAME}/，或通过「切换曲库目录」选择文件夹"
-    ));
-    (fallback, LibrarySource::External, warnings)
-}
-
-/// 在外置曲库中补齐分类子目录，首次启动即可直接往对应目录放音频。
-fn ensure_category_dirs(root: &Path, categories: &[Category]) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for category in categories {
-        let dir = root.join(&category.id);
-        if dir.is_dir() {
-            continue;
-        }
-        if let Err(error) = fs::create_dir_all(&dir) {
-            warnings.push(format!("无法创建分类目录 {}：{error}", dir.display()));
-        }
-    }
-    warnings
-}
-
-fn absolute(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
-}
-
-fn allow_audio_scope(app: &AppHandle, root: &Path) -> Result<()> {
-    if root.is_dir() {
-        app.asset_protocol_scope()
-            .allow_directory(root, true)
-            .with_context(|| format!("无法授权音频目录：{}", root.display()))?;
-    }
-    Ok(())
 }
