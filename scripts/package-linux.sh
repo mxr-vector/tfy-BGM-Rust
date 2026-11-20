@@ -13,8 +13,9 @@
 #
 # Notes:
 #   - deb/rpm cannot be cross-built from Windows; run this on Linux.
-#   - Building rpm on Debian/Ubuntu needs rpmbuild: sudo apt install rpm
-#   - Building deb on Fedora needs dpkg-deb:      sudo dnf install dpkg
+#   - Neither needs dpkg-deb, rpmbuild, nor Fedora: tauri bundles both in pure Rust
+#     (flate2 + tar for deb, the `rpm` crate for rpm). Only the Tauri build
+#     dependencies (WebKitGTK etc.) are required.
 #   - Requires tauri-cli: cargo install tauri-cli --version "^2" --locked
 #   - The rpm file name drops the release field on purpose (uniform 4 fields);
 #     the package metadata still keeps Release: 1.
@@ -44,21 +45,17 @@ case "$(uname -m)" in
     *) die "unsupported architecture: $(uname -m)" ;;
 esac
 
-has() { command -v "$1" >/dev/null 2>&1; }
-
 formats=("$@")
 if [ ${#formats[@]} -eq 0 ]; then
-    has dpkg-deb && formats+=(deb)
-    has rpmbuild && formats+=(rpm)
-    [ ${#formats[@]} -gt 0 ] || die "neither dpkg-deb nor rpmbuild found; install dpkg and/or rpm"
-    echo "auto-detected formats: ${formats[*]}"
+    # Both formats are written by tauri's own pure-Rust bundlers, so any distro
+    # that can build the app can also produce both packages.
+    formats=(deb rpm)
 fi
 
 for fmt in "${formats[@]}"; do
     case "$fmt" in
-        deb) has dpkg-deb || die "deb requested but dpkg-deb is missing (sudo apt install dpkg)" ;;
-        rpm) has rpmbuild  || die "rpm requested but rpmbuild is missing (sudo apt install rpm / sudo dnf install rpm-build)" ;;
-        *)   die "unknown format: $fmt (expected deb or rpm)" ;;
+        deb|rpm) ;;
+        *) die "unknown format: $fmt (expected deb or rpm)" ;;
     esac
 done
 
@@ -67,7 +64,7 @@ bundle_arg="$(IFS=,; echo "${formats[*]}")"
 if [ "${SKIP_BUILD:-0}" = "1" ]; then
     echo "[1/3] build skipped (SKIP_BUILD=1)"
 else
-    has cargo || die "cargo not found. Install Rust from https://rustup.rs"
+    command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust from https://rustup.rs"
     echo "[1/3] cargo tauri build --bundles $bundle_arg"
     ( cd "$repo/src-tauri" && cargo tauri --version >/dev/null 2>&1 ) \
         || die "tauri-cli not found. Run: cargo install tauri-cli --version \"^2\" --locked"

@@ -17,9 +17,9 @@
 #   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 guard 直接失败。
 #   - 仓库里含 bgm/ 曲库（约 350 MB），with-library 会产出 346 MB 的 zip；
 #     不想占用 Actions 存储配额时，手动触发时选 empty-library。
-#   - Linux 用 ubuntu-22.04 而不是 ubuntu-latest：24.04 构建出的二进制要求 glibc 2.39，
-#     在 Debian 12 / Ubuntu 22.04 上跑不起来。该镜像 2026-09 起进入弃用期，
-#     2027-04 之后需要改成「ubuntu-24.04 + 容器内用 22.04 构建」这类方案。
+#   - Linux 用 ubuntu-24.04：只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），
+#     更老的发行版不在支持范围内，不再做兼容处理。
+#   - deb 与 rpm 都由 tauri 内置的纯 Rust 打包器直出，不需要 dpkg-deb / rpmbuild / Fedora。
 
 name: Package
 
@@ -111,7 +111,7 @@ jobs:
   linux:
     name: Test + Linux deb/rpm
     needs: guard
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -139,9 +139,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            pkg-config \
-            patchelf \
-            rpm
+            pkg-config
 
       - uses: actions/cache@v4
         with:
@@ -154,7 +152,7 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
 
-      # rpm 打包依赖 rpmbuild（上面装了 rpm 包）；deb 依赖 dpkg-deb（镜像自带）
+      # deb 与 rpm 都是 tauri 内置打包器直出的，不需要 rpmbuild；这里只装编译依赖
       - name: Build deb and rpm
         run: bash scripts/package-linux.sh deb rpm
 

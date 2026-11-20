@@ -295,8 +295,8 @@ powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
 deb / rpm 无法在 Windows 上交叉构建，需在 Linux 上执行（或放进 CI 矩阵）：
 
 ```bash
-bash scripts/package-linux.sh                    # 自动探测本机能打哪些格式
-bash scripts/package-linux.sh deb rpm            # 显式指定
+bash scripts/package-linux.sh                    # 默认两种都打
+bash scripts/package-linux.sh deb                # 只打指定格式
 SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
 ```
 
@@ -307,8 +307,10 @@ dist/tfy-bgm-1.0.0-linux-amd64.deb
 dist/tfy-bgm-1.0.0-linux-x86_64.rpm
 ```
 
-- 打包工具：Debian/Ubuntu 打 rpm 要 `sudo apt install rpm`，Fedora 打 deb 要 `sudo dnf install dpkg`。自动模式只打工具齐备的格式，显式指定缺失工具的格式会直接报错。
-- 首次需 `cargo install tauri-cli --version "^2" --locked`，并装好「环境要求」里的 WebKitGTK 依赖。
+- **不需要 Fedora，也不需要 `rpmbuild`**：`deb` 与 `rpm` 都由 Tauri 内置的纯 Rust 打包器直出（deb 用 `flate2` + `tar`，rpm 用 `rpm` crate），全程不调用 `dpkg-deb` / `rpmbuild`。只要这台机器能编译 Tauri（装好「环境要求」里的 WebKitGTK 依赖），两种包都能打。
+- 在 Ubuntu 24.04 上构建，产物要求 **glibc ≥ 2.39**（Ubuntu 24.04+ / Debian 13+ / Fedora 40+）；更老的发行版不在支持范围内。
+- 想在 Fedora 上验证安装效果，可以 `podman run --rm -it -v $PWD/dist:/mnt fedora:latest dnf install -y /mnt/tfy-bgm-*.rpm`。
+- 首次需 `cargo install tauri-cli --version "^2" --locked`。
 - rpm 文件名去掉了 release 段以保持四段统一，包内元数据仍是 `Release: 1`；将来若直接拿构建目录里的产物做 dnf 仓库，原名也仍然可用。
 
 #### 产物命名规范
@@ -344,8 +346,8 @@ git push origin v1.0.0
 
 - `guard` 和 `release` 跑 `ubuntu-slim`（1 核容器，分钟数远低于 4 核 VM）；打包必须用完整 VM——slim 镜像里没有 gcc 与 WebKitGTK、容器是非特权的、单 job 还有 15 分钟上限，Tauri 全量编译一定超时。
 - artifact 只保留 3 天（`retention-days: 3`），346 MB 的包不会长期占着存储。
-- Linux 用 `ubuntu-22.04` 而不是 `ubuntu-latest`：24.04 上构建的二进制要求 glibc 2.39，在 Debian 12 / Ubuntu 22.04 上跑不起来。该镜像 2026-09 起进入弃用期、2027-04 后失效，届时需要改成「24.04 runner + 22.04 容器内构建」这类方案。
-- `rpm` 依赖 `rpmbuild`（workflow 里 `apt install rpm`），`deb` 依赖镜像自带的 `dpkg-deb`。
+- Linux 用 `ubuntu-24.04`，产物只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），更老的发行版不在支持范围内。
+- 打包不依赖任何 deb/rpm 工具链，workflow 里的 apt 步骤只装编译依赖（WebKitGTK 等）。
 - `tauri-cli` 用 `cargo install` 装一次，`~/.cargo/bin` 与 `.crates.toml` 走缓存，命中后直接跳过编译。
 - 工作流只在 GitHub 上生效；当前 `origin` 是 Gitee，需要先推到 GitHub 镜像仓库才会触发。
 
