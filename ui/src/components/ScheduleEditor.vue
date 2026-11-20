@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { formatTime } from '@/lib/format';
 import { formatMinutes, minutesOf, type Draft, type DraftSong } from '@/lib/schedule-draft';
 import { categoryById, songByKey } from '@/stores/state';
 import Icon from './Icon.vue';
@@ -28,6 +29,11 @@ function songCategoryLabel(key: string): string {
   const song = songByKey(key);
   if (!song) return '不在曲库';
   return categoryById(song.category)?.nameZh ?? song.category;
+}
+
+function songDurationLabel(key: string): string {
+  const ms = songByKey(key)?.durationMs ?? 0;
+  return ms > 0 ? formatTime(ms / 1000) : '--:--';
 }
 
 function draftRange(): { start: number; end: number } | null {
@@ -282,7 +288,10 @@ onBeforeUnmount(endSongDrag);
             <span class="editor-song-title" :title="songTitle(song.key)">
               {{ songTitle(song.key) }}
             </span>
-            <span class="editor-song-cat">{{ songCategoryLabel(song.key) }}</span>
+            <span class="editor-song-sub">
+              <span class="editor-song-cat">{{ songCategoryLabel(song.key) }}</span>
+              <span class="editor-song-duration">{{ songDurationLabel(song.key) }}</span>
+            </span>
           </div>
           <label class="editor-time">
             <span>开始</span>

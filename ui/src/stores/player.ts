@@ -42,6 +42,17 @@ export const playbackError = ref('');
 
 let failureStreak = 0;
 
+type EndedHandler = () => boolean;
+let endedHandler: EndedHandler | null = null;
+
+/**
+ * 节目单在生效时段内接管「播完」行为：返回 true 表示已处理，不再自动跳下一首。
+ * 用于把播放限制在每首歌自己的时间槽内，而不是顺着整张节目单队列往后跑。
+ */
+export function setEndedHandler(handler: EndedHandler | null): void {
+  endedHandler = handler;
+}
+
 /** 整曲 AudioBuffer 解码的安全上限（30 分钟约 690MB），超出直接跳过。 */
 const MAX_DECODE_SECONDS = 30 * 60;
 
@@ -243,6 +254,7 @@ export function prevTrack(forcePlay = true): void {
 }
 
 function handleEnded(): void {
+  if (endedHandler?.()) return;
   if (state.prefs?.playMode === PLAY_MODES.repeatOne) {
     rewindToStart();
     startPlayback();

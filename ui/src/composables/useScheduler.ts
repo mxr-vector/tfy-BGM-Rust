@@ -8,6 +8,7 @@
 
 import { computed, ref } from 'vue';
 import type { ScheduleEntry, ScheduleSong } from '@/lib/types';
+import { setEndedHandler } from '@/stores/player';
 import { applyScheduleEntry } from '@/stores/schedule';
 import { state } from '@/stores/state';
 
@@ -163,10 +164,24 @@ export const nextProgram = computed<{ entry: ScheduleEntry; tomorrow: boolean } 
 });
 
 export function installScheduler(): () => void {
+  setEndedHandler(handleScheduleEnded);
   tick();
   timer = window.setInterval(tick, 1_000);
   return () => {
     window.clearInterval(timer);
     timer = 0;
+    setEndedHandler(null);
   };
+}
+
+/**
+ * 节目生效时段内，歌曲播完后只循环「当前到点」的歌曲，等下一首的起始时间再切换；
+ * 不再顺着整张节目单队列自动往后跳，避免播到其它时段的歌。
+ */
+function handleScheduleEnded(): boolean {
+  const program = currentProgram.value;
+  if (!program) return false;
+  const due = currentProgramSong.value;
+  if (!due) return false;
+  return applyScheduleEntry(program, { songKey: due.key, announce: false, restart: true });
 }

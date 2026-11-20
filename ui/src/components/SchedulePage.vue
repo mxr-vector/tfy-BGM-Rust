@@ -7,6 +7,7 @@ import {
   schedulerNow,
 } from '@/composables/useScheduler';
 import { showModal } from '@/lib/modal';
+import { formatTime } from '@/lib/format';
 import {
   draftFromEntry,
   emptyDraft,
@@ -57,6 +58,16 @@ function songCategoryLabel(key: string): string {
   const song = songByKey(key);
   if (!song) return '不在曲库';
   return categoryById(song.category)?.nameZh ?? song.category;
+}
+
+function songDurationLabel(key: string): string {
+  const ms = songByKey(key)?.durationMs ?? 0;
+  return ms > 0 ? formatTime(ms / 1000) : '--:--';
+}
+
+/** 当前节目处于生效时段，且这首歌就是正在播放的曲目。 */
+function isPlayingSong(entry: ScheduleEntry, key: string): boolean {
+  return entry.id === currentProgram.value?.id && state.currentKey === key;
 }
 
 function programHeadline(entry: ScheduleEntry): string {
@@ -348,11 +359,18 @@ function applyNow(entry: ScheduleEntry): void {
             v-for="(song, index) in entry.songs"
             :key="`${entry.id}-${song.key}`"
             class="slot-song"
-            :class="{ 'is-missing': !songByKey(song.key) }"
+            :class="{
+              'is-missing': !songByKey(song.key),
+              'is-playing': isPlayingSong(entry, song.key),
+            }"
           >
             <span class="slot-song-index">{{ index + 1 }}</span>
             <span class="slot-song-time">{{ song.start }}–{{ song.end }}</span>
-            <span class="slot-song-title">{{ songTitle(song.key) }}</span>
+            <span class="slot-song-title">
+              <span class="slot-song-name" :title="songTitle(song.key)">{{ songTitle(song.key) }}</span>
+              <span v-if="isPlayingSong(entry, song.key)" class="slot-song-live">播放中</span>
+            </span>
+            <span class="slot-song-duration" title="歌曲时长">{{ songDurationLabel(song.key) }}</span>
             <span class="slot-song-cat">{{ songCategoryLabel(song.key) }}</span>
           </div>
         </div>

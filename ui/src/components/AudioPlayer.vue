@@ -5,6 +5,7 @@ import {
   playerPopover,
   togglePlayerPopover,
 } from '@/composables/usePlayerPopover';
+import { currentProgram } from '@/composables/useScheduler';
 import { playerConfig } from '@/lib/config';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
@@ -33,6 +34,7 @@ import {
 import { categoryById, state, visibleSongs } from '@/stores/state';
 import ExportSettingsPopover from './ExportSettingsPopover.vue';
 import Icon from './Icon.vue';
+import MarqueeText from './MarqueeText.vue';
 
 const progressEl = ref<HTMLElement | null>(null);
 const dragging = ref(false);
@@ -45,6 +47,12 @@ const category = computed(() =>
   song.value ? categoryById(song.value.category) : null,
 );
 const color = computed(() => category.value?.color ?? DEFAULT_ACCENT);
+const programName = computed(() => {
+  const entry = currentProgram.value;
+  const current = song.value;
+  if (!entry || !current) return '';
+  return entry.songs.some((item) => item.key === current.key) ? entry.name : '';
+});
 const duration = computed(() => audioState.duration);
 const displayTime = computed(() =>
   dragging.value ? dragTime.value : audioState.currentTime,
@@ -264,9 +272,13 @@ onBeforeUnmount(() => {
           </div>
           <div class="track-meta">
             <div class="title-row">
-              <span class="track-title" id="now-title" :title="song?.title ?? ''">
-                {{ song?.title ?? '未在播放' }}
-              </span>
+              <MarqueeText
+                class="track-title"
+                id="now-title"
+                :text="song?.title ?? '未在播放'"
+                :title="song?.title ?? ''"
+                :paused="!state.playing"
+              />
               <span
                 v-if="song"
                 class="category-badge"
@@ -278,6 +290,14 @@ onBeforeUnmount(() => {
                 }"
               >
                 {{ category?.nameZh ?? song.category }}
+              </span>
+              <span
+                v-if="programName"
+                class="program-badge"
+                title="当前节目"
+              >
+                <Icon name="clock" />
+                <MarqueeText :text="programName" :paused="!state.playing" />
               </span>
               <button
                 v-if="loopPoint"
