@@ -44,7 +44,7 @@ export function showModal({
           class: 'modal-input modal-color',
           attrs: { type: 'color', name: field.name },
         });
-        input.value = field.value ?? '#6366f1';
+        input.value = field.value ?? '#22c55e';
       } else {
         input = el('input', {
           class: 'modal-input',

@@ -15,7 +15,7 @@ const DEFAULT_DESCRIPTION: &str =
     "自定义分类：把同类风格的音频放入这个分类目录，重新扫描后即可试听与导出。";
 
 const PALETTE: [&str; 8] = [
-    "#f59e0b", "#818cf8", "#f472b6", "#ef4444", "#10b981", "#84cc16", "#22d3ee", "#a78bfa",
+    "#22c55e", "#2dd4bf", "#84cc16", "#a3e635", "#f59e0b", "#f472b6", "#38bdf8", "#ef4444",
 ];
 
 /// 一个 BGM 分类。`id` 同时也是曲库根目录下的子目录名。
@@ -105,7 +105,7 @@ pub fn defaults() -> Categories {
                 "独处",
                 "Solitude",
                 "SOLITUDE / PEACEFUL",
-                "#818cf8",
+                "#2dd4bf",
                 "独处沉思 · Solitude & Chill",
                 "纯音乐、治愈钢琴、深夜独白、静心工作与自律学习视频的最佳背景配乐。",
             ),

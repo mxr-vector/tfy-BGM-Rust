@@ -93,7 +93,7 @@ export function applyStaticIcons(root = document) {
   }
 }
 
-export function equalizer(color = '#6366f1') {
+export function equalizer(color = '#4ade80') {
   const box = document.createElement('div');
   box.className = 'equalizer';
   for (let index = 0; index < 4; index += 1) {

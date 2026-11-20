@@ -33,7 +33,6 @@ export function initPlayer() {
 
   Object.assign(els, {
     player: $('player'),
-    wrapper: document.querySelector('.player-wrapper'),
     progress: $('progress'),
     buffered: $('progress-buffered'),
     played: $('progress-played'),
@@ -569,8 +568,7 @@ function renderPlayer() {
   }
 
   const category = state.library.categories.find((item) => item.id === song.category);
-  const color = category?.color ?? '#6366f1';
-  els.wrapper.style.setProperty('--track-color', color);
+  const color = category?.color ?? '#4ade80';
 
   els.title.textContent = song.title;
   els.title.title = song.title;
@@ -587,8 +585,8 @@ function renderPlayer() {
   setIcon(els.play, state.playing ? 'pause-fill' : 'play-fill');
   els.play.title = state.playing ? '暂停 (空格)' : '播放 (空格)';
   els.play.style.boxShadow = state.playing
-    ? `0 0 24px ${withAlpha(color, 0.4)}`
-    : 'none';
+    ? `inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 20px -6px rgba(74, 222, 128, 0.6), 0 0 26px ${withAlpha(color, 0.45)}`
+    : '';
 
   const mode = modeMeta(state.prefs.playMode);
   setIcon(els.mode, mode.icon);
@@ -607,6 +605,7 @@ function renderPlayer() {
   setIcon(els.mute, volumeIcon);
   els.mute.title = state.prefs.muted ? '取消静音 (M)' : '静音 (M)';
   els.volume.value = String(effectiveVolume);
+  els.volume.style.setProperty('--volume', `${Math.round(effectiveVolume * 100)}%`);
   els.volumePercent.textContent = `${Math.round(effectiveVolume * 100)}%`;
 
   els.download.disabled = exporting;
@@ -699,7 +698,7 @@ function renderDrawer() {
 
   state.queue.forEach((song, index) => {
     const category = state.library.categories.find((item) => item.id === song.category);
-    const color = category?.color ?? '#6366f1';
+    const color = category?.color ?? '#4ade80';
     const isCurrent = state.currentKey === song.key;
 
     const left = el('div', { class: 'queue-item-left' });

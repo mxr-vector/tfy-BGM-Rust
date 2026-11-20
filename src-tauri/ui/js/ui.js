@@ -74,7 +74,7 @@ export function clamp(value, min, max) {
 }
 
 export function withAlpha(hex, alpha) {
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) return `rgba(99, 102, 241, ${alpha})`;
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return `rgba(74, 222, 128, ${alpha})`;
   const red = Number.parseInt(hex.slice(1, 3), 16);
   const green = Number.parseInt(hex.slice(3, 5), 16);
   const blue = Number.parseInt(hex.slice(5, 7), 16);

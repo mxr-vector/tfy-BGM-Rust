@@ -37,7 +37,7 @@ let contextMenu = null;
 const ALL_HERO = {
   title: '全部精选视频剪辑 BGM',
   labelEn: 'ALL BGM SOUNDTRACKS',
-  color: '#6366f1',
+  color: '#4ade80',
   icon: 'music',
 };
 
@@ -910,7 +910,7 @@ function renderEmptyState() {
 
 function buildRow(song, index) {
   const category = categoryById(song.category);
-  const color = category?.color ?? '#6366f1';
+  const color = category?.color ?? '#4ade80';
   const isCurrent = state.currentKey === song.key;
   const isPlaying = isCurrent && state.playing;
   const isFavorite = state.favorites.has(song.key);
