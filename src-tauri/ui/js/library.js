@@ -435,19 +435,19 @@ function renderSidebar() {
     dot.style.backgroundColor = category.color;
     dot.style.boxShadow = `0 0 8px ${withAlpha(category.color, 0.55)}`;
 
-    const labels = el('div', { class: 'cat-labels' }, [
-      el('span', { class: 'cat-name-zh', text: category.nameZh }),
-      el('span', { class: 'cat-name-en', text: category.nameEn }),
-    ]);
-
     const button = el(
       'button',
       {
-        class: `nav-item category-item${active ? ' is-active' : ''}`,
-        attrs: { type: 'button' },
+        class: `cat-tab category-item${active ? ' is-active' : ''}`,
+        attrs: { type: 'button', title: `${category.nameZh} · ${category.nameEn}` },
       },
-      [dot, labels, el('span', { class: 'nav-badge', text: String(category.count) })],
+      [
+        dot,
+        el('span', { class: 'tab-label', text: category.nameZh }),
+        el('span', { class: 'tab-count', text: String(category.count) }),
+      ],
     );
+    button.style.setProperty('--tab-color', category.color);
     button.addEventListener('click', () => setCategory(category.id));
     els.categoryNav.append(button);
   }
