@@ -6,6 +6,9 @@ export const COMMANDS = {
   reloadConfig: 'reload_config',
   openConfigFile: 'open_config_file',
   savePrefs: 'save_prefs',
+  saveSchedule: 'save_schedule',
+  saveLoopPoint: 'save_loop_point',
+  removeLoopPoint: 'remove_loop_point',
   rescanLibrary: 'rescan_library',
   chooseLibraryDir: 'choose_library_dir',
   resetLibraryDir: 'reset_library_dir',
@@ -55,6 +58,8 @@ export type HeroKind = (typeof HERO_KINDS)[keyof typeof HERO_KINDS];
 export const DEFAULT_ACCENT = '#19d98b';
 /** 收藏页主题色。 */
 export const FAVORITES_ACCENT = '#ec4899';
+/** 打开响度归一化且尚未选过场景时使用的默认目标。 */
+export const DEFAULT_EXPORT_SCENE = 'video-editing';
 
 export const DEFAULT_WALLPAPER = 'default';
 export const DEFAULT_WALLPAPER_OPACITY = 0.35;

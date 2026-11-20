@@ -3,13 +3,15 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { applyDocumentCopy } from '@/lib/config';
 import { COMMANDS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
-import { invoke, isTauri, getCurrentWindow } from '@/lib/tauri';
-import type { Bootstrap } from '@/lib/types';
+import { invoke, isTauri, getCurrentWindow, listen } from '@/lib/tauri';
+import type { Bootstrap, LibraryChange } from '@/lib/types';
 import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
+import { installScheduler } from '@/composables/useScheduler';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
-import { applyBootstrap } from '@/stores/library';
+import { applyBootstrap, applyExternalChange } from '@/stores/library';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
+import DiagnosticsPanel from '@/components/DiagnosticsPanel.vue';
 import Icon from '@/components/Icon.vue';
 import ModalHost from '@/components/ModalHost.vue';
 import QueueDrawer from '@/components/QueueDrawer.vue';
@@ -25,7 +27,9 @@ const focused = ref(true);
 
 const appWindow = getCurrentWindow();
 let unlistenFocus: (() => void) | null = null;
+let unlistenLibrary: (() => void) | null = null;
 let uninstallHotkeys: (() => void) | null = null;
+const stopScheduler = installScheduler();
 
 const shellStyle = computed<Record<string, string>>(() => {
   const view = wallpaperView.value;
@@ -66,6 +70,13 @@ void loadBuiltins();
 
 onMounted(async () => {
   void bootstrap();
+
+  // 文件监听推送的增量变化；`applyExternalChange` 会丢弃比现有快照更旧的事件，
+  // 因此与应用内写操作的返回值并发也不会让界面回退。
+  unlistenLibrary = await listen<LibraryChange>('library-changed', (change) => {
+    applyExternalChange(change);
+  });
+
   if (!appWindow) return;
   try {
     unlistenFocus = await appWindow.onFocusChanged(({ payload }) => {
@@ -78,6 +89,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenFocus?.();
+  unlistenLibrary?.();
+  unlistenLibrary = null;
+  stopScheduler();
   uninstallHotkeys?.();
   uninstallHotkeys = null;
 });
@@ -106,6 +120,7 @@ onBeforeUnmount(() => {
   </div>
 
   <WallpaperPopover />
+  <DiagnosticsPanel />
   <ModalHost />
   <ContextMenu />
 </template>

@@ -9,6 +9,8 @@ import { playerConfig } from '@/lib/config';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
 import { audioState } from '@/stores/audio-engine';
+import { openDiagnostics } from '@/stores/diagnostics';
+import { loopPointFor, openLoopEditor } from '@/stores/loops';
 import {
   cyclePlayMode,
   drawerOpen,
@@ -61,6 +63,12 @@ const volumeIcon = computed(() => {
 const isFavorite = computed(
   () => Boolean(song.value) && state.favorites.has(song.value!.key),
 );
+const loopPoint = computed(() => (song.value ? loopPointFor(song.value.key) : null));
+const loopLabel = computed(() => {
+  const point = loopPoint.value;
+  if (!point) return '';
+  return `循环 ${formatTime(point.start)}–${formatTime(point.end)}${point.enabled ? '' : '（已关闭）'}`;
+});
 const rates = computed(() => playerConfig().rates);
 const currentRate = computed(() => state.prefs?.playbackRate ?? 1);
 const rateOpen = computed(() => playerPopover.value === 'rate');
@@ -240,9 +248,19 @@ onBeforeUnmount(() => {
       <div class="player-content">
         <div class="track-info">
           <div class="track-cover" id="now-cover" :style="coverStyle">
-            <span class="cover-icon" id="now-cover-icon">
-              <Icon :name="song ? (category?.icon || 'music') : 'disc'" />
-            </span>
+            <div
+              class="track-cover-hit"
+              :class="{ 'is-clickable': Boolean(song) }"
+              role="button"
+              :tabindex="song ? 0 : -1"
+              :title="song ? '点击查看可视化诊断' : ''"
+              @click="openDiagnostics"
+              @keydown.enter.prevent="openDiagnostics"
+            >
+              <span class="cover-icon" id="now-cover-icon">
+                <Icon :name="song ? (category?.icon || 'music') : 'disc'" />
+              </span>
+            </div>
           </div>
           <div class="track-meta">
             <div class="title-row">
@@ -261,9 +279,20 @@ onBeforeUnmount(() => {
               >
                 {{ category?.nameZh ?? song.category }}
               </span>
+              <button
+                v-if="loopPoint"
+                type="button"
+                class="loop-badge"
+                :class="{ 'is-on': loopPoint.enabled }"
+                :title="`${loopLabel}，点击编辑`"
+                @click.stop="song && openLoopEditor(song)"
+              >
+                <Icon name="repeat-1" />
+                <span>{{ loopLabel }}</span>
+              </button>
             </div>
-            <span class="track-sub" id="now-sub" :title="song?.fileName ?? ''">
-              {{ song ? (category?.labelEn ?? song.category) : '从曲库中选择一首配乐' }}
+            <span class="track-sub" id="now-sub" :title="song?.artist ?? song?.fileName ?? ''">
+              {{ song ? (song.artist ? `${song.artist}${song.album ? ` · ${song.album}` : ''}` : (category?.labelEn ?? song.category)) : '从曲库中选择一首配乐' }}
             </span>
           </div>
           <button

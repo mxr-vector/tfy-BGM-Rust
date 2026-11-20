@@ -340,13 +340,12 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_tone_when_ffmpeg_is_available() {
+    fn preset_actually_changes_output_loudness_when_ffmpeg_is_available() {
         let Some(ffmpeg) = ffmpeg_path() else {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("tone.mp3");
-        let output = dir.path().join("tone-normalized.mp3");
 
         let generated = build_command(&ffmpeg)
             .args(["-hide_banner", "-nostdin", "-y", "-f", "lavfi", "-i"])
@@ -358,14 +357,24 @@ mod tests {
         assert!(generated.status.success(), "{}", tail(&generated.stderr));
         assert!(fs::metadata(&input).unwrap().len() > 0);
 
-        normalize_file(&ffmpeg, &input, &output, preset_or_default("video-editing")).unwrap();
-        assert!(fs::metadata(&output).unwrap().len() > 0);
+        let mut measured_lufs = Vec::new();
+        for id in [DEFAULT_PRESET_ID, "focus"] {
+            let preset = preset_or_default(id);
+            let output = dir.path().join(format!("{id}.mp3"));
+            normalize_file(&ffmpeg, &input, &output, preset).unwrap();
+            assert!(fs::metadata(&output).unwrap().len() > 0);
 
-        let measured = measure(&ffmpeg, &output, preset_or_default("video-editing")).unwrap();
-        let lufs: f64 = measured.input_i.parse().unwrap();
+            let measured = measure(&ffmpeg, &output, preset).unwrap();
+            let lufs: f64 = measured.input_i.parse().unwrap();
+            assert!(
+                (lufs - f64::from(preset.target_lufs)).abs() < 2.0,
+                "场景 {id} 归一化后响度偏离目标：{lufs} LUFS"
+            );
+            measured_lufs.push(lufs);
+        }
         assert!(
-            (lufs + 14.0).abs() < 2.0,
-            "归一化后响度偏离目标：{lufs} LUFS"
+            (measured_lufs[0] - measured_lufs[1]).abs() >= 4.0,
+            "不同场景预设应产生明显不同的响度：{measured_lufs:?}"
         );
     }
 }

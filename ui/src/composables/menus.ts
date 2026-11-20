@@ -17,6 +17,7 @@ import {
   openRenameTrack,
 } from '@/stores/actions';
 import { clearSelection, selectedKeys, setSelected } from '@/stores/library';
+import { clearLoopPoint, loopPointFor, openLoopEditor } from '@/stores/loops';
 import { exportSong, playSong, playSongWithMode } from '@/stores/player';
 import { setFavorites } from '@/stores/prefs';
 import { state, visibleSongs } from '@/stores/state';
@@ -87,6 +88,19 @@ export function openSongMenu(
       label: '重命名文件',
       action: () => void openRenameTrack(song),
     });
+    const loop = loopPointFor(song.key);
+    items.push({
+      icon: 'repeat-1',
+      label: loop ? '编辑循环点…' : '设置循环点…',
+      action: () => void openLoopEditor(song),
+    });
+    if (loop) {
+      items.push({
+        icon: 'x',
+        label: '清除循环点',
+        action: () => void clearLoopPoint(song),
+      });
+    }
   }
 
   items.push(

@@ -1,23 +1,27 @@
 import { ref, watch } from 'vue';
 import { COMMANDS, PLAY_MODE_CYCLE, PLAY_MODES } from '@/lib/constants';
 import { playerConfig } from '@/lib/config';
-import { clamp, normalizeError } from '@/lib/format';
+import { clamp, formatTime, normalizeError } from '@/lib/format';
 import { showModal } from '@/lib/modal';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
-import type { ExportResult, PlayMode, Song } from '@/lib/types';
+import type { ExportResult, LoopPoint, PlayMode, Song } from '@/lib/types';
 import {
   applyAudioSettings,
-  audioElement,
+  audioState,
   currentTime,
   hasSourceUrl,
   isSourceLoaded,
+  isLoading,
   loadSource,
   pausePlayback,
   rewindToStart,
   seekTo as seekAudio,
+  setLoopRegion,
   startPlayback,
+  subscribeEngine,
   unloadSource,
+  type LoopRegion,
 } from './audio-engine';
 import { persistPrefs, toggleFavorite } from './prefs';
 import {
@@ -25,8 +29,9 @@ import {
   nextSequentialIndex,
   prevSequentialIndex,
   queueIndexByKey,
-  randomOtherIndex,
+  recordPlay,
   resetQueue,
+  smartNextIndex,
   syncQueueForPlayback,
 } from './queue';
 import { songByKey, state } from './state';
@@ -35,8 +40,10 @@ export const drawerOpen = ref(false);
 export const exporting = ref(false);
 export const playbackError = ref('');
 
-const audio = audioElement();
 let failureStreak = 0;
+
+/** 整曲 AudioBuffer 解码的安全上限（30 分钟约 690MB），超出直接跳过。 */
+const MAX_DECODE_SECONDS = 30 * 60;
 
 function applyPrefsToAudio(): void {
   const prefs = state.prefs;
@@ -44,18 +51,18 @@ function applyPrefsToAudio(): void {
   applyAudioSettings(prefs.volume, prefs.muted, prefs.playbackRate);
 }
 
-audio.addEventListener('play', () => {
-  state.playing = true;
-  playbackError.value = '';
+subscribeEngine((event) => {
+  if (event === 'play') {
+    state.playing = true;
+    playbackError.value = '';
+    failureStreak = 0;
+  } else if (event === 'pause') {
+    state.playing = false;
+  } else if (event === 'ended') {
+    state.playing = false;
+    handleEnded();
+  }
 });
-audio.addEventListener('playing', () => {
-  failureStreak = 0;
-});
-audio.addEventListener('pause', () => {
-  state.playing = false;
-});
-audio.addEventListener('ended', handleEnded);
-audio.addEventListener('error', () => failCurrent('音频加载失败'));
 
 watch(
   () => [state.prefs?.volume, state.prefs?.muted, state.prefs?.playbackRate] as const,
@@ -68,15 +75,53 @@ watch(
   () => state.currentSong,
   (song, previous) => {
     if (!song) {
-      if (audio.hasAttribute('src') || hasSourceUrl()) stopPlayback();
+      // 加载中也必须停止：unloadSource 会作废未完成的请求，避免曲目已被移出曲库后仍自动播放。
+      if (hasSourceUrl() || isLoading()) stopPlayback();
       return;
     }
-    if (isSourceLoaded(song.path)) return;
+    if (isSourceLoaded(song.path)) {
+      refreshLoopRegion();
+      return;
+    }
     const time = currentTime();
-    const wasPlaying = previous ? !audio.paused : false;
+    const wasPlaying = previous ? state.playing : false;
     void loadSongSource(song, { autoplay: wasPlaying, restoreTime: previous ? time : 0 });
   },
 );
+
+// 循环点被编辑 / 外部迁移时立即作用到当前曲目。
+watch(
+  () => state.loopPoints,
+  () => refreshLoopRegion(),
+  { deep: true },
+);
+
+/** 当前曲目启用的循环区间；终点会被实际时长裁剪，非法区间自动忽略。 */
+function loopRegionFor(song: Song | null): LoopRegion | null {
+  if (!song) return null;
+  const point: LoopPoint | undefined = state.loopPoints[song.key];
+  if (!point?.enabled) return null;
+  // 只有当前 buffer 确实属于这首歌时，audioState.duration 才可信；
+  // 切歌过程中它还停留在上一首的时长，会错误裁剪终点。
+  const loadedHere =
+    state.currentSong?.key === song.key &&
+    audioState.loadedPath === song.path &&
+    audioState.duration > 0;
+  const knownDuration = loadedHere
+    ? audioState.duration
+    : song.durationMs
+      ? song.durationMs / 1000
+      : 0;
+  const start = Math.max(0, point.start);
+  let end = point.end;
+  if (knownDuration > 0) end = Math.min(end, knownDuration);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 0.1) return null;
+  return { start, end };
+}
+
+export function refreshLoopRegion(): void {
+  setLoopRegion(loopRegionFor(state.currentSong));
+}
 
 export function playSong(
   song: Song,
@@ -104,6 +149,7 @@ export function playSong(
   state.currentSong = song;
   state.playing = false;
   playbackError.value = '';
+  recordPlay(song.key);
   void loadSongSource(song, { autoplay });
 }
 
@@ -123,16 +169,24 @@ async function loadSongSource(
   song: Song,
   { autoplay = true, restoreTime = 0 }: { autoplay?: boolean; restoreTime?: number } = {},
 ): Promise<void> {
+  // 整曲解码为 float32 PCM：48kHz 立体声约 23MB/分钟，过长曲目会撑爆 WebView 内存。
+  const seconds = (song.durationMs ?? 0) / 1000;
+  if (seconds > MAX_DECODE_SECONDS) {
+    unloadSource();
+    failCurrent(`时长 ${formatTime(seconds)} 超过 ${MAX_DECODE_SECONDS / 60} 分钟，整曲解码内存占用过高`);
+    return;
+  }
   applyPrefsToAudio();
   const outcome = await loadSource(song.path, {
     autoplay,
     restoreTime,
+    loop: loopRegionFor(song),
     onAutoplayBlocked: () => {
       state.playing = false;
     },
   });
   if (outcome.status === 'failed') {
-    // 失败时元素还挂着上一首的源，先卸载，避免 UI 暂停但旧音频仍在播放。
+    // 失败时先卸载，避免 UI 暂停但旧音频仍在播放。
     unloadSource();
     failCurrent(`无法读取音频（${normalizeError(outcome.error)}）`);
   }
@@ -140,8 +194,8 @@ async function loadSongSource(
 
 export function togglePlay(): void {
   if (!state.currentSong) return;
-  if (audio.paused) startPlayback();
-  else pausePlayback();
+  if (state.playing) pausePlayback();
+  else startPlayback();
 }
 
 export function seekBy(deltaSeconds: number): void {
@@ -162,7 +216,7 @@ export function nextTrack(forcePlay = true): void {
 
   const nextIndex =
     state.prefs?.playMode === PLAY_MODES.shuffle
-      ? randomOtherIndex()
+      ? smartNextIndex(state.queue, state.queueIndex)
       : nextSequentialIndex();
   if (nextIndex < 0) return;
   state.queueIndex = nextIndex;

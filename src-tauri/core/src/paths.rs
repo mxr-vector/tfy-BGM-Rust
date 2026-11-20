@@ -9,6 +9,10 @@ pub const PREFS_FILE: &str = "prefs.json";
 pub const CATEGORIES_FILE: &str = "categories.json";
 /// 应用级配置（品牌文案、播放器参数、界面文案）。
 pub const CONFIG_FILE: &str = "config.json";
+/// 节目单（排程）配置。
+pub const SCHEDULE_FILE: &str = "schedule.json";
+/// 单曲循环区间配置。
+pub const LOOPS_FILE: &str = "loops.json";
 
 /// 外置曲库目录名（默认位于 exe 同级）。
 pub const LIBRARY_DIR_NAME: &str = "bgm";

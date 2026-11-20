@@ -6,17 +6,21 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bgm_core::paths::{CATEGORIES_FILE, CONFIG_FILE, PREFS_FILE};
-use bgm_core::{AppConfig, Categories, Prefs};
+use bgm_core::paths::{CATEGORIES_FILE, CONFIG_FILE, LOOPS_FILE, PREFS_FILE, SCHEDULE_FILE};
+use bgm_core::{AppConfig, Categories, LoopBook, Prefs, Schedule};
 use tauri::{AppHandle, Manager};
 
 pub struct Settings {
     pub config_path: PathBuf,
     pub prefs_path: PathBuf,
     pub categories_path: PathBuf,
+    pub schedule_path: PathBuf,
+    pub loops_path: PathBuf,
     pub config: AppConfig,
     pub prefs: Prefs,
     pub categories: Categories,
+    pub schedule: Schedule,
+    pub loops: LoopBook,
     /// 加载过程中产生的可展示告警，按 config → prefs → categories 的顺序排列。
     pub warnings: Vec<String>,
 }
@@ -53,13 +57,29 @@ impl Settings {
             warnings.push(format!("无法写入分类配置文件：{error}"));
         }
 
+        let schedule_path = config_dir.join(SCHEDULE_FILE);
+        let (schedule, schedule_warning) = Schedule::load(&schedule_path);
+        if let Some(warning) = schedule_warning {
+            warnings.push(warning);
+        }
+
+        let loops_path = config_dir.join(LOOPS_FILE);
+        let (loops, loops_warning) = LoopBook::load(&loops_path);
+        if let Some(warning) = loops_warning {
+            warnings.push(warning);
+        }
+
         Ok(Self {
             config_path,
             prefs_path,
             categories_path,
+            schedule_path,
+            loops_path,
             config,
             prefs,
             categories,
+            schedule,
+            loops,
             warnings,
         })
     }

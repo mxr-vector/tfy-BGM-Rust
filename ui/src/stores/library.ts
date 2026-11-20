@@ -1,6 +1,13 @@
 import { ALL_CATEGORY } from '@/lib/constants';
 import { applyConfig } from '@/lib/config';
-import type { Bootstrap, LibraryMutation, LibrarySnapshot } from '@/lib/types';
+import { toast } from '@/lib/toast';
+import type {
+  Bootstrap,
+  LibraryChange,
+  LibraryMutation,
+  LibrarySnapshot,
+  LoopPoint,
+} from '@/lib/types';
 import { state } from './state';
 
 export function applyBootstrap(boot: Bootstrap): void {
@@ -10,6 +17,8 @@ export function applyBootstrap(boot: Bootstrap): void {
   state.favorites = new Set(boot.prefs.favorites);
   state.selected = new Set();
   state.sortBy = boot.prefs.sortBy;
+  state.schedule = boot.schedule.entries;
+  state.loopPoints = { ...boot.loops.points };
 }
 
 export function replaceLibrary(snapshot: LibrarySnapshot): void {
@@ -61,17 +70,71 @@ export function applyMutation(result: LibraryMutation): void {
     state.favorites.delete(key);
     state.selected.delete(key);
   }
+  if (remap.size > 0 || (result.removed?.length ?? 0) > 0) {
+    state.loopPoints = remapLoopPoints(remap, result.removed ?? []);
+  }
 
   replaceLibrary(result.library);
+}
+
+/** 文件监听推送的外部变化：迁移 key、同步收藏/循环点并提示增删。 */
+export function applyExternalChange(change: LibraryChange): void {
+  // 事件可能晚于命令返回的快照到达；丢弃更旧的扫描结果，避免界面回退。
+  if (change.library.scannedAtMs < state.library.scannedAtMs) return;
+  const remap = new Map(
+    change.moved
+      .filter((item) => item.from !== item.to)
+      .map((item) => [item.from, item.to] as const),
+  );
+
+  if (remap.size > 0) {
+    const remapKey = (key: string) => remap.get(key) ?? key;
+    state.queue = state.queue.map((song) => ({ ...song, key: remapKey(song.key) }));
+    if (state.currentKey) state.currentKey = remapKey(state.currentKey);
+    state.favorites = new Set([...state.favorites].map(remapKey));
+    state.selected = new Set([...state.selected].map(remapKey));
+  }
+  for (const key of change.removed) {
+    state.favorites.delete(key);
+    state.selected.delete(key);
+  }
+  if (remap.size > 0 || change.removed.length > 0) {
+    state.loopPoints = remapLoopPoints(remap, change.removed);
+  }
+
+  replaceLibrary(change.library);
+
+  const parts: string[] = [];
+  if (change.added.length > 0) parts.push(`新增 ${change.added.length} 首`);
+  if (change.removed.length > 0) parts.push(`移除 ${change.removed.length} 首`);
+  if (change.moved.length > 0) parts.push(`移动 ${change.moved.length} 首`);
+  if (parts.length > 0) {
+    toast(`曲库已自动更新：${parts.join('，')}`, 'success');
+  }
+}
+
+function remapLoopPoints(
+  remap: Map<string, string>,
+  removed: string[],
+): Record<string, LoopPoint> {
+  const next: Record<string, LoopPoint> = {};
+  for (const [key, point] of Object.entries(state.loopPoints)) {
+    const target = remap.get(key) ?? key;
+    if (removed.includes(key)) continue;
+    next[target] = point;
+  }
+  return next;
 }
 
 export function setCategory(categoryId: string): void {
   state.category = categoryId;
   state.favoritesOnly = false;
+  state.view = 'library';
 }
 
 export function toggleFavoritesOnly(): void {
   state.favoritesOnly = !state.favoritesOnly;
+  state.view = 'library';
 }
 
 export function resetFilters(): void {

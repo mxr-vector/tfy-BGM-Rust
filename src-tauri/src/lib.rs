@@ -1,5 +1,6 @@
 mod commands;
 mod library_root;
+mod library_watch;
 mod settings;
 mod state;
 mod wallpapers;
@@ -17,6 +18,10 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title(&state.window_title());
             }
+            // 监听失败不影响启动，前端仍可手动「重新扫描」。
+            if let Err(error) = state.start_watching(app.handle()) {
+                eprintln!("[watch] 文件监听启动失败：{error:#}");
+            }
             app.manage(state);
             Ok(())
         })
@@ -27,6 +32,9 @@ pub fn run() {
             commands::choose_wallpaper_file,
             commands::open_config_file,
             commands::save_prefs,
+            commands::save_schedule,
+            commands::save_loop_point,
+            commands::remove_loop_point,
             commands::rescan_library,
             commands::choose_library_dir,
             commands::reset_library_dir,

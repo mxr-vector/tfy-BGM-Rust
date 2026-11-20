@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::limits::MAX_STEM_CHARS;
 use crate::loudness::{self, DEFAULT_PRESET_ID, ExportPreset, preset_or_default};
 
-/// 一次导出使用的响度设置；`preset` 决定目标 LUFS / 真峰值 / LRA。
+/// 一次导出使用的响度设置；`preset` 是本次归一化的目标，未选场景时使用默认目标。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExportSettings {
     pub normalize: bool,
@@ -29,7 +29,7 @@ impl Default for ExportSettings {
 }
 
 impl ExportSettings {
-    /// 用偏好里的开关与场景 id 构造设置；未知场景回退默认预设。
+    /// 用偏好里的开关与场景 id 构造设置；空字符串或未知场景回退为默认目标。
     pub fn from_prefs(normalize: bool, scene: &str) -> Self {
         Self {
             normalize,
@@ -185,6 +185,22 @@ pub enum ExportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_normalization_targets_video_preset_and_scene_overrides_it() {
+        let defaults = ExportSettings::default();
+        assert!(defaults.normalize);
+        assert_eq!(defaults.preset.id, DEFAULT_PRESET_ID);
+
+        let base = ExportSettings::from_prefs(true, "");
+        assert_eq!(base.preset.target_lufs, -14.0);
+
+        let focus = ExportSettings::from_prefs(true, "focus");
+        assert_eq!(focus.preset.target_lufs, -20.0);
+
+        let disabled = ExportSettings::from_prefs(false, "focus");
+        assert!(!disabled.normalize);
+    }
 
     #[test]
     fn copies_file_and_matches_size() {

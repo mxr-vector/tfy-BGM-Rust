@@ -7,6 +7,7 @@ import { categoryById, state, visibleSongs } from '@/stores/state';
 import BatchBar from './BatchBar.vue';
 import CategoryFilter from './CategoryFilter.vue';
 import HeroBanner from './HeroBanner.vue';
+import SchedulePage from './SchedulePage.vue';
 import SongTable from './SongTable.vue';
 import WarningBanner from './WarningBanner.vue';
 
@@ -29,21 +30,24 @@ const query = computed(() => state.search.trim());
 <template>
   <main class="workspace">
     <WarningBanner />
-    <HeroBanner />
-    <CategoryFilter />
+    <SchedulePage v-if="state.view === 'schedule'" />
+    <template v-else>
+      <HeroBanner />
+      <CategoryFilter />
 
-    <div class="results-header">
-      <div class="results-info">
-        <span class="results-title" id="results-title">{{ resultsTitle }}</span>
-        <span class="results-count" id="results-count">{{ resultsCount }}</span>
+      <div class="results-header">
+        <div class="results-info">
+          <span class="results-title" id="results-title">{{ resultsTitle }}</span>
+          <span class="results-count" id="results-count">{{ resultsCount }}</span>
+        </div>
+        <div v-show="query.length > 0" class="search-hint" id="search-hint">
+          正在筛选：<span id="search-hint-text">“{{ query }}”</span>
+          <button type="button" id="btn-clear-search-2" @click="setSearch('')">清除</button>
+        </div>
       </div>
-      <div v-show="query.length > 0" class="search-hint" id="search-hint">
-        正在筛选：<span id="search-hint-text">“{{ query }}”</span>
-        <button type="button" id="btn-clear-search-2" @click="setSearch('')">清除</button>
-      </div>
-    </div>
 
-    <BatchBar />
-    <SongTable />
+      <BatchBar />
+      <SongTable />
+    </template>
   </main>
 </template>

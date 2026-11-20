@@ -6,6 +6,11 @@ export interface Song {
   fileName: string;
   category: string;
   path: string;
+  /** ID3 标签；缺失时后端省略字段。 */
+  artist?: string;
+  album?: string;
+  genre?: string;
+  durationMs?: number;
 }
 
 export interface CategorySummary {
@@ -89,6 +94,44 @@ export interface Bootstrap {
   prefs: Prefs;
   library: LibrarySnapshot;
   config: AppConfig;
+  schedule: Schedule;
+  loops: LoopBook;
+}
+
+export interface ScheduleEntry {
+  id: string;
+  name: string;
+  /** 本地时间 HH:MM。 */
+  start: string;
+  /** ISO 周序：1 = 周一 … 7 = 周日。 */
+  days: number[];
+  category: string | null;
+  volume: number | null;
+  enabled: boolean;
+}
+
+export interface Schedule {
+  version: number;
+  entries: ScheduleEntry[];
+}
+
+export interface LoopPoint {
+  start: number;
+  end: number;
+  enabled: boolean;
+}
+
+export interface LoopBook {
+  version: number;
+  points: Record<string, LoopPoint>;
+}
+
+/** 文件监听推送的增量快照。 */
+export interface LibraryChange {
+  library: LibrarySnapshot;
+  added: string[];
+  removed: string[];
+  moved: KeyChange[];
 }
 
 export interface ConfigReload {

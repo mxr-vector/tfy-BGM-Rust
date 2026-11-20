@@ -4,10 +4,14 @@ import type {
   CategorySummary,
   LibrarySnapshot,
   LibrarySource,
+  LoopPoint,
   Prefs,
+  ScheduleEntry,
   Song,
   SortBy,
 } from '@/lib/types';
+
+export type AppView = 'library' | 'schedule';
 
 export interface AppState {
   library: LibrarySnapshot;
@@ -23,6 +27,9 @@ export interface AppState {
   currentKey: string | null;
   currentSong: Song | null;
   playing: boolean;
+  view: AppView;
+  schedule: ScheduleEntry[];
+  loopPoints: Record<string, LoopPoint>;
 }
 
 export function emptyLibrary(): LibrarySnapshot {
@@ -50,12 +57,19 @@ export const state = reactive<AppState>({
   currentKey: null,
   currentSong: null,
   playing: false,
+  view: 'library',
+  schedule: [],
+  loopPoints: {},
 });
 
 const collator = new Intl.Collator(['zh-Hans-CN', 'zh', 'en'], {
   numeric: true,
   sensitivity: 'base',
 });
+
+export function setView(view: AppView): void {
+  state.view = view;
+}
 
 export function categoryById(id: string): CategorySummary | null {
   return state.library.categories.find((category) => category.id === id) ?? null;

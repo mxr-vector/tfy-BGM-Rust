@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
-use crate::loudness::{DEFAULT_PRESET_ID, find_preset};
+use crate::loudness::find_preset;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 1;
+pub const PREFS_VERSION: u32 = 2;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 
@@ -79,7 +79,7 @@ pub struct Prefs {
     pub sort_by: SortBy,
     /// 导出时是否用 ffmpeg 做响度归一化（默认开启）。
     pub loudness_normalization: bool,
-    /// 导出响度场景预设 id，见 [`crate::loudness::EXPORT_PRESETS`]。
+    /// 导出响度场景预设 id；空字符串表示不套用场景，使用默认人耳响度目标。
     pub export_scene: String,
     /// 当前界面壁纸 id：`default`、三个渐变色、两个内置资源或 `custom`。
     pub wallpaper: String,
@@ -105,7 +105,7 @@ impl Default for Prefs {
             play_mode: PlayMode::Sequence,
             sort_by: SortBy::Default,
             loudness_normalization: true,
-            export_scene: DEFAULT_PRESET_ID.to_owned(),
+            export_scene: String::new(),
             wallpaper: DEFAULT_WALLPAPER.to_owned(),
             custom_wallpaper: None,
             wallpaper_opacity: DEFAULT_WALLPAPER_OPACITY,
@@ -164,7 +164,8 @@ impl Prefs {
         self.export_scene = if find_preset(&scene).is_some() {
             scene
         } else {
-            DEFAULT_PRESET_ID.to_owned()
+            // 未选择或未知场景保持为空：归一化仍按默认人耳响度目标执行。
+            String::new()
         };
 
         // 自定义壁纸路径只保留带受支持扩展名的值；文件是否还在由运行时判断。
@@ -219,7 +220,24 @@ impl Prefs {
         };
 
         match serde_json::from_slice::<Self>(&bytes) {
-            Ok(prefs) => (prefs.normalize_with_rates(rates), None),
+            Ok(prefs) => {
+                let stored_version = prefs.version;
+                let mut prefs = prefs.normalize_with_rates(rates);
+                let warning = if stored_version < 2 {
+                    // v1 的场景预设曾默认勾选；升级后默认不套用场景，
+                    // 归一化开关保持用户原值（v1 默认也是开启）。
+                    prefs.export_scene = String::new();
+                    match prefs.save(path) {
+                        Ok(()) => None,
+                        Err(error) => {
+                            Some(format!("偏好设置已升级，但保存迁移结果失败：{error}"))
+                        }
+                    }
+                } else {
+                    None
+                };
+                (prefs, warning)
+            }
             Err(error) => (
                 Self::default(),
                 Some(format!("偏好设置文件损坏，已重置为默认值：{error}")),
@@ -285,29 +303,73 @@ mod tests {
     }
 
     #[test]
-    fn loudness_defaults_to_enabled_video_editing() {
+    fn export_defaults_to_normalization_on_without_scene() {
         let prefs = Prefs::default();
         assert!(prefs.loudness_normalization);
-        assert_eq!(prefs.export_scene, DEFAULT_PRESET_ID);
+        assert!(prefs.export_scene.is_empty());
     }
 
     #[test]
     fn export_scene_is_normalized_and_validated() {
         let normalized = Prefs {
             export_scene: "  PODCAST ".into(),
-            loudness_normalization: false,
+            loudness_normalization: true,
             ..Prefs::default()
         }
         .normalize();
         assert_eq!(normalized.export_scene, "podcast");
-        assert!(!normalized.loudness_normalization);
+        assert!(normalized.loudness_normalization);
 
-        let fallback = Prefs {
+        let unknown = Prefs {
             export_scene: "unknown-scene".into(),
+            loudness_normalization: true,
             ..Prefs::default()
         }
         .normalize();
-        assert_eq!(fallback.export_scene, DEFAULT_PRESET_ID);
+        assert!(unknown.export_scene.is_empty());
+        // 未知场景回退为“不套用场景”，但人耳响度归一化仍然开启。
+        assert!(unknown.loudness_normalization);
+    }
+
+    #[test]
+    fn empty_scene_keeps_base_normalization() {
+        let prefs = Prefs {
+            export_scene: String::new(),
+            loudness_normalization: true,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert!(prefs.loudness_normalization);
+        assert!(prefs.export_scene.is_empty());
+    }
+
+    #[test]
+    fn version_one_migrates_to_unchecked_scene_with_normalization_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        fs::write(
+            &path,
+            br#"{
+                "version": 1,
+                "loudnessNormalization": true,
+                "exportScene": "video-editing"
+            }"#,
+        )
+        .unwrap();
+
+        let (prefs, warning) = Prefs::load(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(prefs.version, PREFS_VERSION);
+        assert!(prefs.loudness_normalization);
+        assert!(prefs.export_scene.is_empty());
+
+        // 迁移结果应立即落盘，避免每次启动都重新迁移。
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], PREFS_VERSION);
+        assert_eq!(saved["loudnessNormalization"], true);
+        assert_eq!(saved["exportScene"], "");
     }
 
     #[test]

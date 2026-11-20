@@ -5,9 +5,11 @@ import {
   DEFAULT_ACCENT,
   FAVORITES_ACCENT,
   HERO_KINDS,
+  PLAY_MODES,
 } from '@/lib/constants';
 import { withAlpha } from '@/lib/format';
-import { playSong } from '@/stores/player';
+import { smartPickSong } from '@/stores/queue';
+import { playSong, playSongWithMode } from '@/stores/player';
 import { categoryById, state, visibleSongs } from '@/stores/state';
 import Icon from './Icon.vue';
 
@@ -114,8 +116,9 @@ function playAll(): void {
 function shuffle(): void {
   const songs = list.value;
   if (songs.length === 0) return;
-  const index = Math.floor(Math.random() * songs.length);
-  playSong(songs[index]!, songs, true);
+  const pick = smartPickSong(songs, state.currentSong);
+  if (!pick) return;
+  playSongWithMode(pick, songs, PLAY_MODES.shuffle);
 }
 </script>
 

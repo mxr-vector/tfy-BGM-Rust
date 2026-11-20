@@ -7,9 +7,10 @@ import {
   rescanLibrary,
   resetLibraryDir,
 } from '@/stores/actions';
+import { currentProgram } from '@/composables/useScheduler';
 import { setCategory, toggleFavoritesOnly } from '@/stores/library';
 import { toggleDrawer } from '@/stores/player';
-import { favoriteCount, sourceLabel, state } from '@/stores/state';
+import { favoriteCount, setView, sourceLabel, state } from '@/stores/state';
 import Icon from './Icon.vue';
 
 function isBusy(): boolean {
@@ -24,7 +25,7 @@ function isBusy(): boolean {
       <button
         type="button"
         class="nav-item"
-        :class="{ 'is-active': state.category === ALL_CATEGORY && !state.favoritesOnly }"
+        :class="{ 'is-active': state.view === 'library' && !state.favoritesOnly && state.category === ALL_CATEGORY }"
         id="nav-all"
         title="音乐库"
         @click="setCategory(ALL_CATEGORY)"
@@ -36,7 +37,7 @@ function isBusy(): boolean {
       <button
         type="button"
         class="nav-item nav-item-fav"
-        :class="{ 'is-active': state.favoritesOnly }"
+        :class="{ 'is-active': state.view === 'library' && state.favoritesOnly }"
         id="nav-favorites"
         title="我的收藏"
         @click="toggleFavoritesOnly"
@@ -55,6 +56,18 @@ function isBusy(): boolean {
         <Icon name="list-music" class="nav-icon" />
         <span class="nav-label">播放队列</span>
         <span class="nav-count" id="count-queue">{{ state.queue.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ 'is-active': state.view === 'schedule' }"
+        id="nav-schedule"
+        title="按时间自动切换歌单与音量"
+        @click="setView('schedule')"
+      >
+        <Icon name="clock" class="nav-icon" />
+        <span class="nav-label">节目单</span>
+        <span class="nav-count" id="count-schedule">{{ state.schedule.length }}</span>
       </button>
 
       <div class="nav-section">
@@ -116,6 +129,9 @@ function isBusy(): boolean {
       </div>
       <span class="status-path" id="status-path" :title="state.library.root">
         {{ sourceLabel() }} · {{ state.library.root || '未找到曲库目录' }}
+      </span>
+      <span class="status-path" id="status-program" title="节目单当前时段">
+        节目：{{ currentProgram ? currentProgram.name : '未编排' }}
       </span>
     </div>
   </aside>

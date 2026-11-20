@@ -411,9 +411,9 @@ pub fn export_songs(
     if outcome.report.succeeded > 0 {
         let mut notice = if settings.normalize && normalized == outcome.report.succeeded {
             format!(
-                "已导出 {} 首（响度归一化 · {}）到：{}",
+                "已导出 {} 首（响度归一化 · 目标 {} LUFS）到：{}",
                 outcome.report.succeeded,
-                settings.preset.label,
+                settings.preset.target_lufs,
                 dest_dir.display()
             )
         } else if normalized > 0 {
@@ -544,6 +544,10 @@ mod tests {
             file_name: format!("{stem}.mp3"),
             category: category.to_owned(),
             path: String::new(),
+            artist: None,
+            album: None,
+            genre: None,
+            duration_ms: None,
         }
     }
 
@@ -614,6 +618,10 @@ mod tests {
             file_name: "new name.mp3".into(),
             category: "memories".into(),
             path: String::new(),
+            artist: None,
+            album: None,
+            genre: None,
+            duration_ms: None,
         };
         assert!(matches!(
             rename_song(root, &categories(), &current, "../escape"),

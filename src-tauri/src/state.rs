@@ -12,22 +12,38 @@ use anyhow::{Context, Result, bail};
 use bgm_core::categories::Categories;
 use bgm_core::export::ExportSettings;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
-use bgm_core::{AppConfig, Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
-use parking_lot::RwLock;
+use bgm_core::tags::MetaCache;
+use bgm_core::{
+    AppConfig, Category, LibrarySnapshot, LibrarySource, LoopBook, LoopPoint, Prefs, Schedule, Song,
+    scan_library_cached,
+};
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::library_root;
+use crate::library_watch::LibraryWatcher;
 use crate::settings::Settings;
+
+/// 曲库目录发生外部变化时发给前端的事件名。
+pub const LIBRARY_CHANGED_EVENT: &str = "library-changed";
 
 pub struct AppState {
     prefs_path: PathBuf,
     categories_path: PathBuf,
     config_path: PathBuf,
+    schedule_path: PathBuf,
+    loops_path: PathBuf,
     prefs: RwLock<Prefs>,
     categories: RwLock<Categories>,
     config: RwLock<AppConfig>,
+    schedule: RwLock<Schedule>,
+    loops: RwLock<LoopBook>,
     runtime: RwLock<Runtime>,
+    meta_cache: MetaCache,
+    watcher: Mutex<Option<LibraryWatcher>>,
+    /// 曲库写操作期间抑制 watch 扫描，避免「文件已移动、命令还没迁移 key」造成误删收藏。
+    ops_lock: Mutex<()>,
 }
 
 struct Runtime {
@@ -42,6 +58,18 @@ pub struct Bootstrap {
     pub prefs: Prefs,
     pub library: LibrarySnapshot,
     pub config: AppConfig,
+    pub schedule: Schedule,
+    pub loops: LoopBook,
+}
+
+/// 外部文件变化后的增量结果；前端据此更新队列并提示增删。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryChange {
+    pub library: LibrarySnapshot,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub moved: Vec<KeyChange>,
 }
 
 /// 重新读取 `config.json` 的结果；`warnings` 用于提示损坏或自动修正。
@@ -77,9 +105,13 @@ impl AppState {
             config_path,
             prefs_path,
             categories_path,
+            schedule_path,
+            loops_path,
             config,
             prefs,
             categories,
+            schedule,
+            loops,
             mut warnings,
         } = Settings::load(app)?;
 
@@ -95,7 +127,8 @@ impl AppState {
         }
         warnings.append(&mut root_warnings);
 
-        let mut library = scan_library(&root, source, &categories.items);
+        let meta_cache = MetaCache::default();
+        let mut library = scan_library_cached(&root, source, &categories.items, &meta_cache);
         warnings.append(&mut library.warnings);
         library.warnings = warnings;
         library_root::allow_audio_scope(app, &root)?;
@@ -104,14 +137,21 @@ impl AppState {
             prefs_path,
             categories_path,
             config_path,
+            schedule_path,
+            loops_path,
             prefs: RwLock::new(prefs),
             categories: RwLock::new(categories),
             config: RwLock::new(config),
+            schedule: RwLock::new(schedule),
+            loops: RwLock::new(loops),
             runtime: RwLock::new(Runtime {
                 root,
                 source,
                 library,
             }),
+            meta_cache,
+            watcher: Mutex::new(None),
+            ops_lock: Mutex::new(()),
         })
     }
 
@@ -120,6 +160,8 @@ impl AppState {
             prefs: self.prefs.read().clone(),
             library: self.runtime.read().library.clone(),
             config: self.config.read().clone(),
+            schedule: self.schedule.read().clone(),
+            loops: self.loops.read().clone(),
         }
     }
 
@@ -155,6 +197,7 @@ impl AppState {
     }
 
     pub fn rescan(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
+        let _guard = self.ops_lock.lock();
         let warnings = self.reload_categories();
         let (root, source) = {
             let runtime = self.runtime.read();
@@ -170,6 +213,7 @@ impl AppState {
         name: &str,
         id: Option<&str>,
     ) -> Result<CategoryOutcome> {
+        let _guard = self.ops_lock.lock();
         let (category_id, mut warnings) = self.save_categories(|next| {
             let category = next
                 .add(name, id)
@@ -196,6 +240,7 @@ impl AppState {
         name: &str,
         color: Option<&str>,
     ) -> Result<CategoryOutcome> {
+        let _guard = self.ops_lock.lock();
         let (category_id, warnings) = self.save_categories(|next| {
             next.update(id, name, color)
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -209,6 +254,7 @@ impl AppState {
         app: &AppHandle,
         dir: Option<PathBuf>,
     ) -> Result<Option<LibrarySnapshot>> {
+        let _guard = self.ops_lock.lock();
         let Some(dir) = dir else {
             return Ok(None);
         };
@@ -222,6 +268,7 @@ impl AppState {
     }
 
     pub fn reset_library_dir(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
+        let _guard = self.ops_lock.lock();
         self.persist_library_dir(None)?;
         let prefs = self.prefs.read().clone();
         let (root, source, mut warnings) = library_root::resolve(app, &prefs);
@@ -248,6 +295,111 @@ impl AppState {
 
     pub fn config_path(&self) -> PathBuf {
         self.config_path.clone()
+    }
+
+    /// 保存节目单；引用不存在的分类会直接拒绝，避免到点后切换到空歌单。
+    pub fn save_schedule(&self, incoming: Schedule) -> Result<Schedule> {
+        let categories: HashSet<String> = self
+            .categories
+            .read()
+            .items
+            .iter()
+            .map(|category| category.id.clone())
+            .collect();
+        let schedule = incoming.normalize();
+        for entry in &schedule.entries {
+            if let Some(category) = &entry.category
+                && !categories.contains(category)
+            {
+                bail!("节目「{}」引用了不存在的分类：{category}", entry.name);
+            }
+        }
+        schedule.save(&self.schedule_path).context("保存节目单失败")?;
+        *self.schedule.write() = schedule.clone();
+        Ok(schedule)
+    }
+
+    pub fn save_loop_point(
+        &self,
+        key: &str,
+        start: f64,
+        end: f64,
+        enabled: bool,
+    ) -> Result<LoopBook> {
+        if self.song(key).is_none() {
+            bail!("曲目不存在：{key}");
+        }
+        let mut current = self.loops.write();
+        let mut next = current.clone();
+        next.set(
+            key,
+            LoopPoint {
+                start,
+                end,
+                enabled,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        next.save(&self.loops_path).context("保存循环点失败")?;
+        *current = next.clone();
+        Ok(next)
+    }
+
+    pub fn remove_loop_point(&self, key: &str) -> Result<LoopBook> {
+        let mut current = self.loops.write();
+        let mut next = current.clone();
+        if !next.remove(key) {
+            return Ok(next);
+        }
+        next.save(&self.loops_path).context("保存循环点失败")?;
+        *current = next.clone();
+        Ok(next)
+    }
+
+    /// 启动文件监听；失败时只记录日志，前端仍可手动重新扫描。
+    pub fn start_watching(&self, app: &AppHandle) -> Result<()> {
+        let root = self.root();
+        self.start_watching_at(app, root)
+    }
+
+    fn start_watching_at(&self, app: &AppHandle, root: PathBuf) -> Result<()> {
+        let watcher = LibraryWatcher::start(app.clone(), root)?;
+        *self.watcher.lock() = Some(watcher);
+        Ok(())
+    }
+
+    fn restart_watcher(&self, app: &AppHandle, root: &Path) -> Result<()> {
+        *self.watcher.lock() = None;
+        self.start_watching_at(app, root.to_path_buf())
+    }
+
+    /// watch 事件或定期兜底触发：重新扫描并计算增删/移动，内容未变时返回 `None`。
+    pub fn handle_watch_event(&self) -> Option<LibraryChange> {
+        let _guard = self.ops_lock.try_lock()?;
+        let (root, source, previous) = {
+            let runtime = self.runtime.read();
+            (runtime.root.clone(), runtime.source, runtime.library.clone())
+        };
+        let categories = self.category_items();
+        let mut next = scan_library_cached(&root, source, &categories, &self.meta_cache);
+        if same_content(&previous, &next) {
+            return None;
+        }
+
+        let diff = diff_songs(&previous.songs, &next.songs);
+        next.warnings.extend(self.sync_track_metadata(&diff.moved, &diff.removed));
+
+        *self.runtime.write() = Runtime {
+            root,
+            source,
+            library: next.clone(),
+        };
+        Some(LibraryChange {
+            library: next,
+            added: diff.added,
+            removed: diff.removed,
+            moved: diff.moved,
+        })
     }
 
     /// 当前偏好对应的导出设置（响度归一化开关 + 场景预设）。
@@ -283,6 +435,7 @@ impl AppState {
         category: &str,
         sources: Vec<PathBuf>,
     ) -> Result<LibraryMutation> {
+        let _guard = self.ops_lock.lock();
         if sources.is_empty() {
             bail!("未选择任何音频文件");
         }
@@ -302,6 +455,7 @@ impl AppState {
         title: &str,
         category: &str,
     ) -> Result<LibraryMutation> {
+        let _guard = self.ops_lock.lock();
         let song = self
             .song(key)
             .ok_or_else(|| anyhow::anyhow!("曲目不存在：{key}"))?;
@@ -333,6 +487,7 @@ impl AppState {
         keys: &[String],
         category: &str,
     ) -> Result<LibraryMutation> {
+        let _guard = self.ops_lock.lock();
         if !self.has_category(category) {
             bail!("未注册的分类：{category}");
         }
@@ -349,6 +504,7 @@ impl AppState {
 
     /// 软删除：移入曲库根目录下的 `.tfy-trash`，并清理对应收藏。
     pub fn delete_tracks(&self, app: &AppHandle, keys: &[String]) -> Result<LibraryMutation> {
+        let _guard = self.ops_lock.lock();
         let songs = self.songs_for_keys(keys)?;
         let refs: Vec<&Song> = songs.iter().collect();
         let categories = self.category_items();
@@ -397,11 +553,9 @@ impl AppState {
         removed: Vec<String>,
         report: BatchReport,
     ) -> Result<LibraryMutation> {
-        let favorite_warning = self.sync_favorites(&changes, &removed);
+        let mut warnings = self.sync_track_metadata(&changes, &removed);
         let mut library = self.refresh_library(app)?;
-        if let Some(warning) = favorite_warning {
-            library.warnings.push(warning);
-        }
+        library.warnings.append(&mut warnings);
         Ok(LibraryMutation {
             library,
             changes,
@@ -410,35 +564,47 @@ impl AppState {
         })
     }
 
-    /// 把重命名/移动产生的 key 变化同步到收藏，删除的 key 直接移除。
-    fn sync_favorites(&self, changes: &[KeyChange], removed: &[String]) -> Option<String> {
+    /// 把重命名/移动产生的 key 变化同步到收藏与循环点，删除的 key 直接移除。
+    fn sync_track_metadata(&self, changes: &[KeyChange], removed: &[String]) -> Vec<String> {
         let remap: HashMap<&str, &str> = changes
             .iter()
             .filter(|change| change.from != change.to)
             .map(|change| (change.from.as_str(), change.to.as_str()))
             .collect();
-        let removed: HashSet<&str> = removed.iter().map(String::as_str).collect();
-        if remap.is_empty() && removed.is_empty() {
-            return None;
+        let removed_set: HashSet<&str> = removed.iter().map(String::as_str).collect();
+        if remap.is_empty() && removed_set.is_empty() {
+            return Vec::new();
         }
 
-        let mut prefs = self.prefs.write();
-        let mut next = prefs.clone();
-        next.favorites = next
-            .favorites
-            .iter()
-            .map(|key| remap.get(key.as_str()).copied().unwrap_or(key))
-            .filter(|key| !removed.contains(key))
-            .map(str::to_owned)
-            .collect();
-        next = next.normalize();
-        match next.save(&self.prefs_path) {
-            Ok(()) => {
-                *prefs = next;
-                None
+        let mut warnings = Vec::new();
+        {
+            let mut prefs = self.prefs.write();
+            let mut next = prefs.clone();
+            next.favorites = next
+                .favorites
+                .iter()
+                .map(|key| remap.get(key.as_str()).copied().unwrap_or(key))
+                .filter(|key| !removed_set.contains(key))
+                .map(str::to_owned)
+                .collect();
+            next = next.normalize();
+            match next.save(&self.prefs_path) {
+                Ok(()) => *prefs = next,
+                Err(error) => warnings.push(format!("收藏列表同步失败：{error}")),
             }
-            Err(error) => Some(format!("收藏列表同步失败：{error}")),
         }
+        {
+            let mut loops = self.loops.write();
+            let mut next = loops.clone();
+            next.apply_key_changes(changes, removed);
+            if next != *loops {
+                match next.save(&self.loops_path) {
+                    Ok(()) => *loops = next,
+                    Err(error) => warnings.push(format!("循环点同步失败：{error}")),
+                }
+            }
+        }
+        warnings
     }
 
     /// 更新分类配置并返回新的分类 id；调用方负责后续目录操作与曲库刷新。
@@ -494,10 +660,19 @@ impl AppState {
         source: LibrarySource,
         mut warnings: Vec<String>,
     ) -> Result<LibrarySnapshot> {
+        let previous_root = self.runtime.read().root.clone();
         library_root::allow_audio_scope(app, &root)?;
         let categories = self.category_items();
-        let mut library = scan_library(&root, source, &categories);
+        let mut library = scan_library_cached(&root, source, &categories, &self.meta_cache);
         warnings.append(&mut library.warnings);
+
+        let watcher_missing = self.watcher.lock().is_none();
+        if (previous_root != root || watcher_missing)
+            && let Err(error) = self.restart_watcher(app, &root)
+        {
+            warnings.push(format!("文件监听不可用，外部改动需要手动重新扫描：{error}"));
+        }
+
         library.warnings = warnings;
         *self.runtime.write() = Runtime {
             root,
@@ -505,5 +680,129 @@ impl AppState {
             library: library.clone(),
         };
         Ok(library)
+    }
+}
+
+struct SongDiff {
+    added: Vec<String>,
+    removed: Vec<String>,
+    moved: Vec<KeyChange>,
+}
+
+fn same_content(previous: &LibrarySnapshot, next: &LibrarySnapshot) -> bool {
+    previous.songs == next.songs
+        && previous.categories.len() == next.categories.len()
+        && previous
+            .categories
+            .iter()
+            .zip(&next.categories)
+            .all(|(left, right)| {
+                left.id == right.id
+                    && left.count == right.count
+                    && left.name_zh == right.name_zh
+                    && left.name_en == right.name_en
+                    && left.label_en == right.label_en
+                    && left.color == right.color
+                    && left.icon == right.icon
+                    && left.title == right.title
+                    && left.description == right.description
+            })
+}
+
+/// 以 key 为基准比较新旧曲目，并把「同名文件换了分类目录」识别为移动。
+fn diff_songs(previous: &[Song], next: &[Song]) -> SongDiff {
+    let old_by_key: HashMap<&str, &Song> = previous
+        .iter()
+        .map(|song| (song.key.as_str(), song))
+        .collect();
+    let new_by_key: HashMap<&str, &Song> = next.iter().map(|song| (song.key.as_str(), song)).collect();
+
+    let mut moved = Vec::new();
+    let mut removed = Vec::new();
+    let mut consumed: HashSet<&str> = HashSet::new();
+
+    for old_song in previous {
+        if new_by_key.contains_key(old_song.key.as_str()) {
+            continue;
+        }
+        let candidate = next.iter().find(|song| {
+            !old_by_key.contains_key(song.key.as_str())
+                && !consumed.contains(song.key.as_str())
+                && song.file_name == old_song.file_name
+                && song.title == old_song.title
+        });
+        match candidate {
+            Some(song) => {
+                consumed.insert(song.key.as_str());
+                moved.push(KeyChange {
+                    from: old_song.key.clone(),
+                    to: song.key.clone(),
+                });
+            }
+            None => removed.push(old_song.key.clone()),
+        }
+    }
+
+    let added = next
+        .iter()
+        .filter(|song| {
+            !old_by_key.contains_key(song.key.as_str()) && !consumed.contains(song.key.as_str())
+        })
+        .map(|song| song.key.clone())
+        .collect();
+
+    SongDiff {
+        added,
+        removed,
+        moved,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn song(category: &str, stem: &str) -> Song {
+        Song {
+            key: format!("{category}/{stem}"),
+            title: stem.replace('_', " "),
+            file_name: format!("{stem}.mp3"),
+            category: category.to_owned(),
+            path: String::new(),
+            artist: None,
+            album: None,
+            genre: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn diff_reports_added_removed_and_moved() {
+        let previous = vec![song("cheerful", "a"), song("epic", "b"), song("solitude", "c")];
+        let next = vec![song("cheerful", "a"), song("memories", "b"), song("country", "d")];
+
+        let diff = diff_songs(&previous, &next);
+
+        assert_eq!(
+            diff.moved,
+            vec![KeyChange {
+                from: "epic/b".into(),
+                to: "memories/b".into(),
+            }]
+        );
+        assert_eq!(diff.removed, vec!["solitude/c"]);
+        assert_eq!(diff.added, vec!["country/d"]);
+    }
+
+    #[test]
+    fn rename_is_reported_as_add_plus_remove() {
+        let previous = vec![song("epic", "old_name")];
+        let next = vec![song("epic", "new_name")];
+
+        let diff = diff_songs(&previous, &next);
+
+        assert!(diff.moved.is_empty());
+        assert_eq!(diff.removed, vec!["epic/old_name"]);
+        assert_eq!(diff.added, vec!["epic/new_name"]);
     }
 }

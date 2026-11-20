@@ -9,10 +9,20 @@ export interface TauriAppWindow {
   onFocusChanged(handler: (event: { payload: boolean }) => void): Promise<() => void>;
 }
 
+interface TauriEventPayload<T> {
+  payload: T;
+}
+
 interface TauriGlobal {
   core: {
     invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
     convertFileSrc(path: string): string;
+  };
+  event?: {
+    listen<T>(
+      event: string,
+      handler: (event: TauriEventPayload<T>) => void,
+    ): Promise<() => void>;
   };
   window?: {
     getCurrentWindow(): TauriAppWindow;
@@ -44,4 +54,18 @@ export function assetUrl(path: string): string {
 /** 当前窗口句柄；非 Tauri 环境返回 null，调用方自行降级。 */
 export function getCurrentWindow(): TauriAppWindow | null {
   return bridge?.window?.getCurrentWindow() ?? null;
+}
+
+/** 订阅后端事件；非 Tauri 环境或事件插件不可用时返回 null。 */
+export async function listen<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<(() => void) | null> {
+  if (!bridge?.event?.listen) return null;
+  try {
+    return await bridge.event.listen<T>(event, ({ payload }) => handler(payload));
+  } catch (error) {
+    console.warn(`[event] 无法监听 ${event}`, error);
+    return null;
+  }
 }

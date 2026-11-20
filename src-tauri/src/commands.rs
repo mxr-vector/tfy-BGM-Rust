@@ -10,6 +10,7 @@ use bgm_core::export::export_audio;
 use bgm_core::library::AUDIO_EXTENSION;
 use bgm_core::loudness::{EXPORT_PRESETS, ExportPreset, ffmpeg_path};
 use bgm_core::paths::TRASH_DIR_NAME;
+use bgm_core::{LoopBook, Schedule};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -94,6 +95,29 @@ pub fn open_config_file(app: AppHandle, state: State<'_, AppState>) -> CommandRe
 #[tauri::command]
 pub fn save_prefs(state: State<'_, AppState>, prefs: Prefs) -> CommandResult<Prefs> {
     state.save_prefs(prefs).map_err(describe)
+}
+
+#[tauri::command]
+pub fn save_schedule(state: State<'_, AppState>, schedule: Schedule) -> CommandResult<Schedule> {
+    state.save_schedule(schedule).map_err(describe)
+}
+
+#[tauri::command]
+pub fn save_loop_point(
+    state: State<'_, AppState>,
+    key: String,
+    start: f64,
+    end: f64,
+    enabled: bool,
+) -> CommandResult<LoopBook> {
+    state
+        .save_loop_point(&key, start, end, enabled)
+        .map_err(describe)
+}
+
+#[tauri::command]
+pub fn remove_loop_point(state: State<'_, AppState>, key: String) -> CommandResult<LoopBook> {
+    state.remove_loop_point(&key).map_err(describe)
 }
 
 #[tauri::command]
