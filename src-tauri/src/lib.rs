@@ -31,6 +31,7 @@ pub fn run() {
             commands::choose_library_dir,
             commands::reset_library_dir,
             commands::open_library_dir,
+            commands::export_info,
             commands::export_track,
             commands::create_category,
             commands::update_category,

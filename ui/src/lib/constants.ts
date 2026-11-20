@@ -10,6 +10,7 @@ export const COMMANDS = {
   chooseLibraryDir: 'choose_library_dir',
   resetLibraryDir: 'reset_library_dir',
   openLibraryDir: 'open_library_dir',
+  exportInfo: 'export_info',
   exportTrack: 'export_track',
   exportTracks: 'export_tracks',
   createCategory: 'create_category',

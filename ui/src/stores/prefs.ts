@@ -76,6 +76,17 @@ export function setFavorites(keys: string[], favorite: boolean): void {
   if (changed) persistPrefs(true);
 }
 
+/** 导出响度归一化开关与场景预设，随下一次导出生效。 */
+export function setExportSettings(
+  loudnessNormalization: boolean,
+  exportScene: string,
+): void {
+  const prefs = state.prefs;
+  if (!prefs) return;
+  state.prefs = { ...prefs, loudnessNormalization, exportScene };
+  persistPrefs(true);
+}
+
 export function setSortBy(sortBy: SortBy): void {
   if (state.sortBy === sortBy) return;
   state.sortBy = sortBy;

@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use bgm_core::BatchReport;
 use bgm_core::LibrarySnapshot;
 use bgm_core::Prefs;
-use bgm_core::export::copy_validated;
+use bgm_core::export::export_audio;
 use bgm_core::library::AUDIO_EXTENSION;
+use bgm_core::loudness::{EXPORT_PRESETS, ExportPreset, ffmpeg_path};
 use bgm_core::paths::TRASH_DIR_NAME;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -145,6 +146,9 @@ pub fn open_library_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRe
 pub struct ExportResult {
     pub path: String,
     pub bytes: u64,
+    /// 是否真正完成了响度归一化；`false` 且带 `warning` 表示已回退为复制原文件。
+    pub normalized: bool,
+    pub warning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +156,22 @@ pub struct ExportResult {
 pub struct ExportBatchResult {
     pub dir: String,
     pub report: BatchReport,
+}
+
+/// 导出能力探测：ffmpeg 路径（未安装为 `null`）与场景预设清单。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportInfo {
+    pub ffmpeg: Option<String>,
+    pub presets: Vec<ExportPreset>,
+}
+
+#[tauri::command]
+pub fn export_info() -> ExportInfo {
+    ExportInfo {
+        ffmpeg: ffmpeg_path().map(|path| path.to_string_lossy().into_owned()),
+        presets: EXPORT_PRESETS.to_vec(),
+    }
 }
 
 #[tauri::command]
@@ -324,10 +344,12 @@ pub async fn export_track(
         .into_path()
         .map_err(|error| format!("保存路径无效：{error}"))?;
 
-    let bytes =
-        copy_validated(Path::new(&song.path), &target).map_err(|error| error.to_string())?;
+    let outcome = export_audio(Path::new(&song.path), &target, state.export_settings())
+        .map_err(|error| error.to_string())?;
     Ok(Some(ExportResult {
         path: target.to_string_lossy().into_owned(),
-        bytes,
+        bytes: outcome.bytes,
+        normalized: outcome.normalized,
+        warning: outcome.warning,
     }))
 }

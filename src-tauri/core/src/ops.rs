@@ -13,9 +13,12 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::categories::Category;
-use crate::export::{ExportError, copy_validated, safe_file_name};
+use crate::export::{
+    ExportError, ExportSettings, copy_validated, export_with_ffmpeg, safe_file_name,
+};
 use crate::library::{AUDIO_EXTENSION, Song};
 use crate::limits::{MAX_KEY_LEN, MAX_STEM_CHARS};
+use crate::loudness;
 use crate::paths::TRASH_DIR_NAME as TRASH_DIR;
 
 /// 单批操作的结果统计，直接序列化给前端展示。
@@ -357,12 +360,13 @@ pub fn trash_songs(root: &Path, categories: &[Category], songs: &[&Song]) -> Bat
     outcome
 }
 
-/// 把曲目复制到指定目录，同名时追加序号，成功后校验字节数。
+/// 把曲目复制（或按设置做响度归一化）到指定目录，同名时追加序号。
 pub fn export_songs(
     root: &Path,
     categories: &[Category],
     dest_dir: &Path,
     songs: &[&Song],
+    settings: ExportSettings,
 ) -> BatchOutcome {
     let mut outcome = BatchOutcome {
         report: BatchReport::new(songs.len()),
@@ -376,6 +380,10 @@ pub fn export_songs(
         return outcome;
     }
 
+    let mut normalized = 0;
+    let mut warning: Option<String> = None;
+    let ffmpeg = settings.normalize.then(loudness::ffmpeg_path).flatten();
+
     for song in songs {
         let source = match song_file_path(root, categories, song) {
             Ok(path) => path,
@@ -386,18 +394,45 @@ pub fn export_songs(
         };
         let stem = safe_file_name(&song.title);
         let target = unique_path(dest_dir, &stem, AUDIO_EXTENSION);
-        match copy_validated(&source, &target) {
-            Ok(_) => outcome.report.succeeded += 1,
+        match export_with_ffmpeg(&source, &target, settings, ffmpeg.as_deref()) {
+            Ok(result) => {
+                outcome.report.succeeded += 1;
+                if result.normalized {
+                    normalized += 1;
+                }
+                if warning.is_none() {
+                    warning = result.warning;
+                }
+            }
             Err(error) => outcome.report.fail(format!("{}：{error}", song.title)),
         }
     }
 
     if outcome.report.succeeded > 0 {
-        outcome.report.notice = Some(format!(
-            "已导出 {} 首到：{}",
-            outcome.report.succeeded,
-            dest_dir.display()
-        ));
+        let mut notice = if settings.normalize && normalized == outcome.report.succeeded {
+            format!(
+                "已导出 {} 首（响度归一化 · {}）到：{}",
+                outcome.report.succeeded,
+                settings.preset.label,
+                dest_dir.display()
+            )
+        } else if normalized > 0 {
+            format!(
+                "已导出 {} 首（其中 {normalized} 首完成响度归一化）到：{}",
+                outcome.report.succeeded,
+                dest_dir.display()
+            )
+        } else {
+            format!(
+                "已导出 {} 首到：{}",
+                outcome.report.succeeded,
+                dest_dir.display()
+            )
+        };
+        if let Some(warning) = warning {
+            notice.push_str(&format!("；{warning}"));
+        }
+        outcome.report.notice = Some(notice);
     }
     outcome
 }
@@ -674,7 +709,16 @@ mod tests {
         let first = same_title(&first);
         let second = same_title(&second);
 
-        let outcome = export_songs(&root, &categories(), &dest, &[&first, &second]);
+        let outcome = export_songs(
+            &root,
+            &categories(),
+            &dest,
+            &[&first, &second],
+            ExportSettings {
+                normalize: false,
+                ..ExportSettings::default()
+            },
+        );
 
         assert_eq!(outcome.report.succeeded, 2);
         assert!(dest.join("a_b.mp3").is_file());

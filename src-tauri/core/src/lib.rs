@@ -6,6 +6,7 @@ pub mod config;
 pub mod export;
 pub mod library;
 pub mod limits;
+pub mod loudness;
 pub mod ops;
 pub mod paths;
 pub mod persist;
@@ -13,6 +14,8 @@ pub mod prefs;
 
 pub use categories::{Categories, Category};
 pub use config::AppConfig;
+pub use export::{ExportOutcome, ExportSettings};
 pub use library::{LibrarySnapshot, LibrarySource, Song, scan_library};
+pub use loudness::ExportPreset;
 pub use ops::{BatchOutcome, BatchReport, KeyChange};
 pub use prefs::{PlayMode, Prefs, SortBy};

@@ -45,6 +45,8 @@ export interface Prefs {
   playbackRate: number;
   playMode: PlayMode;
   sortBy: SortBy;
+  loudnessNormalization: boolean;
+  exportScene: string;
   wallpaper: string;
   customWallpaper: string | null;
   wallpaperOpacity: number;
@@ -124,11 +126,28 @@ export interface CategoryOutcome {
 export interface ExportResult {
   path: string;
   bytes: number;
+  normalized: boolean;
+  warning: string | null;
 }
 
 export interface ExportBatchResult {
   dir: string;
   report: BatchReport;
+}
+
+/** 导出响度场景预设，与 `bgm-core` 的 `EXPORT_PRESETS` 对应。 */
+export interface ExportPreset {
+  id: string;
+  label: string;
+  description: string;
+  targetLufs: number;
+  truePeak: number;
+  loudnessRange: number;
+}
+
+export interface ExportInfo {
+  ffmpeg: string | null;
+  presets: ExportPreset[];
 }
 
 export interface WallpaperAsset {

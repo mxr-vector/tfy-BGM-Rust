@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use bgm_core::categories::Categories;
+use bgm_core::export::ExportSettings;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
 use bgm_core::{AppConfig, Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
 use parking_lot::RwLock;
@@ -249,6 +250,12 @@ impl AppState {
         self.config_path.clone()
     }
 
+    /// 当前偏好对应的导出设置（响度归一化开关 + 场景预设）。
+    pub fn export_settings(&self) -> ExportSettings {
+        let prefs = self.prefs.read();
+        ExportSettings::from_prefs(prefs.loudness_normalization, &prefs.export_scene)
+    }
+
     /// 配置中的窗口标题，用于启动阶段设置系统窗口。
     pub fn window_title(&self) -> String {
         self.config.read().brand.window_title.clone()
@@ -363,6 +370,7 @@ impl AppState {
             &categories,
             dest_dir,
             &refs,
+            self.export_settings(),
         ))
     }
 

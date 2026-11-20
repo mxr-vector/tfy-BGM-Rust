@@ -1,4 +1,4 @@
-//! 用户偏好：收藏、音量、倍速、播放模式、排序与界面壁纸。
+//! 用户偏好：收藏、音量、倍速、播放模式、排序、导出响度与界面壁纸。
 //!
 //! 所有来自前端的数据都会经过 `normalize`，落盘采用「临时文件 + 重命名」，
 //! 损坏的偏好文件回退为默认值而不是让应用启动失败。
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
+use crate::loudness::{DEFAULT_PRESET_ID, find_preset};
 use crate::persist::{PersistError, write_json};
 
 pub const PREFS_VERSION: u32 = 1;
@@ -76,6 +77,10 @@ pub struct Prefs {
     pub playback_rate: f32,
     pub play_mode: PlayMode,
     pub sort_by: SortBy,
+    /// 导出时是否用 ffmpeg 做响度归一化（默认开启）。
+    pub loudness_normalization: bool,
+    /// 导出响度场景预设 id，见 [`crate::loudness::EXPORT_PRESETS`]。
+    pub export_scene: String,
     /// 当前界面壁纸 id：`default`、三个渐变色、两个内置资源或 `custom`。
     pub wallpaper: String,
     /// 上一次使用的自定义壁纸绝对路径，切换回内置壁纸后仍保留。
@@ -99,6 +104,8 @@ impl Default for Prefs {
             playback_rate: 1.0,
             play_mode: PlayMode::Sequence,
             sort_by: SortBy::Default,
+            loudness_normalization: true,
+            export_scene: DEFAULT_PRESET_ID.to_owned(),
             wallpaper: DEFAULT_WALLPAPER.to_owned(),
             custom_wallpaper: None,
             wallpaper_opacity: DEFAULT_WALLPAPER_OPACITY,
@@ -152,6 +159,13 @@ impl Prefs {
                 rates.first().copied().unwrap_or(1.0)
             };
         }
+
+        let scene = self.export_scene.trim().to_ascii_lowercase();
+        self.export_scene = if find_preset(&scene).is_some() {
+            scene
+        } else {
+            DEFAULT_PRESET_ID.to_owned()
+        };
 
         // 自定义壁纸路径只保留带受支持扩展名的值；文件是否还在由运行时判断。
         self.custom_wallpaper = self
@@ -271,6 +285,32 @@ mod tests {
     }
 
     #[test]
+    fn loudness_defaults_to_enabled_video_editing() {
+        let prefs = Prefs::default();
+        assert!(prefs.loudness_normalization);
+        assert_eq!(prefs.export_scene, DEFAULT_PRESET_ID);
+    }
+
+    #[test]
+    fn export_scene_is_normalized_and_validated() {
+        let normalized = Prefs {
+            export_scene: "  PODCAST ".into(),
+            loudness_normalization: false,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(normalized.export_scene, "podcast");
+        assert!(!normalized.loudness_normalization);
+
+        let fallback = Prefs {
+            export_scene: "unknown-scene".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(fallback.export_scene, DEFAULT_PRESET_ID);
+    }
+
+    #[test]
     fn roundtrip_preserves_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/prefs.json");
@@ -281,6 +321,8 @@ mod tests {
             playback_rate: 1.5,
             play_mode: PlayMode::Shuffle,
             sort_by: SortBy::Name,
+            loudness_normalization: false,
+            export_scene: "focus".into(),
             library_dir: Some("/tmp/bgm".into()),
             ..Prefs::default()
         };

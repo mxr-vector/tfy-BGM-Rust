@@ -288,14 +288,12 @@ export function toggleMute(): void {
   persistPrefs(true);
 }
 
-export function cycleRate(): void {
+/** 从配置的倍速档位中选择；非法档位直接忽略。 */
+export function setPlaybackRate(rate: number): void {
   if (!state.prefs) return;
-  const rates = playerConfig().rates;
-  const currentIndex = rates.findIndex(
-    (rate) => Math.abs(rate - state.prefs!.playbackRate) < 0.001,
-  );
-  const next = rates[(currentIndex + 1) % rates.length] ?? 1;
-  state.prefs.playbackRate = next;
+  if (!playerConfig().rates.some((value) => Math.abs(value - rate) < 0.001)) return;
+  if (Math.abs(state.prefs.playbackRate - rate) < 0.001) return;
+  state.prefs.playbackRate = rate;
   applyPrefsToAudio();
   persistPrefs(true);
 }
@@ -318,10 +316,20 @@ export async function exportSong(key: string | null): Promise<void> {
     toast('曲目不存在或已从曲库移除', 'error');
     return;
   }
+  if (state.prefs?.loudnessNormalization) {
+    toast('正在导出并做响度归一化，请稍候…', 'info');
+  }
   exporting.value = true;
   try {
     const result = await invoke<ExportResult | null>(COMMANDS.exportTrack, { key });
-    if (result) toast(`已导出到 ${result.path}`, 'success');
+    if (result) {
+      const detail = result.warning
+        ? `（${result.warning}）`
+        : result.normalized
+          ? '（已响度归一化）'
+          : '';
+      toast(`已导出到 ${result.path}${detail}`, result.warning ? 'info' : 'success');
+    }
   } catch (error) {
     toast(`导出失败：${normalizeError(error)}`, 'error');
   } finally {

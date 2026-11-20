@@ -281,6 +281,9 @@ export async function openMove(
 
 export async function exportSelection(keys: string[]): Promise<void> {
   if (keys.length === 0) return;
+  if (state.prefs?.loudnessNormalization) {
+    toast(`正在导出 ${keys.length} 首并做响度归一化，请稍候…`, 'info');
+  }
   try {
     const result = await invoke<ExportBatchResult | null>(COMMANDS.exportTracks, { keys });
     if (!result) return;

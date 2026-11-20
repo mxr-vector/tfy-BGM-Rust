@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import {
+  closePlayerPopover,
+  playerPopover,
+  togglePlayerPopover,
+} from '@/composables/usePlayerPopover';
+import { playerConfig } from '@/lib/config';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
 import { audioState } from '@/stores/audio-engine';
 import {
   cyclePlayMode,
-  cycleRate,
   drawerOpen,
   exportSong,
   exporting,
@@ -16,6 +21,7 @@ import {
   playSong,
   prevTrack,
   seekTo,
+  setPlaybackRate,
   setVolume,
   toggleCurrentFavorite,
   toggleDrawer,
@@ -23,6 +29,7 @@ import {
   togglePlay,
 } from '@/stores/player';
 import { categoryById, state, visibleSongs } from '@/stores/state';
+import ExportSettingsPopover from './ExportSettingsPopover.vue';
 import Icon from './Icon.vue';
 
 const progressEl = ref<HTMLElement | null>(null);
@@ -54,6 +61,12 @@ const volumeIcon = computed(() => {
 const isFavorite = computed(
   () => Boolean(song.value) && state.favorites.has(song.value!.key),
 );
+const rates = computed(() => playerConfig().rates);
+const currentRate = computed(() => state.prefs?.playbackRate ?? 1);
+const rateOpen = computed(() => playerPopover.value === 'rate');
+
+const rateMenu = ref<HTMLElement | null>(null);
+const rateButton = ref<HTMLButtonElement | null>(null);
 const coverStyle = computed(() =>
   song.value
     ? {
@@ -109,6 +122,68 @@ function finishDrag(event: PointerEvent): void {
 function onVolumeInput(event: Event): void {
   setVolume(Number((event.target as HTMLInputElement).value));
 }
+
+function toggleRateMenu(): void {
+  togglePlayerPopover('rate');
+  if (!rateOpen.value) return;
+  void nextTick(() => {
+    const active = rateMenu.value?.querySelector<HTMLButtonElement>('.rate-item.is-active');
+    (active ?? rateMenu.value?.querySelector<HTMLButtonElement>('.rate-item'))?.focus();
+  });
+}
+
+function closeRateMenu(focusTrigger = false): void {
+  if (!rateOpen.value) return;
+  closePlayerPopover('rate');
+  if (focusTrigger) rateButton.value?.focus();
+}
+
+function chooseRate(rate: number): void {
+  setPlaybackRate(rate);
+  closeRateMenu(true);
+}
+
+function onRateMenuKeydown(event: KeyboardEvent): void {
+  const items = Array.from(
+    rateMenu.value?.querySelectorAll<HTMLButtonElement>('.rate-item') ?? [],
+  );
+  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    items[(index + 1) % items.length]?.focus();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    items[(index - 1 + items.length) % items.length]?.focus();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeRateMenu(true);
+  }
+}
+
+function onDocumentClick(event: MouseEvent): void {
+  if (!rateOpen.value) return;
+  const target = event.target as Node | null;
+  if (target && rateMenu.value?.contains(target)) return;
+  closeRateMenu();
+}
+
+function onDocumentKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || !rateOpen.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeRateMenu(true);
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onDocumentKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocumentClick);
+  document.removeEventListener('keydown', onDocumentKeydown);
+});
 </script>
 
 <template>
@@ -231,15 +306,46 @@ function onVolumeInput(event: Event): void {
             <button type="button" class="control-btn" id="btn-next" title="下一首" @click="nextTrack()">
               <Icon name="skip-forward" />
             </button>
-            <button
-              type="button"
-              class="speed-btn"
-              id="btn-rate"
-              :title="`当前 ${formatRate(state.prefs?.playbackRate ?? 1)}，点击切换倍速`"
-              @click="cycleRate"
-            >
-              {{ formatRate(state.prefs?.playbackRate ?? 1) }}
-            </button>
+            <div class="rate-wrapper">
+              <button
+                ref="rateButton"
+                type="button"
+                class="speed-btn"
+                id="btn-rate"
+                :class="{ 'is-open': rateOpen }"
+                :title="`播放速度：${formatRate(currentRate)}，点击选择`"
+                aria-haspopup="listbox"
+                :aria-expanded="rateOpen"
+                @click.stop="toggleRateMenu"
+              >
+                <span>{{ formatRate(currentRate) }}</span>
+                <Icon name="chevron-down" class="speed-caret" />
+              </button>
+              <div
+                v-if="rateOpen"
+                ref="rateMenu"
+                class="rate-menu"
+                id="rate-menu"
+                role="listbox"
+                aria-label="播放速度"
+                @click.stop
+                @keydown="onRateMenuKeydown"
+              >
+                <button
+                  v-for="rate in rates"
+                  :key="rate"
+                  type="button"
+                  class="rate-item"
+                  :class="{ 'is-active': Math.abs(rate - currentRate) < 0.001 }"
+                  role="option"
+                  :aria-selected="Math.abs(rate - currentRate) < 0.001"
+                  @click="chooseRate(rate)"
+                >
+                  <span>{{ formatRate(rate) }}</span>
+                  <Icon name="check" class="rate-check" />
+                </button>
+              </div>
+            </div>
           </div>
           <div class="time-display">
             <span class="time-current" id="time-current">{{ formatTime(displayTime) }}</span>
@@ -277,6 +383,7 @@ function onVolumeInput(event: Event): void {
               {{ Math.round(effectiveVolume * 100) }}%
             </span>
           </div>
+          <ExportSettingsPopover />
           <button
             type="button"
             class="action-btn"
