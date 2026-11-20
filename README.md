@@ -14,10 +14,11 @@
 | 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
 | 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名，随应用打包为资源 |
-| 设备无关核心库 | `src-tauri/core/` | 目录扫描、导入/重命名/移动/软删除、分类元数据、偏好持久化、导出校验；可独立测试 |
+| 设备无关核心库 | `src-tauri/core/` | 目录扫描、导入/重命名/移动/软删除、分类元数据、应用配置、偏好持久化、导出校验；可独立测试 |
+| 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 内置 6 个分类的默认文案与图标，编译期嵌入 |
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
 | 原生前端 | `src-tauri/ui/` | 无构建步骤的 HTML / CSS / ES Modules |
-| 应用配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、资源打包、Asset Protocol |
+| 应用打包配置 | `src-tauri/tauri.conf.json` | 窗口、CSP、资源打包、Asset Protocol |
 | 权限 | `src-tauri/capabilities/default.json` | 仅授予 `core:default` |
 | 图标 | `src-tauri/icons/` | 由 `app-icon.svg` 生成的各平台图标 |
 
@@ -52,11 +53,34 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
   目录名与已导入的音频文件保持不变。
 - **新增分类**：点击分类栏末尾的 `＋`，或右键分类 → 「新增分类」；可指定目录名（留空则使用分类名称），
   应用会同步在曲库根目录下创建同名文件夹，之后即可向该分类导入音频。
-- **本地文件维护**：分类配置保存在应用配置目录的 `categories.json`（见下方「配置文件位置」），
+- **本地文件维护**：分类配置保存在应用配置目录的 `categories.json`（见下方「运行时配置文件位置」），
   右键菜单中的「打开分类配置文件」会在文件管理器中定位该文件；字段包括 `id`（目录名）、
-  `nameZh`、`nameEn`、`labelEn`、`color`、`title`、`description`。
+  `nameZh`、`nameEn`、`labelEn`、`color`、`icon`（界面图标名）、`title`、`description`。
   缺失字段会自动补全，损坏或为空时回退为内置分类。修改文件后点击顶部的「重新扫描」即可刷新。
   每次新增 / 编辑分类以及重新扫描时，应用都会先重新读取该文件，手工编辑不会丢失。
+
+## ⚙️ 应用配置 config.json
+
+品牌文案、界面文案与播放器行为参数都从应用配置目录的 `config.json` 读取。
+首次启动会按内置默认值生成该文件；右键分类栏 → 「打开应用配置文件」可直接定位，
+修改后点击顶部「重新扫描」热加载（窗口标题、标题栏与列表文案立即更新，无需重启）。
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `brand.title` | 顶部标题与文档标题 |
+| `brand.subtitle` | 顶部副标题 |
+| `brand.windowTitle` | 系统窗口标题，启动与热加载时应用 |
+| `player.rates` | 倍速档位与循环顺序，如 `[0.75, 1, 1.25, 1.5, 2]` |
+| `player.volumeStep` | `↑` / `↓` 与音量滑杆的步进 |
+| `player.seekStepSeconds` | `←` / `→` 的跳转秒数 |
+| `player.restartThresholdSeconds` | 当前曲目播放超过该秒数时，「上一首」先回到开头 |
+| `player.maxAutoSkips` | 连续加载失败时最多自动跳过几首；`0` 表示不跳过 |
+| `player.loadTimeoutMs` | 读取音频 Blob 的超时时间（毫秒） |
+| `ui.all` / `ui.favorites` | 「全部」「收藏」页的 `title`、`labelEn`、`description`、`resultsTitle` |
+
+`ui.*.description` 支持 `{categories}` 占位符，会替换为当前分类名称（以「、」连接）。
+所有取值都会被自动收敛：空文案回退默认、数值夹到安全区间、倍速去重并限制在 `0.25`–`4.0`；
+文件损坏时回退内置默认值，并在界面提示。
 
 ### 曲库根目录解析顺序
 
@@ -91,7 +115,7 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
    - 复制后校验落盘字节数与源文件一致，失败会清理不完整文件。
 4. **全功能播放器**
    - 播放 / 暂停、上一首 / 下一首、顺序 / 单曲 / 随机。
-   - 0.75x / 1.0x / 1.25x / 1.5x / 2.0x 倍速。
+   - 默认 0.75x / 1.0x / 1.25x / 1.5x / 2.0x 倍速档位（可在 `config.json` 调整）。
    - 高精度进度条：悬停时间预览，按住拖动 Seek；缓冲进度显示。
    - 音量滑杆、静音、播放队列抽屉、当前曲目收藏。
    - 音频经 Asset Protocol 读取后以 Blob 播放，兼容 Linux WebKitGTK 的媒体管线。
@@ -99,7 +123,11 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
 5. **收藏与偏好持久化**
    - 收藏、音量、静音、倍速、播放模式、排序由 Rust 写入应用配置目录的 `prefs.json`。
    - 收藏使用稳定键 `分类/文件名主干`；重命名 / 移动分类时收藏自动迁移，替换同名文件不会丢失收藏。
-6. **桌面体验**
+6. **配置化与可维护性**
+   - 品牌文案、界面文案、播放器行为参数集中在 `config.json`，分类文案与图标由 `categories.json` 维护。
+   - 前端事件名、Tauri 命令名、播放模式等契约字符串统一收敛在 `js/constants.js`，
+     内置分类模板改为 `assets/categories.default.json`，修改文案不需要改代码。
+7. **桌面体验**
    - 无 Node / npm 运行时依赖，离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
    - 中文本地字体栈，不请求任何远程字体或第三方资源。
 
@@ -108,8 +136,8 @@ bgm/<分类>/*.mp3 ──Rust 启动扫描──▶ LibrarySnapshot ──IPC─
 | 按键 | 功能 |
 | :--- | :--- |
 | `空格` | 播放 / 暂停（未播放时从当前列表第一首开始） |
-| `←` / `→` | 后退 / 前进 5 秒 |
-| `↑` / `↓` | 音量 +10% / -10% |
+| `←` / `→` | 后退 / 前进（默认 5 秒，可在 `config.json` 调整） |
+| `↑` / `↓` | 音量 +10% / -10%（步进可配置） |
 | `M` | 静音 / 恢复 |
 | `/` | 聚焦搜索框 |
 | `Esc` | 关闭队列抽屉；清除批量选择；搜索框内清空搜索 |
@@ -187,8 +215,12 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 
 - **状态与命令**：`AppState` 持有偏好（`parking_lot::RwLock`）与最近扫描结果；
   前端只能通过命令读取快照、保存偏好、切换 / 扫描曲库、导入 / 编辑 / 移动 / 删除曲目与导出音频。
-- **偏好校验**：前端提交的偏好会经过 `Prefs::normalize`（音量 clamp、倍速白名单、
-  收藏去重与长度限制）；曲库目录只能由专门命令修改，普通偏好保存不能覆盖。
+- **偏好校验**：前端提交的偏好会经过 `Prefs::normalize_with_rates`（音量 clamp、
+  倍速白名单取自 `config.json` 的 `player.rates`、收藏去重与长度限制）；
+  曲库目录只能由专门命令修改，普通偏好保存不能覆盖。
+- **应用配置**：`config.json` 的品牌文案、数值参数与 `ui` 文案都会经过
+  `AppConfig::normalize`；空文案回退默认、数值 clamp 到安全区间、倍速去重并限制在 `0.25`–`4.0`。
+  窗口标题由配置驱动，热加载失败只提示告警，不影响曲库使用。
 - **分类配置**：新增 / 编辑分类由 Rust 校验名称与目录名必须是单个普通路径分量，
   主题色必须是 `#RRGGBB`，同名分类与重复目录名会被拒绝；配置写入应用配置目录的
   `categories.json`，手工编辑后重新扫描生效。
@@ -204,15 +236,17 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 - **删除可恢复**：删除采用软删除，文件移动到 `<曲库根>/.tfy-trash/<批次>/`，
   扫描器忽略该隐藏目录；批量删除前会弹出系统确认对话框。
 
-### 偏好与分类配置位置
+### 运行时配置文件位置
 
-由 Tauri `app_config_dir` 决定，两个文件并列存放（`prefs.json` 偏好、`categories.json` 分类）：
+由 Tauri `app_config_dir` 决定，三个文件并列存放：
+`config.json`（品牌/文案/播放参数）、`prefs.json`（偏好）、`categories.json`（分类）。
 
 - Linux：`~/.config/com.yuanjie.tfybgm/`
 - macOS：`~/Library/Application Support/com.yuanjie.tfybgm/`
 - Windows：`%APPDATA%\com.yuanjie.tfybgm\`
 
-偏好文件损坏或缺失时回退为默认值；分类文件缺失时生成内置分类，损坏或为空时回退为内置分类，均不会阻止应用启动。
+任一文件损坏或缺失时都会回退为对应默认值，不会阻止应用启动；
+`config.json` 与 `categories.json` 修改后可点「重新扫描」热加载，`prefs.json` 由应用自行维护。
 
 ---
 

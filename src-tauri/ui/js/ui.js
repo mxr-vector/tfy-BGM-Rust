@@ -1,3 +1,5 @@
+import { DEFAULT_ACCENT } from './constants.js';
+
 let toastTimer = 0;
 
 export function el(tag, props = {}, children = []) {
@@ -74,9 +76,9 @@ export function clamp(value, min, max) {
 }
 
 export function withAlpha(hex, alpha) {
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) return `rgba(74, 222, 128, ${alpha})`;
-  const red = Number.parseInt(hex.slice(1, 3), 16);
-  const green = Number.parseInt(hex.slice(3, 5), 16);
-  const blue = Number.parseInt(hex.slice(5, 7), 16);
+  const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex : DEFAULT_ACCENT;
+  const red = Number.parseInt(value.slice(1, 3), 16);
+  const green = Number.parseInt(value.slice(3, 5), 16);
+  const blue = Number.parseInt(value.slice(5, 7), 16);
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }

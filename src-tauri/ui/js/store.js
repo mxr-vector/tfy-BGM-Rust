@@ -1,4 +1,12 @@
 import { invoke } from './tauri.js';
+import { applyConfig } from './config.js';
+import {
+  ALL_CATEGORY,
+  COMMANDS,
+  EVENTS,
+  LIBRARY_SOURCES,
+  SORT_KEYS,
+} from './constants.js';
 
 const listeners = new Map();
 
@@ -13,10 +21,10 @@ export const state = {
   },
   prefs: null,
   favorites: new Set(),
-  category: 'all',
+  category: ALL_CATEGORY,
   favoritesOnly: false,
   search: '',
-  sortBy: 'default',
+  sortBy: SORT_KEYS.recommended,
   selected: new Set(),
   queue: [],
   queueIndex: -1,
@@ -46,15 +54,16 @@ export function emit(event, payload) {
 }
 
 export function applyBootstrap(boot) {
+  applyConfig(boot.config);
   state.prefs = boot.prefs;
   state.library = boot.library;
   state.favorites = new Set(boot.prefs.favorites);
   state.selected = new Set();
   state.sortBy = boot.prefs.sortBy;
-  emit('library');
-  emit('favorites');
-  emit('selection');
-  emit('view');
+  emit(EVENTS.library);
+  emit(EVENTS.favorites);
+  emit(EVENTS.selection);
+  emit(EVENTS.view);
 }
 
 export function replaceLibrary(snapshot) {
@@ -62,10 +71,10 @@ export function replaceLibrary(snapshot) {
 
   let viewChanged = false;
   if (
-    state.category !== 'all' &&
+    state.category !== ALL_CATEGORY &&
     !snapshot.categories.some((category) => category.id === state.category)
   ) {
-    state.category = 'all';
+    state.category = ALL_CATEGORY;
     viewChanged = true;
   }
 
@@ -94,11 +103,11 @@ export function replaceLibrary(snapshot) {
     }
   }
 
-  emit('library');
-  emit('queue');
-  emit('player');
-  if (viewChanged) emit('view');
-  if (pruned) emit('selection');
+  emit(EVENTS.library);
+  emit(EVENTS.queue);
+  emit(EVENTS.player);
+  if (viewChanged) emit(EVENTS.view);
+  if (pruned) emit(EVENTS.selection);
 }
 
 /** 应用曲库写操作结果：先迁移 key（队列/当前曲目/收藏/选择），再替换快照。 */
@@ -122,8 +131,8 @@ export function applyMutation(result) {
   }
 
   replaceLibrary(result.library);
-  if (remap.size > 0 || (result.removed ?? []).length > 0) emit('favorites');
-  emit('selection');
+  if (remap.size > 0 || (result.removed ?? []).length > 0) emit(EVENTS.favorites);
+  emit(EVENTS.selection);
 }
 
 export function categoryById(id) {
@@ -149,7 +158,7 @@ export function toggleFavorite(key) {
   } else {
     state.favorites.add(key);
   }
-  emit('favorites');
+  emit(EVENTS.favorites);
   persistPrefs(true);
 }
 
@@ -165,44 +174,44 @@ export function setFavorites(keys, favorite) {
     }
   }
   if (!changed) return;
-  emit('favorites');
+  emit(EVENTS.favorites);
   persistPrefs(true);
 }
 
 export function setCategory(categoryId) {
   state.category = categoryId;
   state.favoritesOnly = false;
-  emit('view');
+  emit(EVENTS.view);
 }
 
 export function toggleFavoritesOnly() {
   state.favoritesOnly = !state.favoritesOnly;
-  emit('view');
+  emit(EVENTS.view);
 }
 
 export function resetFilters() {
-  state.category = 'all';
+  state.category = ALL_CATEGORY;
   state.favoritesOnly = false;
   state.search = '';
-  emit('view');
-  emit('search');
+  emit(EVENTS.view);
+  emit(EVENTS.search);
 }
 
 export function setSearch(query) {
   state.search = query;
-  emit('search');
+  emit(EVENTS.search);
 }
 
 export function setSortBy(sortBy) {
   if (state.sortBy === sortBy) return;
   state.sortBy = sortBy;
   persistPrefs(true);
-  emit('view');
+  emit(EVENTS.view);
 }
 
 export function visibleSongs() {
   const list = filterSongs();
-  return state.sortBy === 'name'
+  return state.sortBy === SORT_KEYS.name
     ? [...list].sort((a, b) => collator.compare(a.title, b.title))
     : list;
 }
@@ -216,7 +225,7 @@ export function setSelected(key, selected) {
   if (!changed) return;
   if (selected) state.selected.add(key);
   else state.selected.delete(key);
-  emit('selection');
+  emit(EVENTS.selection);
 }
 
 export function selectMany(keys, selected) {
@@ -229,13 +238,13 @@ export function selectMany(keys, selected) {
       changed = true;
     }
   }
-  if (changed) emit('selection');
+  if (changed) emit(EVENTS.selection);
 }
 
 export function clearSelection() {
   if (state.selected.size === 0) return;
   state.selected.clear();
-  emit('selection');
+  emit(EVENTS.selection);
 }
 
 export function selectedKeys() {
@@ -247,7 +256,7 @@ function filterSongs() {
 
   if (state.favoritesOnly) {
     list = list.filter((song) => state.favorites.has(song.key));
-  } else if (state.category !== 'all') {
+  } else if (state.category !== ALL_CATEGORY) {
     list = list.filter((song) => song.category === state.category);
   }
 
@@ -288,18 +297,18 @@ async function flushPrefs() {
     sortBy: state.sortBy,
   };
   try {
-    const saved = await invoke('save_prefs', { prefs: payload });
+    const saved = await invoke(COMMANDS.savePrefs, { prefs: payload });
     if (sequence === saveSequence) state.prefs = saved;
   } catch (error) {
-    emit('error', `保存偏好设置失败：${error}`);
+    emit(EVENTS.error, `保存偏好设置失败：${error}`);
   }
 }
 
 export function sourceLabel() {
   switch (state.library.source) {
-    case 'custom':
+    case LIBRARY_SOURCES.custom:
       return '自定义目录';
-    case 'env':
+    case LIBRARY_SOURCES.env:
       return '环境变量目录';
     default:
       return '内置曲库';

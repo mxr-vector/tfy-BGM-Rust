@@ -11,11 +11,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let state = AppState::initialize(app.handle())?;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&state.window_title());
+            }
             app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
+            commands::reload_config,
+            commands::open_config_file,
             commands::save_prefs,
             commands::rescan_library,
             commands::choose_library_dir,

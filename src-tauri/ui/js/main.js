@@ -19,10 +19,13 @@ import {
   state,
   visibleSongs,
 } from './store.js';
+import { COMMANDS, EVENTS } from './constants.js';
+import { applyDocumentCopy, playerConfig } from './config.js';
 import { invoke, isTauri } from './tauri.js';
 import { el, normalizeError, toast } from './ui.js';
 
 applyStaticIcons();
+applyDocumentCopy();
 
 function showFatal(title, message) {
   const iconHost = el('span');
@@ -101,19 +104,19 @@ function handleGlobalKeydown(event) {
       break;
     case 'ArrowLeft':
       event.preventDefault();
-      seekBy(-5);
+      seekBy(-playerConfig().seekStepSeconds);
       break;
     case 'ArrowRight':
       event.preventDefault();
-      seekBy(5);
+      seekBy(playerConfig().seekStepSeconds);
       break;
     case 'ArrowUp':
       event.preventDefault();
-      adjustVolume(0.1);
+      adjustVolume(playerConfig().volumeStep);
       break;
     case 'ArrowDown':
       event.preventDefault();
-      adjustVolume(-0.1);
+      adjustVolume(-playerConfig().volumeStep);
       break;
     case 'KeyM':
       event.preventDefault();
@@ -147,7 +150,7 @@ async function bootstrap() {
 
   let boot;
   try {
-    boot = await invoke('bootstrap');
+    boot = await invoke(COMMANDS.bootstrap);
   } catch (error) {
     showFatal('曲库加载失败', normalizeError(error));
     return;
@@ -156,7 +159,7 @@ async function bootstrap() {
   applyBootstrap(boot);
   initPlayer();
   initLibraryUI();
-  on('error', (message) => toast(message, 'error'));
+  on(EVENTS.error, (message) => toast(message, 'error'));
   window.addEventListener('keydown', handleGlobalKeydown);
 }
 

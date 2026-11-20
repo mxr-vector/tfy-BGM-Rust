@@ -7,12 +7,14 @@ use bgm_core::BatchReport;
 use bgm_core::LibrarySnapshot;
 use bgm_core::Prefs;
 use bgm_core::export::copy_validated;
+use bgm_core::library::AUDIO_EXTENSION;
+use bgm_core::paths::TRASH_DIR_NAME;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::state::{AppState, Bootstrap, CategoryOutcome, LibraryMutation};
+use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -20,9 +22,33 @@ fn describe(error: anyhow::Error) -> String {
     format!("{error:#}")
 }
 
+/// 在文件管理器中定位配置文件；定位失败时退化为打开其所在目录。
+fn reveal_in_dir(app: &AppHandle, path: &Path, label: &str) -> CommandResult<()> {
+    if app.opener().reveal_item_in_dir(path).is_err() {
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        app.opener()
+            .open_path(parent.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|error| format!("打开{label}目录失败：{error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn bootstrap(state: State<'_, AppState>) -> Bootstrap {
     state.bootstrap()
+}
+
+#[tauri::command]
+pub fn reload_config(app: AppHandle, state: State<'_, AppState>) -> ConfigReload {
+    state.reload_config(&app)
+}
+
+#[tauri::command]
+pub fn open_config_file(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
+    reveal_in_dir(&app, &state.config_path(), "应用配置")
 }
 
 #[tauri::command]
@@ -115,17 +141,7 @@ pub fn update_category(
 
 #[tauri::command]
 pub fn open_categories_file(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    let path = state.categories_path();
-    if app.opener().reveal_item_in_dir(&path).is_err() {
-        let parent = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        app.opener()
-            .open_path(parent.to_string_lossy().into_owned(), None::<&str>)
-            .map_err(|error| format!("打开分类配置目录失败：{error}"))?;
-    }
-    Ok(())
+    reveal_in_dir(&app, &state.categories_path(), "分类配置")
 }
 
 #[tauri::command]
@@ -141,7 +157,7 @@ pub async fn import_tracks(
         .dialog()
         .file()
         .set_title("导入音频到曲库")
-        .add_filter("MP3 音频", &["mp3"])
+        .add_filter("MP3 音频", &[AUDIO_EXTENSION])
         .blocking_pick_files()
     else {
         return Ok(None);
@@ -192,7 +208,7 @@ pub async fn delete_tracks(
         return Err("未选择任何曲目".to_owned());
     }
     let message = format!(
-        "将把选中的 {} 首曲目移动到曲库的 .tfy-trash 回收站目录，之后可在文件管理器中手动恢复。",
+        "将把选中的 {} 首曲目移动到曲库的 {TRASH_DIR_NAME} 回收站目录，之后可在文件管理器中手动恢复。",
         keys.len()
     );
     let confirmed = app
@@ -248,13 +264,16 @@ pub async fn export_track(
         .song(&key)
         .ok_or_else(|| format!("曲目不存在：{key}"))?;
 
-    let file_name = format!("{}.mp3", bgm_core::export::safe_file_name(&song.title));
+    let file_name = format!(
+        "{}.{AUDIO_EXTENSION}",
+        bgm_core::export::safe_file_name(&song.title)
+    );
     let mut dialog = app
         .dialog()
         .file()
         .set_title("导出音频")
         .set_file_name(file_name)
-        .add_filter("MP3 音频", &["mp3"]);
+        .add_filter("MP3 音频", &[AUDIO_EXTENSION]);
     if let Ok(download_dir) = app.path().download_dir() {
         dialog = dialog.set_directory(download_dir);
     }

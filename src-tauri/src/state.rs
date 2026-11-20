@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use bgm_core::categories::Categories;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
-use bgm_core::{Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
+use bgm_core::paths::{
+    CATEGORIES_FILE, CONFIG_FILE, LIBRARY_DIR_NAME, LIBRARY_ENV_VAR, PREFS_FILE,
+};
+use bgm_core::{AppConfig, Category, LibrarySnapshot, LibrarySource, Prefs, Song, scan_library};
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -20,8 +23,10 @@ use tauri::{AppHandle, Manager};
 pub struct AppState {
     prefs_path: PathBuf,
     categories_path: PathBuf,
+    config_path: PathBuf,
     prefs: RwLock<Prefs>,
     categories: RwLock<Categories>,
+    config: RwLock<AppConfig>,
     runtime: RwLock<Runtime>,
 }
 
@@ -36,6 +41,15 @@ struct Runtime {
 pub struct Bootstrap {
     pub prefs: Prefs,
     pub library: LibrarySnapshot,
+    pub config: AppConfig,
+}
+
+/// 重新读取 `config.json` 的结果；`warnings` 用于提示损坏或自动修正。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigReload {
+    pub config: AppConfig,
+    pub warnings: Vec<String>,
 }
 
 /// 曲库写操作后的统一结果：新快照 + key 迁移 + 操作统计。
@@ -63,15 +77,25 @@ impl AppState {
             .path()
             .app_config_dir()
             .context("无法定位应用配置目录")?;
-        let prefs_path = config_dir.join("prefs.json");
-        let (prefs, prefs_warning) = Prefs::load(&prefs_path);
-
-        let categories_path = config_dir.join("categories.json");
-        let (categories, categories_warning) = Categories::load(&categories_path);
         let mut warnings = Vec::new();
+
+        let config_path = config_dir.join(CONFIG_FILE);
+        let (config, config_warning) = AppConfig::load(&config_path);
+        if let Some(warning) = config_warning {
+            warnings.push(warning);
+        }
+        if let Err(error) = config.ensure_file(&config_path) {
+            warnings.push(format!("无法写入应用配置文件：{error}"));
+        }
+
+        let prefs_path = config_dir.join(PREFS_FILE);
+        let (prefs, prefs_warning) = Prefs::load_with_rates(&prefs_path, &config.player.rates);
         if let Some(warning) = prefs_warning {
             warnings.push(warning);
         }
+
+        let categories_path = config_dir.join(CATEGORIES_FILE);
+        let (categories, categories_warning) = Categories::load(&categories_path);
         if let Some(warning) = categories_warning {
             warnings.push(warning);
         }
@@ -90,8 +114,10 @@ impl AppState {
         Ok(Self {
             prefs_path,
             categories_path,
+            config_path,
             prefs: RwLock::new(prefs),
             categories: RwLock::new(categories),
+            config: RwLock::new(config),
             runtime: RwLock::new(Runtime {
                 root,
                 source,
@@ -104,17 +130,39 @@ impl AppState {
         Bootstrap {
             prefs: self.prefs.read().clone(),
             library: self.runtime.read().library.clone(),
+            config: self.config.read().clone(),
         }
     }
 
     pub fn save_prefs(&self, incoming: Prefs) -> Result<Prefs> {
+        let rates = self.config.read().player.rates.clone();
         let mut current = self.prefs.write();
-        let mut next = incoming.normalize();
+        let mut next = incoming.normalize_with_rates(&rates);
         // 曲库目录只允许通过 choose/reset 命令修改，避免偏好保存把目录改坏。
         next.library_dir = current.library_dir.clone();
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
         Ok(next)
+    }
+
+    /// 重新读取 `config.json` 并同步窗口标题；供「重新扫描」时热加载。
+    pub fn reload_config(&self, app: &AppHandle) -> ConfigReload {
+        let (config, warning) = AppConfig::load(&self.config_path);
+        let mut warnings: Vec<String> = warning.into_iter().collect();
+        *self.config.write() = config.clone();
+        warnings.append(&mut self.apply_window_title(app, &config));
+        ConfigReload { config, warnings }
+    }
+
+    /// 把配置里的窗口标题应用到系统窗口。
+    pub fn apply_window_title(&self, app: &AppHandle, config: &AppConfig) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(window) = app.get_webview_window("main")
+            && let Err(error) = window.set_title(&config.brand.window_title)
+        {
+            warnings.push(format!("无法更新窗口标题：{error}"));
+        }
+        warnings
     }
 
     pub fn rescan(&self, app: &AppHandle) -> Result<LibrarySnapshot> {
@@ -218,6 +266,15 @@ impl AppState {
 
     pub fn categories_path(&self) -> PathBuf {
         self.categories_path.clone()
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.config_path.clone()
+    }
+
+    /// 配置中的窗口标题，用于启动阶段设置系统窗口。
+    pub fn window_title(&self) -> String {
+        self.config.read().brand.window_title.clone()
     }
 
     pub fn has_category(&self, id: &str) -> bool {
@@ -448,13 +505,13 @@ fn mutation_from(library: LibrarySnapshot, outcome: BatchOutcome) -> LibraryMuta
 fn resolve_root(app: &AppHandle, prefs: &Prefs) -> (PathBuf, LibrarySource, Vec<String>) {
     let mut warnings = Vec::new();
 
-    if let Some(dir) = env::var_os("TFY_BGM_DIR") {
+    if let Some(dir) = env::var_os(LIBRARY_ENV_VAR) {
         let path = PathBuf::from(dir);
         if path.is_dir() {
             return (absolute(path), LibrarySource::Env, warnings);
         }
         warnings.push(format!(
-            "环境变量 TFY_BGM_DIR 指向的目录不存在，已忽略：{}",
+            "环境变量 {LIBRARY_ENV_VAR} 指向的目录不存在，已忽略：{}",
             path.display()
         ));
     }
@@ -478,19 +535,25 @@ fn resolve_bundled_root(
     mut warnings: Vec<String>,
 ) -> (PathBuf, LibrarySource, Vec<String>) {
     // 内置曲库默认取当前工作目录下的 bgm/，便于 portable 分发与开发调试。
-    let current_root = env::current_dir().ok().map(|dir| dir.join("bgm"));
+    let current_root = env::current_dir()
+        .ok()
+        .map(|dir| dir.join(LIBRARY_DIR_NAME));
     if let Some(root) = current_root.as_ref().filter(|root| root.is_dir()) {
         return (absolute(root.clone()), LibrarySource::Bundled, warnings);
     }
 
-    let resource_root = app.path().resource_dir().ok().map(|dir| dir.join("bgm"));
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join(LIBRARY_DIR_NAME));
     if let Some(root) = resource_root.as_ref().filter(|root| root.is_dir()) {
         return (root.clone(), LibrarySource::Bundled, warnings);
     }
 
     #[cfg(debug_assertions)]
     {
-        let dev_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bgm");
+        let dev_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../{LIBRARY_DIR_NAME}"));
         if dev_root.is_dir() {
             return (dev_root, LibrarySource::Bundled, warnings);
         }
@@ -498,9 +561,9 @@ fn resolve_bundled_root(
 
     let fallback = current_root
         .or(resource_root)
-        .unwrap_or_else(|| PathBuf::from("bgm"));
+        .unwrap_or_else(|| PathBuf::from(LIBRARY_DIR_NAME));
     warnings.push(format!(
-        "未找到内置曲库目录（当前路径下的 bgm/），请通过「更换目录」选择文件夹：{}",
+        "未找到内置曲库目录（当前路径下的 {LIBRARY_DIR_NAME}/），请通过「更换目录」选择文件夹：{}",
         fallback.display()
     ));
     (fallback, LibrarySource::Bundled, warnings)

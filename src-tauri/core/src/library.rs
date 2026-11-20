@@ -11,8 +11,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::categories::Category;
+use crate::limits::MAX_KEY_LEN;
 
-const MAX_KEY_LEN: usize = 512;
+/// 曲库唯一接受的音频扩展名（小写，不含点）。
+pub const AUDIO_EXTENSION: &str = "mp3";
+
+/// 文件名是否以音频扩展名结尾（大小写不敏感，按字节判断避免切坏多字节字符）。
+pub fn has_audio_extension(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let ext = AUDIO_EXTENSION.as_bytes();
+    bytes.len() > ext.len()
+        && bytes[bytes.len() - ext.len() - 1] == b'.'
+        && bytes[bytes.len() - ext.len()..].eq_ignore_ascii_case(ext)
+}
 
 /// 曲库来源，供界面区分内置曲库与用户自选目录。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +53,7 @@ pub struct CategorySummary {
     pub name_en: String,
     pub label_en: String,
     pub color: String,
+    pub icon: String,
     pub title: String,
     pub description: String,
     pub count: usize,
@@ -55,6 +67,7 @@ impl CategorySummary {
             name_en: category.name_en.clone(),
             label_en: category.label_en.clone(),
             color: category.color.clone(),
+            icon: category.icon.clone(),
             title: category.title.clone(),
             description: category.description.clone(),
             count,
@@ -165,7 +178,7 @@ fn scan_category(
             ));
             continue;
         };
-        if !file_name.to_ascii_lowercase().ends_with(".mp3") {
+        if !has_audio_extension(&file_name) {
             continue;
         }
 
@@ -234,7 +247,7 @@ fn collect_stray_warnings(root: &Path, categories: &[Category], warnings: &mut V
                     "目录 {name}/ 不是已注册分类，其中 {stray_count} 个 mp3 已被忽略"
                 ));
             }
-        } else if name.to_ascii_lowercase().ends_with(".mp3") {
+        } else if has_audio_extension(&name) {
             warnings.push(format!("根目录下的 {name} 不在任何分类目录中，已被忽略"));
         }
     }
@@ -247,10 +260,7 @@ fn count_mp3(dir: &Path) -> usize {
                 .flatten()
                 .filter(|entry| {
                     entry.path().is_file()
-                        && entry
-                            .file_name()
-                            .to_str()
-                            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mp3"))
+                        && entry.file_name().to_str().is_some_and(has_audio_extension)
                 })
                 .count()
         })
@@ -278,6 +288,16 @@ mod tests {
     }
 
     #[test]
+    fn audio_extension_matches_case_insensitively() {
+        assert!(has_audio_extension("track.mp3"));
+        assert!(has_audio_extension("track.MP3"));
+        assert!(has_audio_extension("中文.mp3"));
+        assert!(!has_audio_extension("mp3"));
+        assert!(!has_audio_extension("track.mp3.txt"));
+        assert!(!has_audio_extension("track.flac"));
+    }
+
+    #[test]
     fn scans_registered_categories_in_declared_order() {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
@@ -298,6 +318,7 @@ mod tests {
         assert_eq!(keys, ["cheerful/a_first", "cheerful/z_last", "epic/x"]);
         assert_eq!(snapshot.songs[0].title, "a first");
         assert_eq!(snapshot.categories[0].count, 2);
+        assert_eq!(snapshot.categories[0].icon, "sparkles");
         assert_eq!(snapshot.categories[3].count, 1);
         assert_eq!(snapshot.categories[5].count, 0);
         assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
@@ -343,6 +364,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows 文件系统大小写不敏感，无法在同一目录制造同名不同扩展的重复文件"
+    )]
     fn skips_duplicate_keys() {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();

@@ -5,16 +5,17 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
+use crate::persist::{PersistError, write_json};
+
 pub const PREFS_VERSION: u32 = 1;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
-const MAX_FAVORITES: usize = 10_000;
-const MAX_KEY_LEN: usize = 512;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -63,7 +64,13 @@ impl Default for Prefs {
 
 impl Prefs {
     /// 把任意输入收敛到可持久化的合法状态。
-    pub fn normalize(mut self) -> Self {
+    pub fn normalize(self) -> Self {
+        let rates = PLAYBACK_RATES;
+        self.normalize_with_rates(&rates)
+    }
+
+    /// 按配置中的倍速档位校验：只允许界面能循环到的倍速。
+    pub fn normalize_with_rates(mut self, rates: &[f32]) -> Self {
         self.version = PREFS_VERSION;
         self.library_dir = self
             .library_dir
@@ -87,17 +94,29 @@ impl Prefs {
         } else {
             DEFAULT_VOLUME
         };
-        if !PLAYBACK_RATES
-            .iter()
-            .any(|rate| (rate - self.playback_rate).abs() < f32::EPSILON)
-        {
-            self.playback_rate = 1.0;
+        let allowed = |rate: f32| {
+            rates
+                .iter()
+                .any(|value| (value - rate).abs() < f32::EPSILON)
+        };
+        if !allowed(self.playback_rate) {
+            self.playback_rate = if allowed(1.0) {
+                1.0
+            } else {
+                rates.first().copied().unwrap_or(1.0)
+            };
         }
         self
     }
 
     /// 读取偏好；文件缺失返回默认值，损坏时返回默认值并附带一条告警。
     pub fn load(path: &Path) -> (Self, Option<String>) {
+        let rates = PLAYBACK_RATES;
+        Self::load_with_rates(path, &rates)
+    }
+
+    /// 按配置中的倍速档位读取偏好。
+    pub fn load_with_rates(path: &Path, rates: &[f32]) -> (Self, Option<String>) {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -112,7 +131,7 @@ impl Prefs {
         };
 
         match serde_json::from_slice::<Self>(&bytes) {
-            Ok(prefs) => (prefs.normalize(), None),
+            Ok(prefs) => (prefs.normalize_with_rates(rates), None),
             Err(error) => (
                 Self::default(),
                 Some(format!("偏好设置文件损坏，已重置为默认值：{error}")),
@@ -121,40 +140,15 @@ impl Prefs {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), PrefsError> {
-        let parent = path.parent().ok_or_else(|| {
-            PrefsError::Write(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("偏好文件路径没有父目录：{}", path.display()),
-            ))
-        })?;
-        fs::create_dir_all(parent).map_err(PrefsError::CreateDir)?;
-        let bytes = serde_json::to_vec_pretty(self)?;
-
-        let tmp = temp_path(path);
-        fs::write(&tmp, &bytes).map_err(PrefsError::Write)?;
-        if fs::rename(&tmp, path).is_err() {
-            // Windows 上目标已存在时重命名可能失败，退化为直接覆盖。
-            fs::write(path, &bytes).map_err(PrefsError::Write)?;
-            let _ = fs::remove_file(&tmp);
-        }
+        write_json(path, self)?;
         Ok(())
     }
 }
 
-fn temp_path(path: &Path) -> PathBuf {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    PathBuf::from(tmp)
-}
-
 #[derive(Debug, Error)]
 pub enum PrefsError {
-    #[error("创建偏好目录失败：{0}")]
-    CreateDir(#[source] std::io::Error),
-    #[error("序列化偏好失败：{0}")]
-    Serialize(#[from] serde_json::Error),
-    #[error("写入偏好失败：{0}")]
-    Write(#[source] std::io::Error),
+    #[error(transparent)]
+    Persist(#[from] PersistError),
 }
 
 #[cfg(test)]
@@ -230,5 +224,23 @@ mod tests {
         let prefs: Prefs = serde_json::from_str(r#"{ "volume": 0.5, "future": true }"#).unwrap();
         assert_eq!(prefs.volume, 0.5);
         assert_eq!(prefs.play_mode, PlayMode::Sequence);
+    }
+
+    #[test]
+    fn configured_rates_are_accepted() {
+        let rates = [1.0, 1.75, 2.5];
+        let prefs = Prefs {
+            playback_rate: 1.75,
+            ..Prefs::default()
+        }
+        .normalize_with_rates(&rates);
+        assert_eq!(prefs.playback_rate, 1.75);
+
+        let fallback = Prefs {
+            playback_rate: 3.5,
+            ..Prefs::default()
+        }
+        .normalize_with_rates(&rates);
+        assert_eq!(fallback.playback_rate, 1.0);
     }
 }

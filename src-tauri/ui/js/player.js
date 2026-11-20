@@ -1,5 +1,7 @@
 import { assetUrl, invoke } from './tauri.js';
 import { emit, on, persistPrefs, songByKey, state, toggleFavorite } from './store.js';
+import { COMMANDS, DEFAULT_ACCENT, EVENTS, PLAY_MODES } from './constants.js';
+import { playerConfig } from './config.js';
 import { equalizer, setIcon } from './icons.js';
 import { clamp, el, formatTime, normalizeError, toast, withAlpha } from './ui.js';
 
@@ -19,9 +21,7 @@ let sourceToken = 0;
 let sourceUrl = '';
 let loadedPath = '';
 
-const MAX_AUTO_SKIPS = 3;
-const RATE_CYCLE = [1.0, 1.25, 1.5, 2.0, 0.75];
-const MODE_CYCLE = ['sequence', 'repeat-one', 'shuffle'];
+const MODE_CYCLE = [PLAY_MODES.sequence, PLAY_MODES.repeatOne, PLAY_MODES.shuffle];
 
 function $(id) {
   return document.getElementById(id);
@@ -70,7 +70,7 @@ export function initPlayer() {
   bindProgress();
   bindDrawer();
 
-  on('library', () => {
+  on(EVENTS.library, () => {
     if (!state.currentSong && audio.hasAttribute('src')) {
       stopPlayback();
     } else if (state.currentSong) {
@@ -80,7 +80,7 @@ export function initPlayer() {
     renderQueueBadge();
     if (drawerOpen) renderDrawer();
   });
-  on('favorites', renderPlayer);
+  on(EVENTS.favorites, renderPlayer);
 
   renderPlayer();
   renderQueueBadge();
@@ -109,7 +109,7 @@ function bindAudio() {
     state.playing = true;
     setError('');
     renderPlayer();
-    emit('player');
+    emit(EVENTS.player);
   });
   audio.addEventListener('playing', () => {
     failureStreak = 0;
@@ -117,7 +117,7 @@ function bindAudio() {
   audio.addEventListener('pause', () => {
     state.playing = false;
     renderPlayer();
-    emit('player');
+    emit(EVENTS.player);
   });
   audio.addEventListener('ended', handleEnded);
   audio.addEventListener('error', handleAudioError);
@@ -223,7 +223,7 @@ export function playSong(song, newQueue = null, forcePlay = false) {
     renderPlayer();
     renderQueueBadge();
     if (drawerOpen) renderDrawer();
-    emit('queue');
+    emit(EVENTS.queue);
     return;
   }
 
@@ -235,8 +235,8 @@ export function playSong(song, newQueue = null, forcePlay = false) {
   renderPlayer();
   renderQueueBadge();
   if (drawerOpen) renderDrawer();
-  emit('player');
-  emit('queue');
+  emit(EVENTS.player);
+  emit(EVENTS.queue);
   void loadSongSource(song, { autoplay: true });
 }
 
@@ -297,7 +297,7 @@ async function loadSongSource(song, { autoplay = true, restoreTime = 0 } = {}) {
 
 async function fetchTrack(path) {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 20000);
+  const timer = window.setTimeout(() => controller.abort(), playerConfig().loadTimeoutMs);
   try {
     const response = await fetch(assetUrl(path), { signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -340,7 +340,7 @@ export function nextTrack(forcePlay = true) {
     return;
   }
 
-  if (state.prefs.playMode === 'shuffle') {
+  if (state.prefs.playMode === PLAY_MODES.shuffle) {
     let nextIndex = state.queueIndex;
     while (nextIndex === state.queueIndex) {
       nextIndex = Math.floor(Math.random() * state.queue.length);
@@ -357,7 +357,7 @@ export function nextTrack(forcePlay = true) {
 
 export function prevTrack(forcePlay = true) {
   if (state.queue.length === 0) return;
-  if (audio.currentTime > 3) {
+  if (audio.currentTime > playerConfig().restartThresholdSeconds) {
     seek(0);
     if (!state.playing && forcePlay) audio.play().catch(() => {});
     return;
@@ -374,7 +374,7 @@ export function prevTrack(forcePlay = true) {
 }
 
 function handleEnded() {
-  if (state.prefs.playMode === 'repeat-one') {
+  if (state.prefs.playMode === PLAY_MODES.repeatOne) {
     audio.currentTime = 0;
     setProgressUi();
     audio.play().catch(() => {});
@@ -394,17 +394,17 @@ function failCurrent(reason) {
   state.playing = false;
   failureStreak += 1;
 
-  if (state.queue.length > 1 && failureStreak <= MAX_AUTO_SKIPS) {
+  if (state.queue.length > 1 && failureStreak <= playerConfig().maxAutoSkips) {
     setError(`《${song.title}》${reason}，已自动跳到下一首`);
     renderPlayer();
-    emit('player');
+    emit(EVENTS.player);
     nextTrack(true);
     return;
   }
 
   setError(`《${song.title}》${reason}：文件可能已损坏或被移动`);
   renderPlayer();
-  emit('player');
+  emit(EVENTS.player);
 }
 
 export function removeFromQueue(index) {
@@ -425,8 +425,8 @@ export function removeFromQueue(index) {
   renderPlayer();
   renderQueueBadge();
   renderDrawer();
-  emit('queue');
-  emit('player');
+  emit(EVENTS.queue);
+  emit(EVENTS.player);
 }
 
 function clearQueue() {
@@ -435,8 +435,8 @@ function clearQueue() {
   stopPlayback();
   renderQueueBadge();
   renderDrawer();
-  emit('queue');
-  emit('player');
+  emit(EVENTS.queue);
+  emit(EVENTS.player);
 }
 
 function stopPlayback() {
@@ -493,10 +493,11 @@ export function toggleMute() {
 }
 
 function cycleRate() {
-  const currentIndex = RATE_CYCLE.findIndex(
+  const rates = playerConfig().rates;
+  const currentIndex = rates.findIndex(
     (rate) => Math.abs(rate - state.prefs.playbackRate) < 0.001,
   );
-  const next = RATE_CYCLE[(currentIndex + 1) % RATE_CYCLE.length];
+  const next = rates[(currentIndex + 1) % rates.length];
   state.prefs.playbackRate = next;
   audio.playbackRate = next;
   persistPrefs(true);
@@ -525,7 +526,7 @@ export async function exportSong(key) {
   exporting = true;
   renderPlayer();
   try {
-    const result = await invoke('export_track', { key });
+    const result = await invoke(COMMANDS.exportTrack, { key });
     if (result) {
       toast(`已导出到 ${result.path}`, 'success');
     }
@@ -568,7 +569,7 @@ function renderPlayer() {
   }
 
   const category = state.library.categories.find((item) => item.id === song.category);
-  const color = category?.color ?? '#4ade80';
+  const color = category?.color ?? DEFAULT_ACCENT;
 
   els.title.textContent = song.title;
   els.title.title = song.title;
@@ -585,13 +586,13 @@ function renderPlayer() {
   setIcon(els.play, state.playing ? 'pause-fill' : 'play-fill');
   els.play.title = state.playing ? '暂停 (空格)' : '播放 (空格)';
   els.play.style.boxShadow = state.playing
-    ? `inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 20px -6px rgba(74, 222, 128, 0.6), 0 0 26px ${withAlpha(color, 0.45)}`
+    ? `inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 20px -6px ${withAlpha(DEFAULT_ACCENT, 0.6)}, 0 0 26px ${withAlpha(color, 0.45)}`
     : '';
 
   const mode = modeMeta(state.prefs.playMode);
   setIcon(els.mode, mode.icon);
   els.mode.title = mode.title;
-  els.mode.classList.toggle('is-active', state.prefs.playMode !== 'sequence');
+  els.mode.classList.toggle('is-active', state.prefs.playMode !== PLAY_MODES.sequence);
 
   els.rate.textContent = formatRate(state.prefs.playbackRate);
   els.rate.title = `当前 ${formatRate(state.prefs.playbackRate)}，点击切换倍速`;
@@ -617,9 +618,9 @@ function renderPlayer() {
 
 function modeMeta(mode) {
   switch (mode) {
-    case 'repeat-one':
+    case PLAY_MODES.repeatOne:
       return { icon: 'repeat-1', title: '单曲循环（点击切换）' };
-    case 'shuffle':
+    case PLAY_MODES.shuffle:
       return { icon: 'shuffle', title: '随机播放（点击切换）' };
     default:
       return { icon: 'repeat', title: '顺序播放（点击切换）' };
@@ -698,7 +699,7 @@ function renderDrawer() {
 
   state.queue.forEach((song, index) => {
     const category = state.library.categories.find((item) => item.id === song.category);
-    const color = category?.color ?? '#4ade80';
+    const color = category?.color ?? DEFAULT_ACCENT;
     const isCurrent = state.currentKey === song.key;
 
     const left = el('div', { class: 'queue-item-left' });

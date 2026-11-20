@@ -21,7 +21,19 @@ import {
   toggleFavoritesOnly,
   visibleSongs,
 } from './store.js';
-import { CATEGORY_ICONS, equalizer, setIcon } from './icons.js';
+import {
+  ALL_CATEGORY,
+  COMMANDS,
+  DEFAULT_ACCENT,
+  EVENTS,
+  FAVORITES_ACCENT,
+  HERO_KINDS,
+  LIBRARY_SOURCES,
+  PLAY_MODES,
+  SORT_KEYS,
+} from './constants.js';
+import { applyConfig, formatCopy, heroCopy } from './config.js';
+import { equalizer, setIcon } from './icons.js';
 import { showModal } from './modal.js';
 import { el, normalizeError, toast, withAlpha } from './ui.js';
 import { exportSong, playSong, playSongWithMode } from './player.js';
@@ -34,20 +46,29 @@ let warningsDismissed = false;
 let selectionAnchor = null;
 let contextMenu = null;
 
-const ALL_HERO = {
-  title: '全部精选视频剪辑 BGM',
-  labelEn: 'ALL BGM SOUNDTRACKS',
-  color: '#4ade80',
-  icon: 'music',
-};
+function allHero() {
+  const copy = heroCopy(HERO_KINDS.all);
+  return {
+    title: copy.title,
+    labelEn: copy.labelEn,
+    color: DEFAULT_ACCENT,
+    icon: 'music',
+    description: formatCopy(copy.description, {
+      categories: state.library.categories.map((category) => category.nameZh).join('、'),
+    }),
+  };
+}
 
-const FAVORITES_HERO = {
-  title: '我的收藏夹 · Favorite Tracks',
-  labelEn: 'FAVORITES',
-  color: '#ec4899',
-  icon: 'heart',
-  description: '你标记喜欢的配乐都在这里，方便在剪辑过程中随时试听与导出使用。',
-};
+function favoritesHero() {
+  const copy = heroCopy(HERO_KINDS.favorites);
+  return {
+    title: copy.title,
+    labelEn: copy.labelEn,
+    color: FAVORITES_ACCENT,
+    icon: 'heart',
+    description: copy.description,
+  };
+}
 
 function $(id) {
   return document.getElementById(id);
@@ -95,7 +116,7 @@ export function initLibraryUI() {
   setIcon(els.brandLogo, 'disc');
   els.brandLogo.querySelector('svg')?.classList.add('disc-spin');
 
-  els.navAll.addEventListener('click', () => setCategory('all'));
+  els.navAll.addEventListener('click', () => setCategory(ALL_CATEGORY));
   els.navFavorites.addEventListener('click', toggleFavoritesOnly);
   els.btnAddCategory.addEventListener('click', () => void openCreateCategory());
   els.tabStrip.addEventListener('contextmenu', (event) => {
@@ -155,7 +176,11 @@ export function initLibraryUI() {
   });
   els.btnRescan.addEventListener('click', () => {
     void runStatusTask(els.btnRescan, async () => {
-      const snapshot = await invoke('rescan_library');
+      // 重新扫描前先热加载 config.json，文案与播放参数改动无需重启应用。
+      const reload = await invoke(COMMANDS.reloadConfig);
+      applyConfig(reload.config);
+      for (const warning of reload.warnings ?? []) toast(warning, 'error');
+      const snapshot = await invoke(COMMANDS.rescanLibrary);
       replaceLibrary(snapshot);
       toast(`曲库已刷新：${snapshot.songs.length} 首`, 'success');
     });
@@ -165,14 +190,14 @@ export function initLibraryUI() {
   });
   els.btnReset.addEventListener('click', () => {
     void runStatusTask(els.btnReset, async () => {
-      const snapshot = await invoke('reset_library_dir');
+      const snapshot = await invoke(COMMANDS.resetLibraryDir);
       replaceLibrary(snapshot);
       toast('已恢复内置曲库', 'success');
     });
   });
   els.btnOpen.addEventListener('click', () => {
     void runStatusTask(els.btnOpen, async () => {
-      await invoke('open_library_dir');
+      await invoke(COMMANDS.openLibraryDir);
     });
   });
 
@@ -210,29 +235,29 @@ export function initLibraryUI() {
   document.addEventListener('scroll', closeContextMenu, true);
   window.addEventListener('blur', closeContextMenu);
 
-  on('library', () => {
+  on(EVENTS.library, () => {
     warningsDismissed = false;
     renderAll();
   });
-  on('view', () => {
+  on(EVENTS.view, () => {
     renderSidebar();
     renderHero();
     renderResults();
     renderList();
   });
-  on('search', () => {
+  on(EVENTS.search, () => {
     updateSearchUi();
     renderHero();
     renderResults();
     renderList();
   });
-  on('favorites', () => {
+  on(EVENTS.favorites, () => {
     renderSidebar();
     renderHero();
     renderList();
   });
-  on('selection', updateSelectionUi);
-  on('player', renderList);
+  on(EVENTS.selection, updateSelectionUi);
+  on(EVENTS.player, renderList);
 
   els.sortSelect.value = state.sortBy;
   renderAll();
@@ -336,6 +361,11 @@ function openCategoryMenu(event, category) {
     label: '打开分类配置文件',
     action: () => void openCategoriesFile(),
   });
+  items.push({
+    icon: 'edit',
+    label: '打开应用配置文件',
+    action: () => void openConfigFile(),
+  });
   showContextMenu(event, items);
 }
 
@@ -354,12 +384,12 @@ function openSongMenu(event, song) {
     {
       icon: 'repeat',
       label: '顺序播放',
-      action: () => playSongWithMode(song, list, 'sequence'),
+      action: () => playSongWithMode(song, list, PLAY_MODES.sequence),
     },
     {
       icon: 'shuffle',
       label: '随机播放',
-      action: () => playSongWithMode(song, list, 'shuffle'),
+      action: () => playSongWithMode(song, list, PLAY_MODES.shuffle),
     },
     separator(),
     {
@@ -424,7 +454,7 @@ async function openCreateCategory() {
   if (!values) return;
 
   try {
-    const result = await invoke('create_category', {
+    const result = await invoke(COMMANDS.createCategory, {
       name: values.name,
       id: values.id.trim() || null,
     });
@@ -465,7 +495,7 @@ async function openEditCategory(category) {
   if (sameName && sameColor) return;
 
   try {
-    const result = await invoke('update_category', {
+    const result = await invoke(COMMANDS.updateCategory, {
       id: category.id,
       name: values.name,
       color: values.color,
@@ -479,8 +509,17 @@ async function openEditCategory(category) {
 
 async function openCategoriesFile() {
   try {
-    await invoke('open_categories_file');
+    await invoke(COMMANDS.openCategoriesFile);
     toast('已在文件管理器中定位 categories.json', 'success');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openConfigFile() {
+  try {
+    await invoke(COMMANDS.openConfigFile);
+    toast('已在文件管理器中定位 config.json，修改后点「重新扫描」热加载', 'success');
   } catch (error) {
     toast(normalizeError(error), 'error');
   }
@@ -505,7 +544,7 @@ async function openRenameTrack(song) {
   if (!values || values.title.trim() === song.title) return;
 
   try {
-    const result = await invoke('update_track', {
+    const result = await invoke(COMMANDS.updateTrack, {
       key: song.key,
       title: values.title,
       category: song.category,
@@ -518,7 +557,7 @@ async function openRenameTrack(song) {
 }
 
 function preferredCategory() {
-  if (!state.favoritesOnly && state.category !== 'all') return state.category;
+  if (!state.favoritesOnly && state.category !== ALL_CATEGORY) return state.category;
   return state.library.categories[0]?.id ?? '';
 }
 
@@ -540,7 +579,7 @@ async function openImport() {
   if (!values) return;
 
   try {
-    const result = await invoke('import_tracks', { category: values.category });
+    const result = await invoke(COMMANDS.importTracks, { category: values.category });
     if (!result) return;
     applyMutation(result);
     if (result.report.succeeded > 0) {
@@ -581,7 +620,7 @@ async function openEdit(song) {
   if (values.title.trim() === song.title && values.category === song.category) return;
 
   try {
-    const result = await invoke('update_track', {
+    const result = await invoke(COMMANDS.updateTrack, {
       key: song.key,
       title: values.title,
       category: values.category,
@@ -612,7 +651,7 @@ async function openMove(keys = selectedKeys(), title = null) {
   if (!values) return;
 
   try {
-    const result = await invoke('move_tracks', {
+    const result = await invoke(COMMANDS.moveTracks, {
       keys,
       category: values.category,
     });
@@ -628,7 +667,7 @@ async function exportSelection() {
   const keys = selectedKeys();
   if (keys.length === 0) return;
   try {
-    const result = await invoke('export_tracks', { keys });
+    const result = await invoke(COMMANDS.exportTracks, { keys });
     if (!result) return;
     reportToast(result.report, `导出完成 · ${result.dir}`);
   } catch (error) {
@@ -639,7 +678,7 @@ async function exportSelection() {
 async function deleteSongs(keys) {
   if (!keys || keys.length === 0) return;
   try {
-    const result = await invoke('delete_tracks', { keys });
+    const result = await invoke(COMMANDS.deleteTracks, { keys });
     if (!result) return;
     applyMutation(result);
     reportToast(result.report, '删除完成');
@@ -665,7 +704,7 @@ function reportToast(report, fallback) {
 }
 
 async function chooseLibrary() {
-  const snapshot = await invoke('choose_library_dir');
+  const snapshot = await invoke(COMMANDS.chooseLibraryDir);
   if (snapshot) {
     replaceLibrary(snapshot);
     toast(`已切换曲库目录：${snapshot.root}`, 'success');
@@ -697,7 +736,10 @@ function renderSidebar() {
   els.countAll.textContent = String(state.library.songs.length);
   els.countFavorites.textContent = String(favoriteCount());
 
-  els.navAll.classList.toggle('is-active', state.category === 'all' && !state.favoritesOnly);
+  els.navAll.classList.toggle(
+    'is-active',
+    state.category === ALL_CATEGORY && !state.favoritesOnly,
+  );
   els.navFavorites.classList.toggle('is-active', state.favoritesOnly);
 
   els.categoryNav.replaceChildren();
@@ -727,21 +769,15 @@ function renderSidebar() {
 }
 
 function heroInfo() {
-  if (state.favoritesOnly) return FAVORITES_HERO;
-  if (state.category === 'all') {
-    const names = state.library.categories.map((category) => category.nameZh).join('、');
-    return {
-      ...ALL_HERO,
-      description: `汇集${names}等分类的优质背景音乐，覆盖 Vlog、宣传片、故事片、卡点等全场景剪辑需求。`,
-    };
-  }
+  if (state.favoritesOnly) return favoritesHero();
+  if (state.category === ALL_CATEGORY) return allHero();
   const category = categoryById(state.category);
-  if (!category) return ALL_HERO;
+  if (!category) return allHero();
   return {
     title: category.title,
     labelEn: category.labelEn,
     color: category.color,
-    icon: CATEGORY_ICONS[category.id] ?? 'music',
+    icon: category.icon || 'music',
     description: category.description,
   };
 }
@@ -799,10 +835,10 @@ function renderHero() {
 }
 
 function renderResults() {
-  let title = '全部音乐素材';
+  let title = heroCopy(HERO_KINDS.all).resultsTitle;
   if (state.favoritesOnly) {
-    title = '我的收藏夹';
-  } else if (state.category !== 'all') {
+    title = heroCopy(HERO_KINDS.favorites).resultsTitle;
+  } else if (state.category !== ALL_CATEGORY) {
     const category = categoryById(state.category);
     if (!category) {
       title = '音频列表';
@@ -910,7 +946,7 @@ function renderEmptyState() {
 
 function buildRow(song, index) {
   const category = categoryById(song.category);
-  const color = category?.color ?? '#4ade80';
+  const color = category?.color ?? DEFAULT_ACCENT;
   const isCurrent = state.currentKey === song.key;
   const isPlaying = isCurrent && state.playing;
   const isFavorite = state.favorites.has(song.key);
@@ -975,7 +1011,7 @@ function buildRow(song, index) {
   });
   setIcon(remove, 'trash');
 
-  const canDrag = state.sortBy === 'default';
+  const canDrag = state.sortBy === SORT_KEYS.recommended;
   return el(
     'div',
     {
@@ -1117,7 +1153,7 @@ function renderStatus() {
   els.statusCount.textContent = `${state.library.songs.length} 首`;
   els.statusPath.textContent = `${sourceLabel()} · ${state.library.root || '未找到曲库目录'}`;
   els.statusPath.title = state.library.root;
-  els.btnReset.hidden = state.library.source !== 'custom';
+  els.btnReset.hidden = state.library.source !== LIBRARY_SOURCES.custom;
   els.statusIndicator?.classList.toggle(
     'is-warn',
     state.library.warnings.length > 0,

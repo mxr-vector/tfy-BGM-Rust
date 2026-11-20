@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::limits::MAX_STEM_CHARS;
+
 /// 复制源音频到目标路径，成功后返回复制字节数。
 /// 大小校验失败时会删除目标文件，避免留下不完整的音频。
 fn same_file(source: &Path, destination: &Path) -> bool {
@@ -55,7 +57,7 @@ pub fn safe_file_name(title: &str) -> String {
     if trimmed.is_empty() {
         "audio".to_owned()
     } else {
-        trimmed.chars().take(120).collect()
+        trimmed.chars().take(MAX_STEM_CHARS).collect()
     }
 }
 

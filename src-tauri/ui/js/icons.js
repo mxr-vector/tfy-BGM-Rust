@@ -1,3 +1,5 @@
+import { DEFAULT_ACCENT } from './constants.js';
+
 const PATHS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -59,18 +61,9 @@ const PATHS = {
 const SVG_OPEN =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
 
-export const CATEGORY_ICONS = {
-  cheerful: 'sparkles',
-  solitude: 'coffee',
-  memories: 'clock',
-  epic: 'flame',
-  gufeng: 'feather',
-  country: 'sun',
-};
-
 export function icon(name) {
   const wrapper = document.createElement('span');
-  wrapper.innerHTML = `${SVG_OPEN}${PATHS[name] ?? ''}</svg>`;
+  wrapper.innerHTML = `${SVG_OPEN}${PATHS[name] ?? PATHS.music}</svg>`;
   return wrapper.firstElementChild;
 }
 
@@ -93,7 +86,7 @@ export function applyStaticIcons(root = document) {
   }
 }
 
-export function equalizer(color = '#4ade80') {
+export function equalizer(color = DEFAULT_ACCENT) {
   const box = document.createElement('div');
   box.className = 'equalizer';
   for (let index = 0; index < 4; index += 1) {

@@ -1,18 +1,24 @@
 //! 曲库分类元数据：目录名、展示文案与主题色的唯一事实来源。
 //!
-//! 内置 6 个分类作为默认值；用户配置保存在应用配置目录的 `categories.json`，
-//! 可直接编辑该文件后重新扫描生效，也可在界面中右键重命名或新增分类。
+//! 内置 6 个分类以 `assets/categories.default.json` 为模板；用户配置保存在应用配置目录的
+//! `categories.json`，可直接编辑该文件后重新扫描生效，也可在界面中右键重命名或新增分类。
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const MAX_COMPONENT_CHARS: usize = 40;
+use crate::limits::MAX_NAME_CHARS;
+use crate::persist::{PersistError, write_json};
+
 const DEFAULT_DESCRIPTION: &str =
     "自定义分类：把同类风格的音频放入这个分类目录，重新扫描后即可试听与导出。";
+const DEFAULT_ICON: &str = "music";
+
+/// 内置分类模板，编译期嵌入，缺失时仍能生成完整分类。
+const BUILTIN_TEMPLATE: &str = include_str!("../assets/categories.default.json");
 
 const PALETTE: [&str; 8] = [
     "#22c55e", "#2dd4bf", "#84cc16", "#a3e635", "#f59e0b", "#f472b6", "#38bdf8", "#ef4444",
@@ -27,6 +33,8 @@ pub struct Category {
     pub name_en: String,
     pub label_en: String,
     pub color: String,
+    /// 界面图标名，对应前端 `icons.js` 中的图标键；留空时按目录名回退。
+    pub icon: String,
     pub title: String,
     pub description: String,
 }
@@ -42,13 +50,13 @@ pub struct Categories {
 pub enum CategoryError {
     #[error("分类名称不能为空")]
     EmptyName,
-    #[error("分类名称过长（最多 {MAX_COMPONENT_CHARS} 个字符）")]
+    #[error("分类名称过长（最多 {MAX_NAME_CHARS} 个字符）")]
     NameTooLong,
     #[error("分类名称包含非法字符：{0}")]
     InvalidName(String),
     #[error("分类目录名不能为空")]
     EmptyId,
-    #[error("分类目录名过长（最多 {MAX_COMPONENT_CHARS} 个字符）")]
+    #[error("分类目录名过长（最多 {MAX_NAME_CHARS} 个字符）")]
     IdTooLong,
     #[error("分类目录名包含非法字符：{0}")]
     InvalidId(String),
@@ -60,93 +68,13 @@ pub enum CategoryError {
     DuplicateName(String),
     #[error("分类不存在：{0}")]
     Missing(String),
-    #[error("创建分类配置目录失败：{0}")]
-    CreateDir(#[source] std::io::Error),
-    #[error("序列化分类配置失败：{0}")]
-    Serialize(#[from] serde_json::Error),
-    #[error("写入分类配置失败：{0}")]
-    Write(#[source] std::io::Error),
+    #[error(transparent)]
+    Persist(#[from] PersistError),
 }
 
-fn builtin(
-    id: &str,
-    name_zh: &str,
-    name_en: &str,
-    label_en: &str,
-    color: &str,
-    title: &str,
-    description: &str,
-) -> Category {
-    Category {
-        id: id.to_owned(),
-        name_zh: name_zh.to_owned(),
-        name_en: name_en.to_owned(),
-        label_en: label_en.to_owned(),
-        color: color.to_owned(),
-        title: title.to_owned(),
-        description: description.to_owned(),
-    }
-}
-
+/// 内置分类：从编译期嵌入的 JSON 模板解析，避免在代码里堆砌文案字面量。
 pub fn defaults() -> Categories {
-    Categories {
-        items: vec![
-            builtin(
-                "cheerful",
-                "欢快",
-                "Cheerful",
-                "CHEERFUL / UPBEAT",
-                "#f59e0b",
-                "欢快节奏 · Cheerful & Upbeat",
-                "适用于生活 Vlog、开箱解说、美食探店、搞笑趣味、快闪卡点等轻松愉悦的视频剪辑。",
-            ),
-            builtin(
-                "solitude",
-                "独处",
-                "Solitude",
-                "SOLITUDE / PEACEFUL",
-                "#2dd4bf",
-                "独处沉思 · Solitude & Chill",
-                "纯音乐、治愈钢琴、深夜独白、静心工作与自律学习视频的最佳背景配乐。",
-            ),
-            builtin(
-                "memories",
-                "回忆",
-                "Memories",
-                "MEMORIES / NOSTALGIA",
-                "#f472b6",
-                "时光回忆 · Memories & Nostalgia",
-                "温情故事、毕业季纪念、告白与重逢、岁月光影、情感纪实剪辑首选配乐。",
-            ),
-            builtin(
-                "epic",
-                "史诗",
-                "Epic",
-                "EPIC / MAJESTIC",
-                "#ef4444",
-                "震撼史诗 · Epic & Grand",
-                "气势磅礴的大片感战歌，适合燃向混剪、企业宣传片、运动高光、游戏集锦、宏大叙事。",
-            ),
-            builtin(
-                "gufeng",
-                "古风",
-                "GuFeng",
-                "GUFENG / TRADITIONAL",
-                "#10b981",
-                "东方古风 · Traditional Chinese",
-                "笛子、古筝、二胡等国风雅韵，完美契合汉服国风、古建文旅、武侠唯美剪辑。",
-            ),
-            builtin(
-                "country",
-                "乡村",
-                "Country",
-                "COUNTRY / FOLK",
-                "#84cc16",
-                "田园乡村 · Country & Rural",
-                "乡野烟火、农家田园、归隐慢生活、悠闲度假风景短视频的绝妙搭档。",
-            ),
-        ],
-    }
+    serde_json::from_str(BUILTIN_TEMPLATE).expect("内置分类模板必须是合法 JSON")
 }
 
 impl Default for Categories {
@@ -194,22 +122,7 @@ impl Categories {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), CategoryError> {
-        let parent = path.parent().ok_or_else(|| {
-            CategoryError::CreateDir(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("分类配置路径没有父目录：{}", path.display()),
-            ))
-        })?;
-        fs::create_dir_all(parent).map_err(CategoryError::CreateDir)?;
-        let bytes = serde_json::to_vec_pretty(self)?;
-
-        let tmp = temp_path(path);
-        fs::write(&tmp, &bytes).map_err(CategoryError::Write)?;
-        if fs::rename(&tmp, path).is_err() {
-            // Windows 上目标已存在时重命名可能失败，退化为直接覆盖。
-            fs::write(path, &bytes).map_err(CategoryError::Write)?;
-            let _ = fs::remove_file(&tmp);
-        }
+        write_json(path, self)?;
         Ok(())
     }
 
@@ -225,6 +138,7 @@ impl Categories {
             category.name_en = category.name_en.trim().to_owned();
             category.label_en = category.label_en.trim().to_owned();
             category.color = category.color.trim().to_owned();
+            category.icon = category.icon.trim().to_owned();
             category.title = category.title.trim().to_owned();
             category.description = category.description.trim().to_owned();
 
@@ -262,6 +176,9 @@ impl Categories {
             }
             if !is_hex_color(&category.color) {
                 category.color = PALETTE[index % PALETTE.len()].to_owned();
+            }
+            if category.icon.is_empty() {
+                category.icon = default_icon(&category.id).to_owned();
             }
             if category.title.is_empty() {
                 category.title = format!("{}音乐", category.name_zh);
@@ -320,6 +237,7 @@ impl Categories {
             name_en: name.clone(),
             label_en: name.to_uppercase(),
             color: self.next_color().to_owned(),
+            icon: DEFAULT_ICON.to_owned(),
             title: format!("{name}音乐"),
             description: DEFAULT_DESCRIPTION.to_owned(),
             name_zh: name,
@@ -376,10 +294,17 @@ impl Categories {
     }
 }
 
-fn temp_path(path: &Path) -> PathBuf {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    PathBuf::from(tmp)
+/// 内置分类的默认图标；用户自定义分类回退为通用音符。
+fn default_icon(id: &str) -> &'static str {
+    match id {
+        "cheerful" => "sparkles",
+        "solitude" => "coffee",
+        "memories" => "clock",
+        "epic" => "flame",
+        "gufeng" => "feather",
+        "country" => "sun",
+        _ => DEFAULT_ICON,
+    }
 }
 
 fn validate_name(value: &str) -> Result<String, CategoryError> {
@@ -387,7 +312,7 @@ fn validate_name(value: &str) -> Result<String, CategoryError> {
     if trimmed.is_empty() {
         return Err(CategoryError::EmptyName);
     }
-    if trimmed.chars().count() > MAX_COMPONENT_CHARS {
+    if trimmed.chars().count() > MAX_NAME_CHARS {
         return Err(CategoryError::NameTooLong);
     }
     if !is_valid_component(trimmed) {
@@ -401,7 +326,7 @@ fn validate_id(value: &str) -> Result<String, CategoryError> {
     if trimmed.is_empty() {
         return Err(CategoryError::EmptyId);
     }
-    if trimmed.chars().count() > MAX_COMPONENT_CHARS {
+    if trimmed.chars().count() > MAX_NAME_CHARS {
         return Err(CategoryError::IdTooLong);
     }
     if !is_valid_component(trimmed) {
@@ -436,6 +361,7 @@ mod tests {
         let ids: HashSet<_> = categories.items.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids.len(), categories.items.len());
         assert_eq!(categories.items.len(), 6);
+        assert!(categories.items.iter().all(|c| !c.icon.is_empty()));
     }
 
     #[test]
@@ -453,6 +379,7 @@ mod tests {
         let travel = loaded.by_id("旅行").unwrap();
         assert_eq!(travel.name_zh, "旅拍");
         assert_eq!(travel.title, "旅拍音乐");
+        assert_eq!(travel.icon, DEFAULT_ICON);
     }
 
     #[test]

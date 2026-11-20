@@ -14,11 +14,9 @@ use thiserror::Error;
 
 use crate::categories::Category;
 use crate::export::{ExportError, copy_validated, safe_file_name};
-use crate::library::Song;
-
-const MAX_STEM_CHARS: usize = 120;
-const MAX_KEY_LEN: usize = 512;
-const TRASH_DIR: &str = ".tfy-trash";
+use crate::library::{AUDIO_EXTENSION, Song};
+use crate::limits::{MAX_KEY_LEN, MAX_STEM_CHARS};
+use crate::paths::TRASH_DIR_NAME as TRASH_DIR;
 
 /// 单批操作的结果统计，直接序列化给前端展示。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -86,7 +84,7 @@ pub enum OpError {
     TargetExists(PathBuf),
     #[error("源文件不存在或不是文件：{}", .0.display())]
     SourceMissing(PathBuf),
-    #[error("只支持 mp3 音频：{}", .0.display())]
+    #[error("只支持 {AUDIO_EXTENSION} 音频：{}", .0.display())]
     UnsupportedFormat(PathBuf),
     #[error("曲目路径无效：{}", .0.display())]
     InvalidFile(PathBuf),
@@ -175,7 +173,7 @@ fn import_one(
         return Err(OpError::TitleTooLong);
     }
 
-    let target = unique_path(dir, &stem, "mp3");
+    let target = unique_path(dir, &stem, AUDIO_EXTENSION);
     copy_validated(source, &target)?;
     let name = target
         .file_name()
@@ -282,13 +280,13 @@ pub fn update_song(
     let target_dir = root.join(target_category);
     fs::create_dir_all(&target_dir)?;
     let target = if renamed {
-        let exact = target_dir.join(format!("{stem}.mp3"));
+        let exact = target_dir.join(format!("{stem}.{AUDIO_EXTENSION}"));
         if exact.exists() && !same_file(&source, &exact) {
             return Err(OpError::TargetExists(exact));
         }
         exact
     } else {
-        unique_path(&target_dir, &stem, "mp3")
+        unique_path(&target_dir, &stem, AUDIO_EXTENSION)
     };
 
     if !same_file(&source, &target) {
@@ -387,7 +385,7 @@ pub fn export_songs(
             }
         };
         let stem = safe_file_name(&song.title);
-        let target = unique_path(dest_dir, &stem, "mp3");
+        let target = unique_path(dest_dir, &stem, AUDIO_EXTENSION);
         match copy_validated(&source, &target) {
             Ok(_) => outcome.report.succeeded += 1,
             Err(error) => outcome.report.fail(format!("{}：{error}", song.title)),
@@ -448,7 +446,7 @@ fn song_file_path(root: &Path, categories: &[Category], song: &Song) -> Result<P
 fn is_mp3(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(AUDIO_EXTENSION))
 }
 
 fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
@@ -476,10 +474,10 @@ fn unique_trash_dir(root: &Path) -> PathBuf {
 
 fn unique_trash_path(batch_dir: &Path, song: &Song, used: &mut HashSet<String>) -> PathBuf {
     let safe = safe_file_name(&song.title);
-    let mut name = format!("{}__{safe}.mp3", song.category);
+    let mut name = format!("{}__{safe}.{AUDIO_EXTENSION}", song.category);
     let mut suffix = 2;
     while used.contains(&name) || batch_dir.join(&name).exists() {
-        name = format!("{}__{safe} ({suffix}).mp3", song.category);
+        name = format!("{}__{safe} ({suffix}).{AUDIO_EXTENSION}", song.category);
         suffix += 1;
     }
     used.insert(name.clone());
