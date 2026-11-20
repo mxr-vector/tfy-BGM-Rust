@@ -1,11 +1,8 @@
 # 听风吟 · TFY BGM
 
 专为视频剪辑打造的本地 BGM 音频素材库桌面客户端，基于 **Rust + Tauri 2** 构建。
-分类扫描、收藏、检索、队列与全功能播放器全部在本地完成，不依赖浏览器与 Node 运行时。
-
-> 本仓库已从 Vue 3 + Vite Web 应用迁移为 Rust + Tauri 桌面客户端：
-> 旧的 `src/`、`public/`、`package.json`、`vite.config.ts` 等 Web 实现已移除，
-> 前端改为 `src-tauri/ui/` 下的原生 HTML / CSS / ES Modules，业务逻辑集中在 Rust。
+分类扫描、收藏、检索、队列与全功能播放器全部在本地完成，离线可用、不含前端构建链；
+界面为 `src-tauri/ui/` 下的原生 HTML / CSS / ES Modules，业务逻辑集中在 Rust。
 
 ---
 
@@ -13,7 +10,7 @@
 
 | 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
-| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名；外置挂载，不打进 exe / 安装包 |
+| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名；外置存放，不打进 exe / 安装包 |
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、导入/重命名/移动/软删除、分类元数据、应用配置、偏好持久化、导出校验；可独立测试 |
 | 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 内置 6 个分类的默认文案与图标，编译期嵌入 |
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录解析、命令与资源授权 |
@@ -31,8 +28,8 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 
 ## 🗂 分类与目录规范
 
-曲名直接取文件名（下划线 `_` 显示为空格），增删 / 替换 mp3 后重新扫描即可生效，
-不再有 `songs.json` 或构建期虚拟清单。
+曲名直接取文件名（下划线 `_` 显示为空格），曲库内容完全由磁盘目录决定，
+增删 / 替换 mp3 后重新扫描即可生效。
 
 | 中文分类 | 目录名 | 适用剪辑场景 |
 | :--- | :--- | :--- |
@@ -58,6 +55,8 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
   `nameZh`、`nameEn`、`labelEn`、`color`、`icon`（界面图标名）、`title`、`description`。
   缺失字段会自动补全，损坏或为空时回退为内置分类。修改文件后点击左侧栏「曲库管理 → 重新扫描」即可刷新。
   每次新增 / 编辑分类以及重新扫描时，应用都会先重新读取该文件，手工编辑不会丢失。
+
+---
 
 ## ⚙️ 应用配置 config.json
 
@@ -87,7 +86,7 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 1. 环境变量 `TFY_BGM_DIR`（适合开发与可移动硬盘）；
 2. 界面上「切换曲库目录」选择并持久化的文件夹；
 3. 开发模式（debug）下的仓库根目录 `bgm/`；
-4. **exe 同级的 `bgm/`**（绿色版默认外置挂载点）；
+4. **exe 同级的 `bgm/`**（绿色版默认曲库位置）；
 5. 当前工作目录下的 `bgm/`；
 6. 应用配置目录 `%APPDATA%\com.yuanjie.tfybgm\bgm`。
 
@@ -102,8 +101,8 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 
 1. **本地曲库与分类检索**
    - 内置 6 个分类（可右键编辑名称与主题色、用 `＋` 新增自定义分类）、收藏夹、实时搜索（曲名 / 中英文分类名 / 目录名）。
-   - 默认推荐排序与按曲名排序（`Intl.Collator` 中文排序）。
-   - 默认排序下支持拖动行调整顺序（仅内存，不写盘）。
+   - 两种排序：推荐（默认）与按曲名（`Intl.Collator` 中文排序）。
+   - 「推荐」排序下可拖动行调整顺序（仅内存，不写盘）。
 2. **曲库文件管理（CRUD）**
    - **分类**：右键分类标签或曲目分类标签编辑名称 / 主题色，`＋` 或右键菜单新增分类，
      右键菜单可直接打开本地 `categories.json` 配置文件。
@@ -130,9 +129,9 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
 6. **配置化与可维护性**
    - 品牌文案、界面文案、播放器行为参数集中在 `config.json`，分类文案与图标由 `categories.json` 维护。
    - 前端事件名、Tauri 命令名、播放模式等契约字符串统一收敛在 `js/constants.js`，
-     内置分类模板改为 `assets/categories.default.json`，修改文案不需要改代码。
+     内置分类模板位于 `core/assets/categories.default.json`，修改文案不需要改代码。
 7. **桌面体验**
-   - 无 Node / npm 运行时依赖，离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
+   - 无 Node / npm 依赖，离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
    - 中文本地字体栈，不请求任何远程字体或第三方资源。
 
 ### 键盘快捷键
@@ -166,30 +165,31 @@ tfy-bgm.exe ──┬─ Rust 启动扫描 ──▶ LibrarySnapshot ──IPC�
     sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
       libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
     ```
-  - **macOS**：Xcode Command Line Tools；**Windows**：MSVC 生成工具 + WebView2 Runtime。
+  - **macOS**：Xcode Command Line Tools。
+  - **Windows**：Rust MSVC toolchain + Visual Studio Build Tools（勾选「使用 C++ 的桌面开发」）+ WebView2 Runtime（Win10/11 一般已预装）。
 - 音频由系统 WebView 解码，Linux 上如遇无声 / 无法拖动进度，请补装 GStreamer 插件：
   `sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-ugly`（Debian/Ubuntu 对应 `gstreamer1.0-plugins-good` / `-ugly`）。
 
 ### 启动开发版
 
-任选一种方式（项目本身不需要 Node 依赖）：
+任选一种方式（项目本身不含前端构建链）：
 
 ```bash
-# 方式一：Rust 原生 CLI（推荐）
-cargo install tauri-cli --version "^2" --locked   # 首次安装
-cd src-tauri
-cargo tauri dev
+# 方式一：Rust 原生 CLI（推荐，首次需安装）
+cargo install tauri-cli --version "^2" --locked
+cd src-tauri && cargo tauri dev
 
-# 方式二：临时使用官方 CLI，不在项目中留下 node_modules
+# 方式二：临时调用官方 CLI，不往项目里装前端依赖（仓库根目录执行）
 pnpm dlx @tauri-apps/cli@^2 dev
 ```
 
-前端是 `frontendDist` 目录中的静态文件，由 Tauri 内置服务器直接读取：
+`tauri.conf.json` 的 `frontendDist` 直接指向 `ui/`，由 Tauri 内置服务器读取静态文件：
 修改 `src-tauri/ui/` 后刷新窗口（`Ctrl+R`）即可，无需前端构建；Rust 改动会自动重编译。
 
 ### 打包 Windows 可运行程序
 
 音频不进入 exe，也不进入安装包；程序运行时从外置 `bgm/` 读取。
+绿色版包里的 `bgm/` 与 exe 并排，属于外置文件，整个文件夹可以替换或删除。
 
 #### 方式一：绿色版（exe + 外置 bgm，推荐）
 
@@ -224,7 +224,12 @@ powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
 powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
 ```
 
-旧的 `-WithBgm` 参数仍然可用，等同于默认行为。重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。`-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。脚本检测到 `dist\tfy-bgm` 下的程序正在运行时会提示先关闭，避免覆盖失败。
+打包脚本的几条约定：
+
+- `-WithBgm` 仍可传入，等同于默认行为。
+- 重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。
+- `-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。
+- 检测到 `dist\tfy-bgm` 下的程序正在运行时会提示先关闭，避免覆盖失败。
 
 把整个 `dist\tfy-bgm` 文件夹压缩后即可分发。目标机器需要 WebView2 Runtime（Windows 10/11 通常已自带；缺失时安装微软官方运行时即可）。
 
@@ -236,17 +241,10 @@ cd src-tauri
 cargo tauri build --bundles nsis
 ```
 
-产物：`src-tauri/target/release/bundle/nsis/tfy-bgm_0.1.0_x64-setup.exe`。
+产物：`src-tauri/target/release/bundle/nsis/tfy-bgm_<版本>_x64-setup.exe`。
 安装包不包含音频，体积与普通桌面应用相当；默认按当前用户安装到可写目录，首次启动会在 exe 同级创建 `bgm/`，也可通过「切换曲库目录」指向任意位置。
 
 > `cargo tauri build` 不带 `--bundles` 时会按 `tauri.conf.json` 的 `targets: "all"` 尝试 NSIS 与 MSI；MSI 依赖 WiX，日常分发用 NSIS 即可。
-
-#### 环境要求（Windows）
-
-- Rust 1.90+（MSVC toolchain）；
-- Visual Studio Build Tools，勾选「使用 C++ 的桌面开发」；
-- WebView2 Runtime（Win10/11 一般已预装）；
-- 仅打安装包时需要 Tauri CLI。
 
 ---
 
@@ -301,16 +299,6 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 
 任一文件损坏或缺失时都会回退为对应默认值，不会阻止应用启动；
 `config.json` 与 `categories.json` 修改后可点「重新扫描」热加载，`prefs.json` 由应用自行维护。
-
----
-
-## 🔁 从旧 Web 版迁移
-
-- 曲库目录由 `public/bgm/` 迁移为仓库根目录的 `bgm/`，音频随桌面应用打包或指向任意本地目录。
-- 收藏、音量、倍速等状态从浏览器 `localStorage` 迁移到应用配置目录的 `prefs.json`；
-  旧浏览器里的收藏不会自动导入，可在客户端中重新收藏。
-- 旧的云盘地址配置（`VITE_BGM_BASE`）与静态站点发布方式已移除，桌面端直接读取本地文件。
-- 旧版 Vue/Vite 源码、`package.json`、`index.html` 等已从仓库删除，客户端不含 Node 构建链。
 
 ---
 
