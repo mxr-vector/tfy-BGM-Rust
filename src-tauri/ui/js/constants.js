@@ -66,6 +66,6 @@ export const HERO_KINDS = Object.freeze({
 });
 
 /** 未取到分类颜色时的主题绿。 */
-export const DEFAULT_ACCENT = '#4ade80';
+export const DEFAULT_ACCENT = '#19d98b';
 /** 收藏页主题色。 */
 export const FAVORITES_ACCENT = '#ec4899';

@@ -3,6 +3,7 @@ import { emit, on, persistPrefs, songByKey, state, toggleFavorite } from './stor
 import { COMMANDS, DEFAULT_ACCENT, EVENTS, PLAY_MODES } from './constants.js';
 import { playerConfig } from './config.js';
 import { equalizer, setIcon } from './icons.js';
+import { showModal } from './modal.js';
 import { clamp, el, formatTime, normalizeError, toast, withAlpha } from './ui.js';
 
 const audio = new Audio();
@@ -41,6 +42,8 @@ export function initPlayer() {
     title: $('now-title'),
     category: $('now-category'),
     sub: $('now-sub'),
+    cover: $('now-cover'),
+    coverIcon: $('now-cover-icon'),
     favorite: $('btn-now-favorite'),
     play: $('btn-play'),
     prev: $('btn-prev'),
@@ -179,7 +182,7 @@ function bindDrawer() {
   els.drawerBackdrop.addEventListener('click', (event) => {
     if (event.target === els.drawerBackdrop) closeDrawer();
   });
-  els.clearQueue.addEventListener('click', clearQueue);
+  els.clearQueue.addEventListener('click', () => void clearQueue());
 }
 
 function ratioFromEvent(event) {
@@ -407,18 +410,35 @@ function failCurrent(reason) {
   emit(EVENTS.player);
 }
 
-export function removeFromQueue(index) {
+export async function removeFromQueue(index) {
   if (index < 0 || index >= state.queue.length) return;
+  const song = state.queue[index];
+  const key = song.key;
   const wasCurrent = state.queueIndex === index;
+  const confirmed = await showModal({
+    title: '移出播放队列',
+    description: wasCurrent
+      ? `确定将正在播放的《${song.title}》移出队列吗？${
+          state.queue.length > 1 ? '移除后会切到下一首，' : '移除后会停止播放，'
+        }本地文件不会被删除。`
+      : `确定将《${song.title}》移出播放队列吗？本地文件不会被删除。`,
+    confirmText: '移出队列',
+  });
+  if (!confirmed) return;
+
+  // 确认期间播放可能自动切歌，按 key 重新定位，避免误删别的曲目。
+  const liveIndex = state.queue.findIndex((item) => item.key === key);
+  if (liveIndex < 0) return;
+  const liveCurrent = state.queueIndex === liveIndex;
   const wasPlaying = state.playing;
-  state.queue.splice(index, 1);
+  state.queue.splice(liveIndex, 1);
 
   if (state.queue.length === 0) {
     stopPlayback();
-  } else if (wasCurrent) {
-    state.queueIndex = index < state.queue.length ? index : 0;
+  } else if (liveCurrent) {
+    state.queueIndex = liveIndex < state.queue.length ? liveIndex : 0;
     playSong(state.queue[state.queueIndex], null, wasPlaying);
-  } else if (state.queueIndex > index) {
+  } else if (state.queueIndex > liveIndex) {
     state.queueIndex -= 1;
   }
 
@@ -429,7 +449,16 @@ export function removeFromQueue(index) {
   emit(EVENTS.player);
 }
 
-function clearQueue() {
+async function clearQueue() {
+  if (state.queue.length === 0) return;
+  const confirmed = await showModal({
+    title: '清空播放队列',
+    description: `确定清空播放队列中的 ${state.queue.length} 首曲目吗？当前播放会停止，本地文件不会被删除。`,
+    confirmText: '清空队列',
+    danger: true,
+  });
+  if (!confirmed) return;
+
   state.queue = [];
   state.queueIndex = -1;
   stopPlayback();
@@ -563,6 +592,7 @@ export function isDrawerOpen() {
 function renderPlayer() {
   const song = state.currentSong;
   els.player.hidden = !song;
+  els.player.classList.toggle('is-playing', Boolean(song) && state.playing);
   if (!song) {
     renderQueueBadge();
     return;
@@ -571,6 +601,12 @@ function renderPlayer() {
   const category = state.library.categories.find((item) => item.id === song.category);
   const color = category?.color ?? DEFAULT_ACCENT;
 
+  if (els.cover) {
+    els.cover.style.background = `radial-gradient(130% 130% at 22% 16%, ${withAlpha(color, 0.6)} 0%, rgba(9, 24, 16, 0.94) 56%, rgba(4, 10, 7, 1) 100%)`;
+    els.cover.style.boxShadow = `inset 0 0 0 1px ${withAlpha(color, 0.3)}, 0 10px 22px -16px rgba(0, 0, 0, 0.9)`;
+    setIcon(els.coverIcon, category?.icon || 'music');
+  }
+
   els.title.textContent = song.title;
   els.title.title = song.title;
   els.category.hidden = false;
@@ -578,7 +614,8 @@ function renderPlayer() {
   els.category.style.color = color;
   els.category.style.backgroundColor = withAlpha(color, 0.13);
   els.category.style.borderColor = withAlpha(color, 0.32);
-  els.sub.textContent = `${category?.labelEn ?? song.category} · ${song.fileName}`;
+  els.sub.textContent = category?.labelEn ?? song.category;
+  els.sub.title = song.fileName;
 
   els.favorite.hidden = false;
   els.favorite.classList.toggle('is-favorite', state.favorites.has(song.key));
@@ -639,7 +676,7 @@ function setProgressUi() {
   const percent = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
 
   els.played.style.width = `${percent}%`;
-  els.thumb.style.left = `${percent}%`;
+  els.thumb.style.left = `clamp(7px, ${percent}%, calc(100% - 7px))`;
   els.timeCurrent.textContent = formatTime(displayTime);
   els.timeTotal.textContent = duration > 0 ? formatTime(duration) : '--:--';
   els.progress.classList.toggle('is-unready', duration <= 0);
@@ -721,7 +758,7 @@ function renderDrawer() {
     setIcon(remove, 'x');
     remove.addEventListener('click', (event) => {
       event.stopPropagation();
-      removeFromQueue(index);
+      void removeFromQueue(index);
     });
 
     const item = el('div', {

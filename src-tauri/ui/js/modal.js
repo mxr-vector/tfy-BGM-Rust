@@ -159,6 +159,9 @@ export function showModal({
         target.select();
       } else if (target instanceof HTMLElement) {
         target.focus();
+      } else if (danger) {
+        // 危险操作默认落在「取消」上，避免回车误确认。
+        cancelButton.focus();
       } else {
         confirmButton.focus();
       }

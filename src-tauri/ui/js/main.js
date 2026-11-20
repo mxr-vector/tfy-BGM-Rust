@@ -55,7 +55,10 @@ function isTypingTarget(target) {
 
 function focusSearch() {
   const input = document.getElementById('search-input');
-  input?.focus();
+  if (!input) return;
+  input.focus();
+  // 用 / 聚焦时直接选中已有查询，方便整段替换。
+  input.select();
 }
 
 function clearSearch() {

@@ -36,9 +36,61 @@ import { applyConfig, formatCopy, heroCopy } from './config.js';
 import { equalizer, setIcon } from './icons.js';
 import { showModal } from './modal.js';
 import { el, normalizeError, toast, withAlpha } from './ui.js';
-import { exportSong, playSong, playSongWithMode } from './player.js';
+import {
+  exportSong,
+  playSong,
+  playSongWithMode,
+  toggleDrawer,
+} from './player.js';
 
 const els = {};
+
+/** Banner 右侧的写意山水插画：以分类主题色着色，随分类切换整体色调。 */
+const HERO_ART = `
+<svg viewBox="0 0 660 160" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">
+  <defs>
+    <radialGradient id="hero-moon" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f2fff8" stop-opacity="0.92"/>
+      <stop offset="38%" stop-color="#a7f3d0" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#34d97f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hero-fog" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d1fae5" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#d1fae5" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#d1fae5" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="hero-blur" x="-30%" y="-80%" width="160%" height="260%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <circle cx="556" cy="50" r="52" fill="url(#hero-moon)"/>
+  <circle cx="556" cy="50" r="15" fill="#ecfdf5" opacity="0.18"/>
+
+  <g fill="var(--hero-color, #19d98b)">
+    <path opacity="0.08" d="M0 100 L26 92 L44 98 L66 70 L78 92 L96 84 L114 52 L128 76 L142 62 L156 88 L176 80 L198 96 L216 66 L230 88 L248 78 L268 96 L286 72 L300 90 L318 82 L338 58 L354 84 L372 74 L392 92 L410 84 L430 62 L444 86 L462 78 L486 96 L504 88 L528 68 L544 90 L562 80 L586 96 L606 88 L628 74 L646 90 L660 84 L660 160 L0 160 Z"/>
+    <path opacity="0.14" d="M0 128 L30 116 L54 124 L76 104 L96 120 L118 110 L140 130 L166 114 L188 126 L210 106 L232 122 L256 112 L280 132 L304 118 L330 128 L352 108 L374 124 L398 114 L424 134 L448 120 L474 130 L500 110 L522 126 L546 116 L572 132 L596 122 L620 134 L642 124 L660 132 L660 160 L0 160 Z"/>
+    <path opacity="0.24" d="M0 148 L48 144 L94 147 L138 140 L184 146 L230 141 L276 148 L322 143 L368 149 L414 145 L462 151 L512 146 L560 152 L612 148 L660 152 L660 160 L0 160 Z"/>
+  </g>
+
+  <g fill="#02120a" opacity="0.6">
+    <path d="M392 150h2v-7h-2z"/><path d="M385 144l8-13 8 13z"/><path d="M387 136l6-10 6 10z"/>
+    <path d="M418 151h2v-5h-2z"/><path d="M412 146l7-11 7 11z"/>
+    <path d="M446 150h2v-6h-2z"/><path d="M439 144l8-12 8 12z"/><path d="M441 137l6-9 6 9z"/>
+  </g>
+
+  <g fill="url(#hero-fog)" filter="url(#hero-blur)">
+    <rect x="250" y="112" width="410" height="22" rx="11"/>
+    <rect x="330" y="136" width="330" height="16" rx="8"/>
+  </g>
+
+  <g fill="none" stroke="var(--hero-color, #19d98b)" stroke-width="1.2" stroke-linecap="round" opacity="0.45">
+    <path d="M392 52q5-5 10 0q5-5 10 0"/>
+    <path d="M424 38q4-4 8 0q4-4 8 0"/>
+    <path d="M362 74q3-3 6 0q3-3 6 0"/>
+  </g>
+</svg>`;
+
 
 let initialized = false;
 let dragKey = null;
@@ -82,11 +134,14 @@ export function initLibraryUI() {
     brandLogo: $('brand-logo'),
     navAll: $('nav-all'),
     navFavorites: $('nav-favorites'),
+    navQueue: $('nav-queue'),
     btnAddCategory: $('btn-add-category'),
     countAll: $('count-all'),
     countFavorites: $('count-favorites'),
+    countQueue: $('count-queue'),
     categoryNav: $('category-nav'),
-    tabStrip: document.querySelector('.tab-strip'),
+    chipAll: $('chip-all'),
+    filterStrip: document.querySelector('.filter-strip'),
     statusCount: $('status-count'),
     statusPath: $('status-path'),
     statusIndicator: document.querySelector('.status-indicator'),
@@ -95,9 +150,12 @@ export function initLibraryUI() {
     btnChoose: $('btn-choose'),
     btnOpen: $('btn-open'),
     btnReset: $('btn-reset'),
+    btnConfig: $('btn-config'),
     batchBar: $('batch-bar'),
     batchCount: $('batch-count'),
+    batchHint: document.querySelector('.batch-hint'),
     selectAll: $('select-all'),
+    searchBox: document.querySelector('.search-box'),
     searchInput: $('search-input'),
     btnClearSearch: $('btn-clear-search'),
     btnClearSearch2: $('btn-clear-search-2'),
@@ -118,8 +176,11 @@ export function initLibraryUI() {
 
   els.navAll.addEventListener('click', () => setCategory(ALL_CATEGORY));
   els.navFavorites.addEventListener('click', toggleFavoritesOnly);
+  els.navQueue.addEventListener('click', toggleDrawer);
+  els.chipAll.addEventListener('click', () => setCategory(ALL_CATEGORY));
   els.btnAddCategory.addEventListener('click', () => void openCreateCategory());
-  els.tabStrip.addEventListener('contextmenu', (event) => {
+  els.btnConfig.addEventListener('click', () => void openConfigFile());
+  els.filterStrip.addEventListener('contextmenu', (event) => {
     const tab = event.target.closest('.category-item');
     const category = tab ? categoryById(tab.dataset.categoryId) : null;
     openCategoryMenu(event, category);
@@ -127,6 +188,12 @@ export function initLibraryUI() {
   els.sortSelect.addEventListener('change', () => setSortBy(els.sortSelect.value));
   els.searchInput.addEventListener('input', () => {
     setSearch(els.searchInput.value);
+  });
+  els.searchInput.addEventListener('keydown', (event) => {
+    // 中文输入法候选框里的回车用于上屏，不能当作“确认搜索”。
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    els.searchInput.blur();
   });
   els.btnClearSearch.addEventListener('click', clearSearch);
   els.btnClearSearch2.addEventListener('click', clearSearch);
@@ -257,6 +324,7 @@ export function initLibraryUI() {
     renderList();
   });
   on(EVENTS.selection, updateSelectionUi);
+  on(EVENTS.queue, renderQueueNav);
   on(EVENTS.player, renderList);
 
   els.sortSelect.value = state.sortBy;
@@ -735,37 +803,52 @@ function renderAll() {
 function renderSidebar() {
   els.countAll.textContent = String(state.library.songs.length);
   els.countFavorites.textContent = String(favoriteCount());
+  renderQueueNav();
 
-  els.navAll.classList.toggle(
-    'is-active',
-    state.category === ALL_CATEGORY && !state.favoritesOnly,
-  );
+  const allActive = state.category === ALL_CATEGORY && !state.favoritesOnly;
+  els.navAll.classList.toggle('is-active', allActive);
   els.navFavorites.classList.toggle('is-active', state.favoritesOnly);
+  els.chipAll.classList.toggle('is-active', allActive);
+  els.chipAll.setAttribute('aria-selected', String(allActive));
 
   els.categoryNav.replaceChildren();
   for (const category of state.library.categories) {
     const active = state.category === category.id && !state.favoritesOnly;
-    const dot = el('span', { class: 'cat-dot' });
-    dot.style.backgroundColor = category.color;
-    dot.style.boxShadow = `0 0 8px ${withAlpha(category.color, 0.55)}`;
+    let marker;
+    if (category.icon) {
+      marker = el('span', { class: 'chip-icon' });
+      setIcon(marker, category.icon);
+    } else {
+      marker = el('span', { class: 'chip-dot' });
+      marker.style.backgroundColor = category.color;
+    }
 
-    const button = el(
+    const chip = el(
       'button',
       {
-        class: `cat-tab category-item${active ? ' is-active' : ''}`,
-        attrs: { type: 'button', title: `${category.nameZh} · ${category.nameEn}` },
+        class: `filter-chip category-item${active ? ' is-active' : ''}`,
+        attrs: {
+          type: 'button',
+          role: 'tab',
+          'aria-selected': String(active),
+          title: `${category.nameZh} · ${category.nameEn}`,
+        },
         dataset: { categoryId: category.id },
       },
       [
-        dot,
-        el('span', { class: 'tab-label', text: category.nameZh }),
-        el('span', { class: 'tab-count', text: String(category.count) }),
+        marker,
+        el('span', { class: 'chip-label', text: category.nameZh }),
+        el('span', { class: 'chip-count', text: String(category.count) }),
       ],
     );
-    button.style.setProperty('--tab-color', category.color);
-    button.addEventListener('click', () => setCategory(category.id));
-    els.categoryNav.append(button);
+    chip.addEventListener('click', () => setCategory(category.id));
+    els.categoryNav.append(chip);
   }
+}
+
+function renderQueueNav() {
+  if (!els.countQueue) return;
+  els.countQueue.textContent = String(state.queue.length);
 }
 
 function heroInfo() {
@@ -792,10 +875,11 @@ function renderHero() {
   const tag = el('span', { class: 'hero-tag' }, [tagIcon, info.labelEn]);
   tag.style.color = info.color;
   tag.style.backgroundColor = withAlpha(info.color, 0.13);
+  tag.style.borderColor = withAlpha(info.color, 0.24);
 
   const source = el('span', {
     class: 'hero-source',
-    text: `${sourceLabel()} · 文件名即曲名`,
+    text: sourceLabel(),
   });
 
   const playButton = el('button', {
@@ -821,17 +905,19 @@ function renderHero() {
     el('div', { class: 'hero-heading' }, [
       el('div', { class: 'hero-badges' }, [tag, source]),
       el('h1', { class: 'hero-title', text: info.title, title: info.title }),
-      el('p', {
-        class: 'hero-description',
-        text: info.description,
-        title: info.description,
-      }),
     ]),
     el('div', { class: 'hero-actions' }, [playButton, shuffleButton]),
+    el('p', {
+      class: 'hero-description',
+      text: info.description,
+      title: info.description,
+    }),
   ]);
 
-  const glow = el('div', { class: 'hero-glow' });
-  els.hero.replaceChildren(glow, content);
+  const art = el('div', { class: 'hero-art', attrs: { 'aria-hidden': 'true' } });
+  art.innerHTML = HERO_ART;
+
+  els.hero.replaceChildren(art, content);
 }
 
 function renderResults() {
@@ -861,6 +947,7 @@ function updateSearchUi() {
     els.searchInput.value = state.search;
   }
   els.btnClearSearch.hidden = state.search.length === 0;
+  els.searchBox?.classList.toggle('has-value', state.search.length > 0);
   if (state.search.trim().length === 0 && els.searchHint) {
     els.searchHint.hidden = true;
   }
@@ -894,6 +981,12 @@ function updateSelectionUi() {
     (total, song) => total + (state.selected.has(song.key) ? 1 : 0),
     0,
   );
+  if (els.batchHint) {
+    els.batchHint.textContent =
+      count > visibleSelected
+        ? `当前筛选内 ${visibleSelected} 首`
+        : '对选中曲目执行批量操作';
+  }
   els.selectAll.disabled = list.length === 0;
   els.selectAll.checked = list.length > 0 && visibleSelected === list.length;
   els.selectAll.indeterminate = visibleSelected > 0 && visibleSelected < list.length;
@@ -979,12 +1072,12 @@ function buildRow(song, index) {
     text: category?.nameZh ?? song.category,
     dataset: { categoryId: song.category },
   });
-  tag.style.color = color;
-  tag.style.backgroundColor = withAlpha(color, 0.1);
-  tag.style.borderColor = withAlpha(color, 0.22);
+  tag.style.color = withAlpha(color, 0.95);
+  tag.style.backgroundColor = withAlpha(color, 0.07);
+  tag.style.borderColor = withAlpha(color, 0.18);
 
   const favorite = el('button', {
-    class: `action-icon-btn fav-btn${isFavorite ? ' is-favorite' : ''}`,
+    class: `action-icon-btn fav-btn${isFavorite ? ' is-persistent is-favorite' : ''}`,
     attrs: { type: 'button', title: isFavorite ? '取消收藏' : '收藏' },
     dataset: { action: 'favorite', key: song.key },
   });
@@ -998,7 +1091,7 @@ function buildRow(song, index) {
   setIcon(edit, 'edit');
 
   const download = el('button', {
-    class: 'action-icon-btn',
+    class: 'action-icon-btn is-persistent',
     attrs: { type: 'button', title: '导出音频' },
     dataset: { action: 'export', key: song.key },
   });
