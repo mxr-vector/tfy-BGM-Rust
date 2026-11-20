@@ -41,7 +41,7 @@ $zipPath = Join-Path $dist $zipName
 Assert-NotRunning -Path $package
 
 if (-not $SkipBuild) {
-    # cargo build 不会执行 tauri 的 beforeBuildCommand，先单独构建前端产物。
+    # cargo build does not run tauri's beforeBuildCommand, so build the frontend first.
     if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
         throw "pnpm not found. Install Node.js 20+ and run: corepack enable"
     }
@@ -56,7 +56,10 @@ if (-not $SkipBuild) {
     }
     Push-Location $srcTauri
     try {
-        & $cargo build --release
+        # custom-protocol must be enabled, otherwise Tauri treats the app as dev mode
+        # and loads devUrl instead of the embedded frontend, leaving the portable exe blank.
+        & $cargo build --release --features custom-protocol
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
     } finally {
         Pop-Location
     }
@@ -73,6 +76,11 @@ New-Item -ItemType Directory -Force $package | Out-Null
 Copy-Item $releaseExe $package -Force
 Copy-Item (Join-Path $repo "LICENSE") $package -Force
 Copy-Item (Join-Path $repo "README.md") $package -Force
+
+# Built-in wallpapers resolve via resource_dir (the exe folder for the portable build),
+# so assets/bg has to ship next to the executable.
+New-Item -ItemType Directory -Force (Join-Path $package "assets") | Out-Null
+Copy-Item (Join-Path $repo "assets\bg") (Join-Path $package "assets") -Recurse -Force
 
 $bgmTarget = Join-Path $package "bgm"
 $existingMp3 = 0

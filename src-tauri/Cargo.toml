@@ -27,6 +27,10 @@ tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 
+[features]
+# 绿色版脚本用 cargo 直接构建时需要显式开启，否则 Tauri 会按开发模式去连接 devUrl。
+custom-protocol = ["tauri/custom-protocol"]
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -127,6 +127,8 @@ export async function loadSource(
     audio.addEventListener(
       'loadedmetadata',
       () => {
+        // 加载失败或被后继请求取代时不能再用旧的 restoreTime 调整新曲目的进度。
+        if (token !== sourceToken) return;
         if (Number.isFinite(audio.duration) && audio.duration > 0) {
           audio.currentTime = Math.min(restoreTime, audio.duration);
         }

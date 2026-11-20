@@ -78,14 +78,19 @@ watch(
   },
 );
 
-export function playSong(song: Song, newQueue: Song[] | null = null, forcePlay = false): void {
+export function playSong(
+  song: Song,
+  newQueue: Song[] | null = null,
+  forcePlay = false,
+  autoplay = true,
+): void {
   if (!song) return;
 
   syncQueueForPlayback(song, newQueue);
 
   if (state.currentKey === song.key && state.currentSong) {
     if (!hasSourceUrl()) {
-      void loadSongSource(song, { autoplay: true });
+      void loadSongSource(song, { autoplay });
     } else if (forcePlay) {
       rewindToStart();
       startPlayback();
@@ -99,7 +104,7 @@ export function playSong(song: Song, newQueue: Song[] | null = null, forcePlay =
   state.currentSong = song;
   state.playing = false;
   playbackError.value = '';
-  void loadSongSource(song, { autoplay: true });
+  void loadSongSource(song, { autoplay });
 }
 
 export function playSongWithMode(song: Song, list: Song[] | null, mode: PlayMode): void {
@@ -127,6 +132,8 @@ async function loadSongSource(
     },
   });
   if (outcome.status === 'failed') {
+    // 失败时元素还挂着上一首的源，先卸载，避免 UI 暂停但旧音频仍在播放。
+    unloadSource();
     failCurrent(`无法读取音频（${normalizeError(outcome.error)}）`);
   }
 }
@@ -159,7 +166,7 @@ export function nextTrack(forcePlay = true): void {
       : nextSequentialIndex();
   if (nextIndex < 0) return;
   state.queueIndex = nextIndex;
-  playSong(state.queue[nextIndex]!, null, forcePlay);
+  playSong(state.queue[nextIndex]!, null, forcePlay, forcePlay);
 }
 
 export function prevTrack(forcePlay = true): void {
@@ -178,7 +185,7 @@ export function prevTrack(forcePlay = true): void {
   const prevIndex = prevSequentialIndex();
   if (prevIndex < 0) return;
   state.queueIndex = prevIndex;
-  playSong(state.queue[prevIndex]!, null, forcePlay);
+  playSong(state.queue[prevIndex]!, null, forcePlay, forcePlay);
 }
 
 function handleEnded(): void {
@@ -198,7 +205,8 @@ function failCurrent(reason: string): void {
   failureStreak += 1;
 
   if (state.queue.length > 1 && failureStreak <= playerConfig().maxAutoSkips) {
-    playbackError.value = `《${song.title}》${reason}，已自动跳到下一首`;
+    // 用 toast 而不是 playbackError：自动跳曲会立刻进入下一首的 playSong 并清空 playbackError。
+    toast(`《${song.title}》${reason}，已自动跳到下一首`, 'error');
     nextTrack(true);
     return;
   }
@@ -237,7 +245,8 @@ export async function removeFromQueue(index: number): Promise<void> {
   if (state.queue.length === 0) {
     stopPlayback();
   } else if (removed.wasCurrent) {
-    playSong(state.queue[state.queueIndex]!, null, removed.wasPlaying);
+    // 移除当前曲目时沿用移除前的播放状态：暂停中就不要自动开播。
+    playSong(state.queue[state.queueIndex]!, null, removed.wasPlaying, removed.wasPlaying);
   }
 }
 
