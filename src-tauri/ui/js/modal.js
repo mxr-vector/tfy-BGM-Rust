@@ -3,7 +3,7 @@ import { el } from './ui.js';
 
 /**
  * 打开一个表单弹窗。确认后返回字段值对象，取消返回 null。
- * fields: [{ name, label, type: 'text' | 'select', value, placeholder, options: [{ value, label }] }]
+ * fields: [{ name, label, type: 'text' | 'select' | 'color', value, placeholder, options: [{ value, label }] }]
  */
 export function showModal({
   title,
@@ -39,6 +39,12 @@ export function showModal({
           ),
         );
         input.value = field.value ?? field.options?.[0]?.value ?? '';
+      } else if (field.type === 'color') {
+        input = el('input', {
+          class: 'modal-input modal-color',
+          attrs: { type: 'color', name: field.name },
+        });
+        input.value = field.value ?? '#6366f1';
       } else {
         input = el('input', {
           class: 'modal-input',

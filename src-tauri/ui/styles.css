@@ -306,9 +306,26 @@ select:focus-visible,
   text-align: left;
 }
 
-.context-menu-item:hover {
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.07);
+}
+
+.context-menu-item.is-danger {
+  color: #f87171;
+}
+
+.context-menu-item.is-danger:hover,
+.context-menu-item.is-danger:focus-visible {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border-subtle);
 }
 
 .context-menu-item [data-icon] {
@@ -2134,6 +2151,20 @@ input[type="checkbox"] {
 .modal-select option {
   background: #0f172a;
   color: var(--text-primary);
+}
+
+.modal-color {
+  padding: 3px;
+  cursor: pointer;
+}
+
+.modal-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.modal-color::-webkit-color-swatch {
+  border: none;
+  border-radius: 5px;
 }
 
 .modal-error {

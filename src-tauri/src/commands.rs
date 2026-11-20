@@ -101,13 +101,31 @@ pub fn create_category(
 }
 
 #[tauri::command]
-pub fn rename_category(
+pub fn update_category(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     name: String,
+    color: Option<String>,
 ) -> CommandResult<CategoryOutcome> {
-    state.rename_category(&app, &id, &name).map_err(describe)
+    state
+        .update_category(&app, &id, &name, color.as_deref())
+        .map_err(describe)
+}
+
+#[tauri::command]
+pub fn open_categories_file(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
+    let path = state.categories_path();
+    if app.opener().reveal_item_in_dir(&path).is_err() {
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        app.opener()
+            .open_path(parent.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|error| format!("打开分类配置目录失败：{error}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

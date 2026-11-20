@@ -153,6 +153,22 @@ export function toggleFavorite(key) {
   persistPrefs(true);
 }
 
+export function setFavorites(keys, favorite) {
+  let changed = false;
+  for (const key of keys) {
+    if (!key) continue;
+    if (favorite && !state.favorites.has(key)) {
+      state.favorites.add(key);
+      changed = true;
+    } else if (!favorite && state.favorites.delete(key)) {
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  emit('favorites');
+  persistPrefs(true);
+}
+
 export function setCategory(categoryId) {
   state.category = categoryId;
   state.favoritesOnly = false;

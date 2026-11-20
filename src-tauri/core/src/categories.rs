@@ -52,6 +52,8 @@ pub enum CategoryError {
     IdTooLong,
     #[error("分类目录名包含非法字符：{0}")]
     InvalidId(String),
+    #[error("主题色必须是 #RRGGBB 格式：{0}")]
+    InvalidColor(String),
     #[error("分类已存在：{0}")]
     DuplicateId(String),
     #[error("同名分类已存在：{0}")]
@@ -326,9 +328,24 @@ impl Categories {
         Ok(category)
     }
 
-    /// 只修改展示名称，目录名与已导入的音频文件保持不变。
-    pub fn rename(&mut self, id: &str, name: &str) -> Result<(), CategoryError> {
+    /// 修改展示名称与主题色；`color` 为 `None` 时保持原色。
+    pub fn update(
+        &mut self,
+        id: &str,
+        name: &str,
+        color: Option<&str>,
+    ) -> Result<(), CategoryError> {
         let name = validate_name(name)?;
+        let color = match color {
+            Some(value) => {
+                let value = value.trim();
+                if !is_hex_color(value) {
+                    return Err(CategoryError::InvalidColor(value.to_owned()));
+                }
+                Some(value.to_owned())
+            }
+            None => None,
+        };
         if self
             .items
             .iter()
@@ -341,14 +358,16 @@ impl Categories {
             .iter_mut()
             .find(|category| category.id == id)
             .ok_or_else(|| CategoryError::Missing(id.to_owned()))?;
-        if category.name_zh == name {
-            return Ok(());
+        if category.name_zh != name {
+            let old = category.name_zh.clone();
+            if !category.title.is_empty() && category.title.contains(&old) {
+                category.title = category.title.replace(&old, &name);
+            }
+            category.name_zh = name;
         }
-        let old = category.name_zh.clone();
-        if !category.title.is_empty() && category.title.contains(&old) {
-            category.title = category.title.replace(&old, &name);
+        if let Some(color) = color {
+            category.color = color;
         }
-        category.name_zh = name;
         Ok(())
     }
 
@@ -426,7 +445,7 @@ mod tests {
         let mut categories = defaults();
         let added = categories.add("旅行", None).unwrap();
         assert_eq!(added.id, "旅行");
-        assert!(categories.rename("旅行", "旅拍").is_ok());
+        assert!(categories.update("旅行", "旅拍", None).is_ok());
         categories.save(&path).unwrap();
 
         let (loaded, warning) = Categories::load(&path);
@@ -434,6 +453,33 @@ mod tests {
         let travel = loaded.by_id("旅行").unwrap();
         assert_eq!(travel.name_zh, "旅拍");
         assert_eq!(travel.title, "旅拍音乐");
+    }
+
+    #[test]
+    fn update_changes_name_and_color_but_not_id() {
+        let mut categories = defaults();
+        let added = categories.add("旅行", None).unwrap();
+        assert_eq!(added.title, "旅行音乐");
+
+        categories.update("旅行", "旅拍", Some("#22d3ee")).unwrap();
+
+        let travel = categories.by_id("旅行").unwrap();
+        assert_eq!(travel.name_zh, "旅拍");
+        assert_eq!(travel.color, "#22d3ee");
+        assert_eq!(travel.title, "旅拍音乐");
+
+        assert!(matches!(
+            categories.update("旅行", "欢快", None),
+            Err(CategoryError::DuplicateName(_))
+        ));
+        assert!(matches!(
+            categories.update("旅行", "旅拍", Some("red")),
+            Err(CategoryError::InvalidColor(_))
+        ));
+        assert!(matches!(
+            categories.update("missing", "新名字", None),
+            Err(CategoryError::Missing(_))
+        ));
     }
 
     #[test]

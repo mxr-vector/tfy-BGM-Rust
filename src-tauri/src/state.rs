@@ -159,16 +159,17 @@ impl AppState {
         })
     }
 
-    /// 重命名分类只修改展示文案，不移动已导入的音频文件。
-    pub fn rename_category(
+    /// 修改分类展示名称 / 主题色，不移动已导入的音频文件。
+    pub fn update_category(
         &self,
         app: &AppHandle,
         id: &str,
         name: &str,
+        color: Option<&str>,
     ) -> Result<CategoryOutcome> {
         let mut warnings = self.reload_categories();
         let mut next = self.categories.read().clone();
-        next.rename(id, name)
+        next.update(id, name, color)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         next.save(&self.categories_path)
             .context("保存分类配置失败")?;
@@ -213,6 +214,10 @@ impl AppState {
 
     pub fn root(&self) -> PathBuf {
         self.runtime.read().root.clone()
+    }
+
+    pub fn categories_path(&self) -> PathBuf {
+        self.categories_path.clone()
     }
 
     pub fn has_category(&self, id: &str) -> bool {

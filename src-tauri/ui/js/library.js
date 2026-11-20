@@ -11,6 +11,7 @@ import {
   selectMany,
   selectedKeys,
   setCategory,
+  setFavorites,
   setSearch,
   setSelected,
   setSortBy,
@@ -23,7 +24,7 @@ import {
 import { CATEGORY_ICONS, equalizer, setIcon } from './icons.js';
 import { showModal } from './modal.js';
 import { el, normalizeError, toast, withAlpha } from './ui.js';
-import { exportSong, playSong } from './player.js';
+import { exportSong, playSong, playSongWithMode } from './player.js';
 
 const els = {};
 
@@ -274,30 +275,33 @@ function closeContextMenu() {
   contextMenu = null;
 }
 
-function openCategoryMenu(event, category) {
+function separator() {
+  return { separator: true };
+}
+
+function showContextMenu(event, items) {
   event.preventDefault();
   closeContextMenu();
 
   const menu = el('div', { class: 'context-menu', attrs: { role: 'menu' } });
-  const item = (iconName, label, handler) => {
+  for (const entry of items) {
+    if (entry.separator) {
+      menu.append(el('div', { class: 'context-menu-separator' }));
+      continue;
+    }
     const button = el('button', {
-      class: 'context-menu-item',
+      class: `context-menu-item${entry.danger ? ' is-danger' : ''}`,
       attrs: { type: 'button', role: 'menuitem' },
     });
     const iconHost = el('span');
-    setIcon(iconHost, iconName);
-    button.append(iconHost, el('span', { text: label }));
+    setIcon(iconHost, entry.icon);
+    button.append(iconHost, el('span', { text: entry.label }));
     button.addEventListener('click', () => {
       closeContextMenu();
-      handler();
+      entry.action();
     });
-    return button;
-  };
-
-  if (category) {
-    menu.append(item('edit', '重命名分类', () => void openRenameCategory(category)));
+    menu.append(button);
   }
-  menu.append(item('plus', '新增分类', () => void openCreateCategory()));
 
   menu.style.left = `${event.clientX}px`;
   menu.style.top = `${event.clientY}px`;
@@ -311,6 +315,88 @@ function openCategoryMenu(event, category) {
   if (event.clientY + rect.height > window.innerHeight - 8) {
     menu.style.top = `${Math.max(8, event.clientY - rect.height)}px`;
   }
+}
+
+function openCategoryMenu(event, category) {
+  const items = [];
+  if (category) {
+    items.push({
+      icon: 'edit',
+      label: '编辑分类',
+      action: () => void openEditCategory(category),
+    });
+  }
+  items.push({
+    icon: 'plus',
+    label: '新增分类',
+    action: () => void openCreateCategory(),
+  });
+  items.push(separator(), {
+    icon: 'folder',
+    label: '打开分类配置文件',
+    action: () => void openCategoriesFile(),
+  });
+  showContextMenu(event, items);
+}
+
+function openSongMenu(event, song) {
+  if (!state.selected.has(song.key)) {
+    clearSelection();
+    setSelected(song.key, true);
+  }
+  const keys = selectedKeys();
+  const multiple = keys.length > 1;
+  const allFavorite = keys.every((key) => state.favorites.has(key));
+  const list = visibleSongs();
+
+  const items = [
+    { icon: 'play', label: '播放', action: () => playSong(song, list, true) },
+    {
+      icon: 'repeat',
+      label: '顺序播放',
+      action: () => playSongWithMode(song, list, 'sequence'),
+    },
+    {
+      icon: 'shuffle',
+      label: '随机播放',
+      action: () => playSongWithMode(song, list, 'shuffle'),
+    },
+    separator(),
+    {
+      icon: 'heart',
+      label: allFavorite ? '取消收藏' : '收藏',
+      action: () => setFavorites(keys, !allFavorite),
+    },
+  ];
+  if (!multiple) {
+    items.push({
+      icon: 'edit',
+      label: '重命名文件',
+      action: () => void openRenameTrack(song),
+    });
+  }
+  items.push(
+    {
+      icon: 'folder',
+      label: multiple ? '批量移动分类' : '修改分类',
+      action: () =>
+        void openMove(keys, multiple ? '批量移动分类' : '修改分类'),
+    },
+    {
+      icon: 'download',
+      label: multiple ? `导出所选 (${keys.length})` : '导出音频',
+      action: () => (multiple ? void exportSelection() : void exportSong(song.key)),
+    },
+    separator(),
+    {
+      icon: 'trash',
+      label: multiple ? `删除所选 (${keys.length})` : '删除',
+      danger: true,
+      action: () => void deleteSongs(keys),
+    },
+  );
+
+  showContextMenu(event, items);
 }
 
 async function openCreateCategory() {
@@ -351,10 +437,11 @@ async function openCreateCategory() {
   }
 }
 
-async function openRenameCategory(category) {
+async function openEditCategory(category) {
   const values = await showModal({
-    title: '重命名分类',
-    description: '只修改分类的显示名称，不会移动或重命名已导入的音频文件。',
+    title: '编辑分类',
+    description:
+      '修改分类的显示名称与主题色，不会移动或重命名已导入的音频文件；目录名保持不变。',
     fields: [
       {
         name: 'name',
@@ -362,19 +449,69 @@ async function openRenameCategory(category) {
         type: 'text',
         value: category.nameZh,
       },
+      {
+        name: 'color',
+        label: '主题色',
+        type: 'color',
+        value: category.color,
+      },
     ],
     confirmText: '保存',
     validate: (input) => (input.name.trim() ? null : '分类名称不能为空'),
   });
-  if (!values || values.name.trim() === category.nameZh) return;
+  if (!values) return;
+  const sameName = values.name.trim() === category.nameZh;
+  const sameColor = values.color.toLowerCase() === category.color.toLowerCase();
+  if (sameName && sameColor) return;
 
   try {
-    const result = await invoke('rename_category', {
+    const result = await invoke('update_category', {
       id: category.id,
       name: values.name,
+      color: values.color,
     });
     replaceLibrary(result.library);
-    toast('分类名称已更新', 'success');
+    toast('分类已更新', 'success');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openCategoriesFile() {
+  try {
+    await invoke('open_categories_file');
+    toast('已在文件管理器中定位 categories.json', 'success');
+  } catch (error) {
+    toast(normalizeError(error), 'error');
+  }
+}
+
+async function openRenameTrack(song) {
+  const values = await showModal({
+    title: '重命名文件',
+    description: '修改后会重写曲库中的 mp3 文件名，收藏与播放队列会自动跟随。',
+    fields: [
+      {
+        name: 'title',
+        label: '文件名',
+        type: 'text',
+        value: song.title,
+        placeholder: '输入新的文件名（不含扩展名）',
+      },
+    ],
+    confirmText: '重命名',
+    validate: (input) => (input.title.trim() ? null : '文件名不能为空'),
+  });
+  if (!values || values.title.trim() === song.title) return;
+
+  try {
+    const result = await invoke('update_track', {
+      key: song.key,
+      title: values.title,
+      category: song.category,
+    });
+    applyMutation(result);
+    reportToast(result.report, '文件名已更新');
   } catch (error) {
     toast(normalizeError(error), 'error');
   }
@@ -456,11 +593,10 @@ async function openEdit(song) {
   }
 }
 
-async function openMove() {
-  const keys = selectedKeys();
+async function openMove(keys = selectedKeys(), title = null) {
   if (keys.length === 0) return;
   const values = await showModal({
-    title: `移动 ${keys.length} 首曲目`,
+    title: title ?? `移动 ${keys.length} 首曲目`,
     description: '选择目标分类；目标目录中已有同名文件时会自动追加序号。',
     fields: [
       {
@@ -805,6 +941,7 @@ function buildRow(song, index) {
   const tag = el('span', {
     class: 'category-tag',
     text: category?.nameZh ?? song.category,
+    dataset: { categoryId: song.category },
   });
   tag.style.color = color;
   tag.style.backgroundColor = withAlpha(color, 0.1);
@@ -861,6 +998,19 @@ function buildRow(song, index) {
 }
 
 function bindSongList() {
+  els.songList.addEventListener('contextmenu', (event) => {
+    const tag = event.target.closest('.category-tag');
+    const tagCategory = tag ? categoryById(tag.dataset.categoryId) : null;
+    if (tagCategory) {
+      openCategoryMenu(event, tagCategory);
+      return;
+    }
+    const row = event.target.closest('.song-row');
+    if (!row) return;
+    const song = state.library.songs.find((item) => item.key === row.dataset.key);
+    if (song) openSongMenu(event, song);
+  });
+
   els.songList.addEventListener('click', (event) => {
     const checkbox = event.target.closest('.row-checkbox');
     if (checkbox) {

@@ -241,6 +241,19 @@ export function playSong(song, newQueue = null, forcePlay = false) {
   void loadSongSource(song, { autoplay: true });
 }
 
+export function setPlayMode(mode) {
+  if (!MODE_CYCLE.includes(mode) || state.prefs.playMode === mode) return;
+  state.prefs.playMode = mode;
+  persistPrefs(true);
+  renderPlayer();
+}
+
+export function playSongWithMode(song, list, mode) {
+  if (!song) return;
+  setPlayMode(mode);
+  playSong(song, Array.isArray(list) ? list : null, true);
+}
+
 /**
  * WebKitGTK 的媒体管线无法直接播放 `asset://` 自定义协议（会报
  * MEDIA_ERR_SRC_NOT_SUPPORTED），这里先经 Asset Protocol 读取字节，
