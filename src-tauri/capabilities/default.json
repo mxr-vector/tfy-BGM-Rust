@@ -1,6 +1,12 @@
 {
   "identifier": "default",
-  "description": "主窗口仅使用 Tauri 核心能力；文件对话框与目录打开全部在 Rust 侧调用",
+  "description": "主窗口仅使用 Tauri 核心能力；文件对话框与目录打开全部在 Rust 侧调用。无边框窗口的标题栏拖拽与最小化/最大化/关闭按钮需要额外的 window 权限。",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

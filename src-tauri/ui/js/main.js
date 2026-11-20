@@ -23,9 +23,12 @@ import { COMMANDS, EVENTS } from './constants.js';
 import { applyDocumentCopy, playerConfig } from './config.js';
 import { invoke, isTauri } from './tauri.js';
 import { el, normalizeError, toast } from './ui.js';
+import { initWindowChrome } from './window.js';
 
 applyStaticIcons();
 applyDocumentCopy();
+// 先把窗口按钮接上，即使曲库加载失败也能正常最小化/关闭窗口。
+initWindowChrome();
 
 function showFatal(title, message) {
   const iconHost = el('span');

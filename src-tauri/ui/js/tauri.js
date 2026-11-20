@@ -13,3 +13,9 @@ export function assetUrl(path) {
   if (!isTauri) return path;
   return bridge.core.convertFileSrc(path);
 }
+
+/** 当前窗口句柄；非 Tauri 环境返回 null，调用方需自行降级。 */
+export function getCurrentWindow() {
+  if (!isTauri) return null;
+  return bridge.window?.getCurrentWindow?.() ?? null;
+}

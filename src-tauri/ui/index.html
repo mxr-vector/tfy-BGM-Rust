@@ -10,16 +10,17 @@
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
+      <!-- 无边框窗口：顶栏同时充当标题栏，deep 拖拽区域覆盖整条空白区，控件自身会阻断拖拽。 -->
+      <header class="topbar" data-tauri-drag-region="deep">
         <div class="brand">
-          <div class="brand-logo" id="brand-logo"></div>
+          <div class="brand-logo" id="brand-logo"><span data-icon="disc"></span></div>
           <div class="brand-text">
             <span class="brand-title" id="brand-title">听风吟 · BGM</span>
             <span class="brand-subtitle" id="brand-subtitle">剪辑音频素材库</span>
           </div>
         </div>
 
-        <div class="search-box">
+        <div class="search-box" data-tauri-drag-region="false">
           <span class="search-icon" data-icon="search"></span>
           <input
             id="search-input"
@@ -55,6 +56,20 @@
           <span class="top-divider" aria-hidden="true"></span>
           <button type="button" class="icon-tool" id="btn-config" title="打开应用配置 config.json" aria-label="打开应用配置">
             <span data-icon="settings"></span>
+          </button>
+        </div>
+
+        <span class="top-divider top-divider-window" aria-hidden="true"></span>
+
+        <div class="window-controls" id="window-controls" role="group" aria-label="窗口控制">
+          <button type="button" class="window-btn" id="win-min" title="最小化" aria-label="最小化">
+            <span data-icon="win-min"></span>
+          </button>
+          <button type="button" class="window-btn" id="win-max" title="最大化" aria-label="最大化">
+            <span data-icon="win-max"></span>
+          </button>
+          <button type="button" class="window-btn window-btn-close" id="win-close" title="关闭" aria-label="关闭">
+            <span data-icon="win-close"></span>
           </button>
         </div>
       </header>

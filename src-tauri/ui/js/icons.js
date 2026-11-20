@@ -62,6 +62,11 @@ const PATHS = {
     '<path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" x2="2" y1="8" y2="22"/><line x1="17.5" x2="9" y1="15" y2="15"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  'win-min': '<path d="M5 12h14"/>',
+  'win-max': '<rect x="5" y="5" width="14" height="14" rx="1.8"/>',
+  'win-restore':
+    '<path d="M8.5 9.5V8a2 2 0 0 1 2-2h6.5a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2h-1.5"/><rect x="5" y="9.5" width="10" height="10" rx="2"/>',
+  'win-close': '<path d="M6 6 18 18"/><path d="M18 6 6 18"/>',
 };
 
 const SVG_OPEN =
