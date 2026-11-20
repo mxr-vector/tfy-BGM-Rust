@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { analyseBuffer, computePeaks, type AudioAnalysis } from '@/lib/audio-analysis';
-import { DEFAULT_ACCENT } from '@/lib/constants';
+import { COMMANDS, DEFAULT_ACCENT, DEFAULT_EXPORT_SCENE } from '@/lib/constants';
 import { formatTime, withAlpha } from '@/lib/format';
+import { invoke } from '@/lib/tauri';
+import type { ExportInfo, ExportPreset } from '@/lib/types';
 import {
   audioState,
   currentTime,
@@ -26,6 +28,18 @@ const analysis = ref<AudioAnalysis | null>(null);
 const analysing = ref(false);
 const momentary = ref<number | null>(null);
 const livePeak = ref<number | null>(null);
+const exportPresets = ref<ExportPreset[]>([]);
+let exportPresetsLoading = false;
+
+// 诊断分析只读源文件；这里仅展示导出归一化目标，便于对照，不影响任何测量值。
+const normalizationEnabled = computed(() => state.prefs?.loudnessNormalization ?? true);
+const exportTarget = computed(() => {
+  if (!normalizationEnabled.value) return null;
+  const scene = state.prefs?.exportScene || DEFAULT_EXPORT_SCENE;
+  return (
+    exportPresets.value.find((preset) => preset.id === scene) ?? exportPresets.value[0] ?? null
+  );
+});
 
 const loopStart = ref(0);
 const loopEnd = ref(0);
@@ -186,14 +200,25 @@ function updateMeters(): void {
     livePeak.value = null;
     return;
   }
-  const loudData =
-    loudSamples.length === handle.loudness.fftSize
-      ? loudSamples
-      : (loudSamples = new Float32Array(handle.loudness.fftSize));
-  handle.loudness.getFloatTimeDomainData(loudData);
+  const frameSize = handle.loudness[0]?.fftSize ?? 0;
+  if (frameSize === 0) {
+    momentary.value = null;
+    livePeak.value = null;
+    return;
+  }
+  if (loudSamples.length !== frameSize) loudSamples = new Float32Array(frameSize);
+  // BS.1770 瞬时窗口为 400ms，且各声道能量相加而不是取平均。
+  const windowSamples = Math.min(frameSize, Math.round(handle.context.sampleRate * 0.4));
+  const offset = frameSize - windowSamples;
   let energy = 0;
-  for (const sample of loudData) energy += sample * sample;
-  const mean = energy / loudData.length;
+  for (const node of handle.loudness) {
+    node.getFloatTimeDomainData(loudSamples);
+    for (let index = offset; index < frameSize; index += 1) {
+      const sample = loudSamples[index]!;
+      energy += sample * sample;
+    }
+  }
+  const mean = energy / windowSamples;
   momentary.value = mean > 0 ? -0.691 + 10 * Math.log10(mean) : null;
 
   const rawData =
@@ -247,6 +272,19 @@ function runAnalysis(): void {
     analysis.value = analyseBuffer(buffer);
     analysing.value = false;
   }, 30);
+}
+
+async function loadExportPresets(): Promise<void> {
+  if (exportPresets.value.length > 0 || exportPresetsLoading) return;
+  exportPresetsLoading = true;
+  try {
+    const info = await invoke<ExportInfo>(COMMANDS.exportInfo);
+    exportPresets.value = info.presets;
+  } catch {
+    // 对照信息属于附加内容，读取失败时保持静默。
+  } finally {
+    exportPresetsLoading = false;
+  }
 }
 
 function syncLoopDraft(): void {
@@ -311,6 +349,8 @@ watch(diagnosticsOpen, async (open) => {
   syncLoopDraft();
   await nextTick();
   if (!diagnosticsOpen.value) return;
+
+  void loadExportPresets();
 
   observer?.disconnect();
   if ('ResizeObserver' in window) {
@@ -413,7 +453,7 @@ onBeforeUnmount(() => {
             <div class="diag-canvas-block">
               <div class="diag-block-head">
                 <span>实时频谱</span>
-                <span class="diag-block-hint">AnalyserNode · 72 bands</span>
+                <span class="diag-block-hint">AnalyserNode · 72 bands · -90~-10 dBFS 映射</span>
               </div>
               <canvas ref="spectrumCanvas" class="diag-canvas diag-spectrum"></canvas>
             </div>
@@ -431,12 +471,12 @@ onBeforeUnmount(() => {
                 <span class="meter-value" :class="{ 'is-hot': (livePeak ?? -99) > -1 }">
                   {{ formatValue(livePeak, 1) }}<small> dBFS</small>
                 </span>
-                <span class="meter-hint">瞬时采样峰值</span>
+                <span class="meter-hint">单声道下混 · 采样峰值</span>
               </div>
               <div class="diag-meter">
-                <span class="meter-label">瞬时突变</span>
+                <span class="meter-label">最大跳变</span>
                 <span class="meter-value">{{ formatValue(analysis?.maxDelta, 3) }}</span>
-                <span class="meter-hint">最大相邻采样差</span>
+                <span class="meter-hint">整曲最大相邻采样差</span>
               </div>
             </div>
           </div>
@@ -449,16 +489,23 @@ onBeforeUnmount(() => {
               播放这首曲目后即可分析。音频需要先完成解码。
             </div>
             <template v-else>
+              <p class="diag-source-note">
+                <span>以下为源文件实测值（归一化前）</span>
+                <span v-if="!normalizationEnabled">· 导出仅复制原文件</span>
+                <span v-else-if="exportTarget">
+                  · 导出目标 {{ exportTarget.targetLufs }} LUFS · {{ exportTarget.label }}
+                </span>
+              </p>
               <div class="diag-stats">
                 <div class="diag-stat">
                   <span>综合响度</span>
                   <strong>{{ formatValue(analysis.integratedLufs, 1) }}</strong>
-                  <small>LUFS</small>
+                  <small>LUFS · 源文件</small>
                 </div>
                 <div class="diag-stat">
                   <span>采样峰值</span>
                   <strong>{{ formatValue(analysis.peakDb, 1) }}</strong>
-                  <small>dBFS</small>
+                  <small>dBFS · 非真峰值</small>
                 </div>
                 <div class="diag-stat">
                   <span>RMS</span>

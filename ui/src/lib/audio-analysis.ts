@@ -40,6 +40,9 @@ interface Biquad {
 const CLIP_LEVEL = 0.999;
 const CLIP_RUN_LEVEL = 0.9;
 const POP_DELTA = 0.65;
+/** 相邻采样差的滑动均值衰减率；用于把爆音判定变成局部离群检测。 */
+const POP_AVERAGE_RATE = 0.01;
+const POP_AVERAGE_RATIO = 6;
 const SILENCE_DB = -50;
 const SILENCE_MIN_SECONDS = 0.5;
 
@@ -84,11 +87,13 @@ function db(value: number): number {
 
 export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
   const { sampleRate, numberOfChannels: channels, length: totalSamples, duration } = buffer;
-  const lufsBlock = Math.max(1, Math.round(sampleRate * 0.4));
+  // BS.1770 积分响度：400ms 窗、100ms 步进（75% 重叠）。
+  const lufsHop = Math.max(1, Math.round(sampleRate * 0.1));
+  const lufsWindow = Math.max(1, Math.round(sampleRate * 0.4));
   const rmsBlock = Math.max(1, Math.round(sampleRate * 0.1));
-  const lufsBlocks = Math.ceil(totalSamples / lufsBlock);
+  const lufsSteps = Math.ceil(totalSamples / lufsHop);
   const rmsBlocks = Math.ceil(totalSamples / rmsBlock);
-  const lufsEnergy = new Float64Array(lufsBlocks);
+  const lufsEnergy = new Float64Array(lufsSteps);
   const rmsEnergy = new Float64Array(rmsBlocks);
 
   let peak = 0;
@@ -111,6 +116,8 @@ export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
     let hy1 = 0;
     let hy2 = 0;
     let previous = 0;
+    let previousDelta = 0;
+    let averageDelta = 0;
     let clipping = false;
     let runCounted = false;
 
@@ -133,12 +140,18 @@ export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
 
       const delta = Math.abs(sample - previous);
       if (delta > maxDelta) maxDelta = delta;
-      if (delta > POP_DELTA && magnitude < CLIP_RUN_LEVEL) pops += 1;
+      // 只有明显高于局部平均跳变的孤立跳变才算爆音，避免高频/噪声素材误报。
+      const popThreshold = Math.max(POP_DELTA, averageDelta * POP_AVERAGE_RATIO);
+      if (delta > popThreshold && previousDelta <= popThreshold && magnitude < CLIP_RUN_LEVEL) {
+        pops += 1;
+      }
+      averageDelta += (delta - averageDelta) * POP_AVERAGE_RATE;
+      previousDelta = delta;
       previous = sample;
 
       rmsEnergy[Math.floor(index / rmsBlock)]! += sample * sample;
 
-      // K-weighting：先高架再高通，只保留每 400ms 的能量。
+      // K-weighting：先高架再高通，按 100ms 步进累计能量。
       const shaped =
         shelf.b0 * sample +
         shelf.b1 * sx1 +
@@ -155,21 +168,25 @@ export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
       hx1 = shaped;
       hy2 = hy1;
       hy1 = weighted;
-      lufsEnergy[Math.floor(index / lufsBlock)]! += weighted * weighted;
+      lufsEnergy[Math.floor(index / lufsHop)]! += weighted * weighted;
     }
   }
 
-  const lufsMs = new Float64Array(lufsBlocks);
-  for (let block = 0; block < lufsBlocks; block += 1) {
-    const samples = Math.min(lufsBlock, totalSamples - block * lufsBlock);
-    if (samples > 0) {
-      lufsMs[block] = lufsEnergy[block]! / (samples * channels);
+  // 每个 400ms 窗的能量按声道求和（BS.1770 双声道权重均为 1）；不足一窗的尾部忽略。
+  const stepsPerWindow = Math.max(1, Math.round(lufsWindow / lufsHop));
+  const lufsBlocks: number[] = [];
+  for (let start = 0; start + stepsPerWindow <= lufsSteps; start += 1) {
+    if ((start + stepsPerWindow) * lufsHop > totalSamples) break;
+    let sum = 0;
+    for (let step = 0; step < stepsPerWindow; step += 1) {
+      sum += lufsEnergy[start + step]!;
     }
+    lufsBlocks.push(sum / (stepsPerWindow * lufsHop));
   }
   let rawTotal = 0;
   for (const energy of rmsEnergy) rawTotal += energy;
   const rms = totalSamples > 0 ? rawTotal / (totalSamples * channels) : 0;
-  const integratedLufs = integratedLoudness(lufsMs);
+  const integratedLufs = integratedLoudness(lufsBlocks);
 
   const silence = quietSegments(rmsEnergy, rmsBlock, sampleRate, channels);
   const phase = stereoPhase(buffer);
@@ -195,7 +212,7 @@ export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
     issues.push(`含 ${silence.length} 段静音，共 ${totalSilence.toFixed(1)} 秒`);
     severity = Math.max(severity, totalSilence > 5 ? 2 : 1);
   }
-  if (integratedLufs !== null && (integratedLufs > -8 || integratedLufs < -30)) {
+  if (integratedLufs !== null && (integratedLufs > -9 || integratedLufs < -24)) {
     issues.push(`整体响度 ${integratedLufs.toFixed(1)} LUFS 偏离常见 BGM 区间（-24 ~ -9）`);
     severity = Math.max(severity, 1);
   }
@@ -224,7 +241,7 @@ export function analyseBuffer(buffer: AudioBuffer): AudioAnalysis {
   };
 }
 
-function integratedLoudness(blocks: Float64Array): number | null {
+function integratedLoudness(blocks: readonly number[]): number | null {
   const loudness: number[] = [];
   const energies: number[] = [];
   for (const energy of blocks) {

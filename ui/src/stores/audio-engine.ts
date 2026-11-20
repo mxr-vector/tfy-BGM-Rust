@@ -29,10 +29,10 @@ export interface LoopRegion {
 
 export interface AnalyserHandle {
   context: AudioContext;
-  /** 原始信号，用于波形与频谱。 */
+  /** 原始信号（单声道下混），用于波形与频谱。 */
   analyser: AnalyserNode;
-  /** 经过 K-weighting 后的信号，用于 LUFS 瞬时值。 */
-  loudness: AnalyserNode;
+  /** 各声道 K-weighting 后的信号，用于按 BS.1770 求和计算 LUFS。 */
+  loudness: AnalyserNode[];
 }
 
 export type EngineEvent = 'play' | 'pause' | 'ended';
@@ -55,7 +55,7 @@ const listeners = new Set<(event: EngineEvent) => void>();
 let context: AudioContext | null = null;
 let master: GainNode | null = null;
 let analyser: AnalyserNode | null = null;
-let loudness: AnalyserNode | null = null;
+let loudness: AnalyserNode[] | null = null;
 let kShelf: BiquadFilterNode | null = null;
 let source: AudioBufferSourceNode | null = null;
 let buffer: AudioBuffer | null = null;
@@ -99,9 +99,11 @@ function ensureContext(): AudioContext | null {
   analyser = context.createAnalyser();
   analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.72;
+  analyser.minDecibels = -90;
+  analyser.maxDecibels = -10;
   analyser.connect(master);
 
-  // BS.1770 K-weighting：高架 + 高通，结果只进 loudness analyser。
+  // BS.1770 K-weighting：高架 + 高通。响度按声道能量求和，所以分左右两路采集。
   kShelf = context.createBiquadFilter();
   kShelf.type = 'highshelf';
   kShelf.frequency.value = 1681.974;
@@ -113,15 +115,20 @@ function ensureContext(): AudioContext | null {
   highpass.frequency.value = 38.135;
   highpass.Q.value = 0.500327;
 
-  loudness = context.createAnalyser();
-  loudness.fftSize = 2048;
-  loudness.smoothingTimeConstant = 0;
+  const splitter = context.createChannelSplitter(2);
+  loudness = [context.createAnalyser(), context.createAnalyser()];
 
   const sink = context.createGain();
   sink.gain.value = 0;
   kShelf.connect(highpass);
-  highpass.connect(loudness);
-  loudness.connect(sink);
+  highpass.connect(splitter);
+  for (const [channel, node] of loudness.entries()) {
+    // 400ms 瞬时窗口需要足够的 K 加权样本：32768 点在 44.1k 下约 743ms。
+    node.fftSize = 32768;
+    node.smoothingTimeConstant = 0;
+    splitter.connect(node, channel);
+    node.connect(sink);
+  }
   sink.connect(context.destination);
 
   return context;
