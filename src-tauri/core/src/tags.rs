@@ -553,9 +553,12 @@ mod tests {
         let meta = fs::metadata(&path).unwrap();
 
         assert_eq!(cache.get(&path, &meta).artist.as_deref(), Some("One"));
+        // 元数据没变时命中缓存，不重新解析。
+        assert_eq!(cache.get(&path, &meta).artist.as_deref(), Some("One"));
 
-        fs::write(&path, tag_with_frames(&[frame_v3(b"TPE1", "Two")])).unwrap();
+        // 换成长度不同的内容：缓存键含文件大小，mtime 精度再粗也能判定失效。
+        fs::write(&path, tag_with_frames(&[frame_v3(b"TPE1", "Second")])).unwrap();
         let meta = fs::metadata(&path).unwrap();
-        assert_eq!(cache.get(&path, &meta).artist.as_deref(), Some("Two"));
+        assert_eq!(cache.get(&path, &meta).artist.as_deref(), Some("Second"));
     }
 }

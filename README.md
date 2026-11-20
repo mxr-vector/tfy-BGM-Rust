@@ -422,24 +422,29 @@ dist/tfy-bgm-1.0.0-linux-x86_64.rpm
 
 #### 用 GitHub Actions 打包
 
-`.github/workflows/package.yml` 分 4 个 job：`guard` 校验标签版本 → `windows` / `linux` 测试并打包 → `release` 发布，产物命名与本地脚本完全一致：
+`.github/workflows/package.yml` 先用 `plan` 作业校验标签版本并解析勾选项，再按选择的包与架构展开 `windows` / `linux` 矩阵作业，最后由 `release` 发布，产物命名与本地脚本完全一致：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-推 `v*` 标签会构建全平台并自动创建 Release，附上全部产物和一份合并的 `SHA256SUMS.txt`；标签名（去掉 `v`）必须等于 `tauri.conf.json` 的 `version`，否则 `guard` 直接失败，不会白跑两套构建。
+推 `v*` 标签会构建 **x64 全平台**并自动创建 Release，附上全部产物和一份合并的 `SHA256SUMS.txt`；标签名（去掉 `v`）必须等于 `tauri.conf.json` 的 `version`，否则 `plan` 直接失败，不会白跑构建。
 
-也可以在 Actions 页面手动 `Run workflow`，只构建不发布，产物在运行页面底部下载。手动触发时可选 `empty-library` 跳过曲库：仓库里 `bgm/` 约 350 MB，带曲库的 zip 有 346 MB，私有仓库会明显消耗 Actions 存储配额。
+也可以在 Actions 页面手动 `Run workflow`，勾选要打的包和架构，只构建不发布，产物在运行页面底部下载：
+
+- **包**：Windows 绿色版 / Windows 安装版 / Linux deb / Linux rpm 可任意组合；没勾选的包不编译，对应作业也不会启动。
+- **架构**：`x64`（默认）/ `arm64` / `both`。arm64 走原生 ARM 运行器（`windows-11-arm`、`ubuntu-24.04-arm`），不做交叉编译；首次运行要重新编译依赖，比 x64 慢。arm64 只用于手动构建分发，标签发布仍只出 x64。
+- **曲库**：`empty-library` 跳过曲库——仓库里 `bgm/` 约 350 MB，带曲库的 zip 有 346 MB，私有仓库会明显消耗 Actions 存储配额。
 
 几点说明：
 
-- `guard` 和 `release` 跑 `ubuntu-slim`（1 核容器，分钟数远低于 4 核 VM）；打包必须用完整 VM——slim 镜像里没有 gcc 与 WebKitGTK、容器是非特权的、单 job 还有 15 分钟上限，Tauri 全量编译一定超时。
-- artifact 只保留 3 天（`retention-days: 3`），346 MB 的包不会长期占着存储。
+- 只勾绿色版时不安装 `tauri-cli`；同时勾安装版时先出 NSIS，再复用同一份带 `custom-protocol` 的 exe 组装绿色版，省掉一次前端构建与 Rust 增量检查。
+- 缓存按「作业 + 架构」分开：`tauri-cli` 与 Rust 依赖命中后直接跳过编译，`windows` / `linux`、`x64` / `arm64` 互不干扰。
+- `plan` 和 `release` 跑 `ubuntu-slim`（1 核容器，分钟数远低于 4 核 VM）；打包必须用完整 VM——slim 镜像里没有 gcc 与 WebKitGTK、容器是非特权的、单 job 还有 15 分钟上限，Tauri 全量编译一定超时。
+- artifact 只上传最终安装包（zip / exe / deb / rpm），`dist/tfy-bgm/` 组装目录不进 artifact；只保留 3 天（`retention-days: 3`）。
 - Linux 用 `ubuntu-24.04`，产物只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），更老的发行版不在支持范围内。
 - 打包不依赖任何 deb/rpm 工具链，workflow 里的 apt 步骤只装编译依赖（WebKitGTK 等）。
-- `tauri-cli` 用 `cargo install` 装一次，`~/.cargo/bin` 与 `.crates.toml` 走缓存，命中后直接跳过编译。
 - 工作流只在 GitHub 上生效；当前 `origin` 是 Gitee，需要先推到 GitHub 镜像仓库才会触发。
 
 ---

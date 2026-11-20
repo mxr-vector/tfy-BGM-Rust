@@ -1,22 +1,31 @@
 # 在 GitHub 上构建各平台安装包，产物命名与本地脚本保持一致：
-#   tfy-bgm-<版本>-windows-<arch>-portable.zip
+#   tfy-bgm-<版本>-windows-<arch>-portable.zip        arch = x64 | arm64
 #   tfy-bgm-<版本>-windows-<arch>-setup.exe
-#   tfy-bgm-<版本>-linux-<arch>.deb
-#   tfy-bgm-<版本>-linux-<arch>.rpm
+#   tfy-bgm-<版本>-linux-<arch>.deb                   arch = amd64 | arm64
+#   tfy-bgm-<版本>-linux-<arch>.rpm                   arch = x86_64 | aarch64
 #
 # 触发方式：
-#   1. 推送 v* 标签（如 v1.0.0）——检查 + 构建 + 自动创建 Release 并挂上全部产物与 SHA256SUMS.txt
-#   2. 手动 workflow_dispatch——只构建，产物在 Run 页面底部下载
+#   1. 推送 v* 标签——检查版本 + 构建 x64 全平台 + 自动创建 Release 并挂上全部产物与 SHA256SUMS.txt
+#   2. 手动 workflow_dispatch——勾选要打的包与架构，只构建，产物在 Run 页面底部下载
+#
+# 手动触发的勾选项：
+#   - 包：Windows 绿色版 / Windows 安装版 / Linux deb / Linux rpm，可任意组合；
+#     没勾选的包不会编译，对应的作业也不会启动。
+#   - 架构：x64（默认）/ arm64 / both。arm64 用原生 ARM 运行器（windows-11-arm、
+#     ubuntu-24.04-arm），不做交叉编译；首次运行要重新编译依赖，会比 x64 慢。
+#   - 曲库：with-library / empty-library（仅影响 Windows 绿色版）。
+#   - 只勾绿色版时不安装 tauri-cli；同时勾安装版时先出 NSIS 再复用同一份 exe 组装绿色版，
+#     省掉一次前端构建与 Rust 增量检查。
 #
 # 运行器选择（省资源）：
-#   guard / release 跑 ubuntu-slim：1 核容器，分钟数远低于 4 核 VM，只做检查、下载、上传，够用。
+#   plan / release 跑 ubuntu-slim：1 核容器，分钟数远低于 4 核 VM，只做检查、下载、上传，够用。
 #   打包必须用完整 VM：slim 镜像里没有 gcc / WebKitGTK，容器是非特权的装不了系统库，
 #   而且单 job 上限 15 分钟，Tauri 全量编译会直接超时。
 #
 # 注意：
-#   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 guard 直接失败。
+#   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 plan 直接失败。
 #   - 仓库里含 bgm/ 曲库（约 350 MB），with-library 会产出 346 MB 的 zip；
-#     不想占用 Actions 存储配额时，手动触发时选 empty-library。
+#     不想占用 Actions 存储配额时，手动触发时选 empty-library，或只勾选需要的包。
 #   - Linux 用 ubuntu-24.04：只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），
 #     更老的发行版不在支持范围内，不再做兼容处理。
 #   - deb 与 rpm 都由 tauri 内置的纯 Rust 打包器直出，不需要 dpkg-deb / rpmbuild / Fedora。
@@ -29,6 +38,38 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      windows_portable:
+        description: "Windows 绿色版 (portable zip)"
+        type: boolean
+        default: true
+      windows_installer:
+        description: "Windows 安装版 (NSIS setup.exe)"
+        type: boolean
+        default: true
+      linux_deb:
+        description: "Linux deb"
+        type: boolean
+        default: true
+      linux_rpm:
+        description: "Linux rpm"
+        type: boolean
+        default: true
+      windows_arch:
+        description: "Windows 架构"
+        type: choice
+        options:
+          - x64
+          - arm64
+          - both
+        default: x64
+      linux_arch:
+        description: "Linux 架构"
+        type: choice
+        options:
+          - x64
+          - arm64
+          - both
+        default: x64
       library:
         description: "Windows 绿色版是否内置曲库"
         type: choice
@@ -48,27 +89,100 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  guard:
-    name: Check tag version
+  # 一次性把「标签校验 + 勾选结果」算成下游作业直接可用的输出，省掉后续作业重复判断。
+  plan:
+    name: Plan
     runs-on: ubuntu-slim
+    outputs:
+      windows_arch: ${{ steps.plan.outputs.windows_arch }}
+      linux_arch: ${{ steps.plan.outputs.linux_arch }}
+      portable: ${{ steps.plan.outputs.portable }}
+      nsis: ${{ steps.plan.outputs.nsis }}
+      deb: ${{ steps.plan.outputs.deb }}
+      rpm: ${{ steps.plan.outputs.rpm }}
+      library: ${{ steps.plan.outputs.library }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tag must match tauri.conf.json
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Resolve build plan
+        id: plan
+        env:
+          INPUT_PORTABLE: ${{ inputs.windows_portable }}
+          INPUT_NSIS: ${{ inputs.windows_installer }}
+          INPUT_DEB: ${{ inputs.linux_deb }}
+          INPUT_RPM: ${{ inputs.linux_rpm }}
+          INPUT_WINDOWS_ARCH: ${{ inputs.windows_arch }}
+          INPUT_LINUX_ARCH: ${{ inputs.linux_arch }}
+          INPUT_LIBRARY: ${{ inputs.library }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json',encoding='utf-8'))['version'])")
-          echo "tag=$tag version=$version"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::标签 $tag 与 tauri.conf.json 的版本 $version 不一致，先改版本再打标签"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          dispatch = os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+
+          def flag(name):
+              # 推标签时没有 inputs，默认构建全部包。
+              if not dispatch:
+                  return True
+              return os.environ.get(name, "false") == "true"
+
+          def arches(name):
+              if not dispatch:
+                  return ["x64"]
+              value = os.environ.get(name, "x64")
+              if value == "both":
+                  return ["x64", "arm64"]
+              if value not in ("x64", "arm64"):
+                  print(f"::error::未知架构: {value}")
+                  sys.exit(1)
+              return [value]
+
+          portable = flag("INPUT_PORTABLE")
+          nsis = flag("INPUT_NSIS")
+          deb = flag("INPUT_DEB")
+          rpm = flag("INPUT_RPM")
+
+          if dispatch and not (portable or nsis or deb or rpm):
+              print("::error::没有勾选任何产物，至少选择一个包")
+              sys.exit(1)
+
+          if os.environ["GITHUB_REF"].startswith("refs/tags/v"):
+              version = json.load(
+                  open("src-tauri/tauri.conf.json", encoding="utf-8")
+              )["version"]
+              tag = os.environ["GITHUB_REF_NAME"][1:]
+              print(f"tag={tag} version={version}")
+              if tag != version:
+                  print(f"::error::标签 {tag} 与 tauri.conf.json 的版本 {version} 不一致，先改版本再打标签")
+                  sys.exit(1)
+
+          values = {
+              "portable": str(portable).lower(),
+              "nsis": str(nsis).lower(),
+              "deb": str(deb).lower(),
+              "rpm": str(rpm).lower(),
+              "windows_arch": json.dumps(arches("INPUT_WINDOWS_ARCH") if (portable or nsis) else []),
+              "linux_arch": json.dumps(arches("INPUT_LINUX_ARCH") if (deb or rpm) else []),
+              "library": os.environ.get("INPUT_LIBRARY") or "with-library",
+          }
+          print(values)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for key, value in values.items():
+                  out.write(f"{key}={value}\n")
+          PY
 
   windows:
-    name: Windows portable + NSIS
-    needs: guard
-    runs-on: windows-latest
+    name: Windows ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.windows_arch != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.windows_arch) }}
+    # arm64 走原生 ARM64 运行器，x64 走完整版 windows-latest；两者都自带 MSVC。
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -76,15 +190,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.arch }}
 
-      # tauri-cli 编译一次要几分钟；带上 .crates.toml，命中缓存时 cargo install 会直接跳过
+      # tauri-cli 编译一次要几分钟；带上 .crates.toml，命中缓存时 cargo install 会直接跳过。
+      # 只有打 NSIS 才需要，绿色版直接 cargo build。
       - uses: actions/cache@v4
+        if: needs.plan.outputs.nsis == 'true'
         with:
           path: |
             ~/.cargo/bin
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-v2
 
       - uses: pnpm/action-setup@v4
 
@@ -98,31 +215,43 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install tauri-cli
+        if: needs.plan.outputs.nsis == 'true'
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Portable package
-        shell: pwsh
-        run: |
-          if ('${{ inputs.library }}' -eq 'empty-library') {
-            powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
-          } else {
-            powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
-          }
-
+      # 先出 NSIS：cargo tauri build 会顺带产出带 custom-protocol 的 release exe，
+      # 后面的绿色版用 -SkipBuild 复用，不再跑一遍 pnpm build + cargo build。
       - name: NSIS installer
+        if: needs.plan.outputs.nsis == 'true'
         run: powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
 
+      - name: Portable package
+        if: needs.plan.outputs.portable == 'true'
+        shell: pwsh
+        run: |
+          $cmd = @("-ExecutionPolicy", "Bypass", "-File", "scripts/package-portable.ps1")
+          if ('${{ needs.plan.outputs.nsis }}' -eq 'true') { $cmd += "-SkipBuild" }
+          if ('${{ needs.plan.outputs.library }}' -eq 'empty-library') { $cmd += "-EmptyBgm" }
+          powershell @cmd
+
+      # 只传最终文件，dist/tfy-bgm/ 组装目录不进 artifact，省一次几百 MB 的上传。
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
-          path: dist/tfy-bgm-*
+          name: windows-${{ matrix.arch }}
+          path: |
+            dist/tfy-bgm-*.zip
+            dist/tfy-bgm-*.exe
           if-no-files-found: error
           retention-days: 3
 
   linux:
-    name: Test + Linux deb/rpm
-    needs: guard
-    runs-on: ubuntu-24.04
+    name: Linux ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.linux_arch != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.linux_arch) }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -130,10 +259,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.arch }}
 
-      # bgm-core 不依赖 Tauri，不用装 WebKitGTK；链接测试二进制需要 gcc（镜像自带）
-      # 仓库根目录没有 Cargo.toml，workspace 在 src-tauri/
+      # bgm-core 不依赖 Tauri，不用装 WebKitGTK；链接测试二进制需要 gcc（镜像自带）。
+      # 仓库根目录没有 Cargo.toml，workspace 在 src-tauri/。
+      # 两种架构都跑会重复编译，只在 x64 上跑一次。
       - name: cargo test -p bgm-core
+        if: matrix.arch == 'x64'
         working-directory: src-tauri
         run: cargo test -p bgm-core
 
@@ -158,7 +290,7 @@ jobs:
             ~/.cargo/bin
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-v2
 
       - uses: pnpm/action-setup@v4
 
@@ -174,14 +306,23 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
 
-      # deb 与 rpm 都是 tauri 内置打包器直出的，不需要 rpmbuild；这里只装编译依赖
-      - name: Build deb and rpm
-        run: bash scripts/package-linux.sh deb rpm
+      # deb 与 rpm 都是 tauri 内置打包器直出的，不需要 rpmbuild；这里只装编译依赖。
+      - name: Build packages
+        env:
+          DEB: ${{ needs.plan.outputs.deb }}
+          RPM: ${{ needs.plan.outputs.rpm }}
+        run: |
+          formats=()
+          if [ "$DEB" = "true" ]; then formats+=(deb); fi
+          if [ "$RPM" = "true" ]; then formats+=(rpm); fi
+          bash scripts/package-linux.sh "${formats[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
-          path: dist/tfy-bgm-*
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/tfy-bgm-*.deb
+            dist/tfy-bgm-*.rpm
           if-no-files-found: error
           retention-days: 3
 
@@ -196,7 +337,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # 两个 job 各自只对自己的产物算校验值，这里合成一份覆盖全平台的
+      # 各架构作业只对自己的产物算校验值，这里合成一份覆盖全平台的
       - name: Write SHA256SUMS.txt
         run: |
           cd artifacts
