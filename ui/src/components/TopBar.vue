@@ -169,7 +169,7 @@ onBeforeUnmount(() => {
         type="button"
         class="toolbar-btn"
         id="btn-import"
-        title="导入本地 MP3 到曲库"
+        title="导入本地音频（mp3 / m4a / flac / wav / ogg）到曲库"
         :disabled="importing"
         @click="openImport"
       >

@@ -41,6 +41,23 @@ export type SortBy = 'default' | 'name';
 export type WallpaperFit = 'cover' | 'contain';
 export type WallpaperKind = 'image' | 'video';
 
+/** 一路输出设备路由；`deviceId` 为 `default` 时代表系统默认输出。 */
+export interface OutputRoute {
+  deviceId: string;
+  label: string;
+  /** 这一路的独立音量（0~1），叠加在播放器主音量之上。 */
+  volume: number;
+  muted: boolean;
+  enabled: boolean;
+}
+
+/** `enumerateDevices()` 暴露的输出设备。 */
+export interface OutputDevice {
+  deviceId: string;
+  label: string;
+  kind: string;
+}
+
 export interface Prefs {
   version: number;
   libraryDir: string | null;
@@ -50,6 +67,9 @@ export interface Prefs {
   playbackRate: number;
   playMode: PlayMode;
   sortBy: SortBy;
+  /** 切歌交叉淡入淡出时长（秒），0 为硬切。 */
+  crossfadeSeconds: number;
+  outputRoutes: OutputRoute[];
   loudnessNormalization: boolean;
   exportScene: string;
   wallpaper: string;
@@ -223,4 +243,15 @@ export interface WallpaperSelection {
   opacity: number;
   blur: number;
   fit: WallpaperFit;
+}
+
+/** 本机开放接口状态。 */
+export interface ApiStatus {
+  enabled: boolean;
+  running: boolean;
+  ready: boolean;
+  port: number;
+  baseUrl: string;
+  token: string;
+  error: string | null;
 }

@@ -7,15 +7,17 @@ use bgm_core::BatchReport;
 use bgm_core::LibrarySnapshot;
 use bgm_core::Prefs;
 use bgm_core::export::export_audio;
-use bgm_core::library::AUDIO_EXTENSION;
-use bgm_core::loudness::{EXPORT_PRESETS, ExportPreset, ffmpeg_path};
+use bgm_core::library::{AUDIO_EXTENSIONS, DEFAULT_AUDIO_EXTENSION, audio_extension};
+use bgm_core::loudness::{EXPORT_PRESETS, ExportPreset, NORMALIZED_EXTENSION, ffmpeg_path};
 use bgm_core::paths::TRASH_DIR_NAME;
 use bgm_core::{LoopBook, Schedule};
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::api::{ApiBridge, ApiStatus, CommandFailure};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
@@ -23,6 +25,16 @@ type CommandResult<T> = Result<T, String>;
 
 fn describe(error: anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+/// 导出目标扩展名：归一化（需要 ffmpeg）输出 mp3，否则原样复制源格式。
+fn export_extension(state: &AppState, file_name: &str) -> &'static str {
+    let settings = state.export_settings();
+    if settings.normalize && ffmpeg_path().is_some() {
+        NORMALIZED_EXTENSION
+    } else {
+        audio_extension(file_name).unwrap_or(DEFAULT_AUDIO_EXTENSION)
+    }
 }
 
 /// 在文件管理器中定位配置文件；定位失败时退化为打开其所在目录。
@@ -42,6 +54,39 @@ fn reveal_in_dir(app: &AppHandle, path: &Path, label: &str) -> CommandResult<()>
 #[tauri::command]
 pub fn bootstrap(state: State<'_, AppState>) -> Bootstrap {
     state.bootstrap()
+}
+
+/// 开放接口状态：监听端口、token 与启动错误，供「播放输出」面板展示。
+#[tauri::command]
+pub fn api_info(bridge: State<'_, ApiBridge>) -> ApiStatus {
+    bridge.status()
+}
+
+/// 前端把当前播放状态推给接口层；同时广播给 SSE 订阅者。
+#[tauri::command]
+pub fn api_publish_state(bridge: State<'_, ApiBridge>, snapshot: Value) {
+    bridge.publish(snapshot);
+}
+
+/// 前端回传 HTTP 命令的执行结果；`code` 是前端给出的 HTTP 语义状态（400/404/409…）。
+#[tauri::command]
+pub fn api_reply(
+    bridge: State<'_, ApiBridge>,
+    id: u64,
+    ok: bool,
+    data: Option<Value>,
+    error: Option<String>,
+    code: Option<u16>,
+) {
+    let result = if ok {
+        Ok(data.unwrap_or(Value::Null))
+    } else {
+        Err(CommandFailure::from_frontend(
+            code,
+            error.unwrap_or_else(|| "命令执行失败".to_owned()),
+        ))
+    };
+    bridge.reply(id, result);
 }
 
 #[tauri::command]
@@ -240,7 +285,7 @@ pub async fn import_tracks(
         .dialog()
         .file()
         .set_title("导入音频到曲库")
-        .add_filter("MP3 音频", &[AUDIO_EXTENSION])
+        .add_filter("音频（MP3 / M4A / FLAC / WAV / OGG）", &AUDIO_EXTENSIONS)
         .blocking_pick_files()
     else {
         return Ok(None);
@@ -347,16 +392,18 @@ pub async fn export_track(
         .song(&key)
         .ok_or_else(|| format!("曲目不存在：{key}"))?;
 
+    let target_ext = export_extension(&state, &song.file_name);
     let file_name = format!(
-        "{}.{AUDIO_EXTENSION}",
+        "{}.{target_ext}",
         bgm_core::export::safe_file_name(&song.title)
     );
+    let filter_label = format!("{} 音频", target_ext.to_ascii_uppercase());
     let mut dialog = app
         .dialog()
         .file()
         .set_title("导出音频")
         .set_file_name(file_name)
-        .add_filter("MP3 音频", &[AUDIO_EXTENSION]);
+        .add_filter(&filter_label, &[target_ext]);
     if let Ok(download_dir) = app.path().download_dir() {
         dialog = dialog.set_directory(download_dir);
     }

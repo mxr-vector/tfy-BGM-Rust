@@ -6,6 +6,12 @@
  * 2. 实时 AnalyserNode 供频谱、LUFS 仪表使用；
  * 3. 解码后的 AudioBuffer 可直接做整曲波形、削波与相位分析。
  *
+ * 切歌时引擎会同时保留新旧两个声部：旧声部按设定时长淡出，新声部淡入，
+ * 因此「下一首」不会出现硬切或静音缝；曲目自然播完切到下一首时，新声部
+ * 也按同一时长淡入。播放暂停使用更短的淡出，避免爆音。多输出设备通过
+ * `MediaStreamAudioDestinationNode` 把同一路混音桥接到各设备的独立 AudioContext；
+ * 每个设备有自己的增益，互不影响。
+ *
  * 业务状态（当前曲目、队列、错误提示）仍由播放器层维护，本模块只负责发声与时钟。
  */
 
@@ -46,18 +52,40 @@ export interface LoadOptions {
   autoplay?: boolean;
   restoreTime?: number;
   loop?: LoopRegion | null;
+  /** 与上一首交叉淡入淡出的秒数；`0` 表示硬切。 */
+  crossfadeSeconds?: number;
+  /** 本曲启动时的淡入秒数（自然播完切下一首时补齐淡入）；`0` 用默认短淡入。 */
+  fadeInSeconds?: number;
   /** 自动播放被 WebView 拦截时回调，供播放器把 UI 状态改回暂停。 */
   onAutoplayBlocked?: () => void;
 }
 
+interface Voice {
+  node: AudioBufferSourceNode;
+  gain: GainNode;
+  token: number;
+}
+
 const listeners = new Set<(event: EngineEvent) => void>();
+
+/** 播放 / 暂停时的短淡入淡出：足够盖住爆音，又不会让按键感觉迟滞。 */
+const TRANSPORT_FADE_SECONDS = 0.08;
 
 let context: AudioContext | null = null;
 let master: GainNode | null = null;
+/** 系统默认输出这一路的独立增益（多设备路由中的 `default`）。 */
+let defaultSink: GainNode | null = null;
+let defaultSinkVolume = 1;
+let defaultSinkMuted = false;
+/** 供其它输出设备桥接的混音流；没有多设备需求时不会产生额外输出。 */
+let mixDest: MediaStreamAudioDestinationNode | null = null;
 let analyser: AnalyserNode | null = null;
 let loudness: AnalyserNode[] | null = null;
 let kShelf: BiquadFilterNode | null = null;
+
 let source: AudioBufferSourceNode | null = null;
+let sourceGain: GainNode | null = null;
+let outgoing: Voice | null = null;
 let buffer: AudioBuffer | null = null;
 
 let loadedPath = '';
@@ -94,7 +122,19 @@ function ensureContext(): AudioContext | null {
   context = new Constructor();
   master = context.createGain();
   master.gain.value = muted ? 0 : volume;
-  master.connect(context.destination);
+
+  // 默认输出与外部设备各有一路增益：主音量是全局的，设备音量只作用于本路。
+  defaultSink = context.createGain();
+  defaultSink.gain.value = defaultSinkMuted ? 0 : defaultSinkVolume;
+  master.connect(defaultSink);
+  defaultSink.connect(context.destination);
+
+  // 多设备路由：把混音复制成 MediaStream，由各设备自己的 AudioContext 播放，
+  // 这样所有设备共享同一条渲染时钟，不会因多路独立播放而逐渐跑偏。
+  if (typeof context.createMediaStreamDestination === 'function') {
+    mixDest = context.createMediaStreamDestination();
+    master.connect(mixDest);
+  }
 
   analyser = context.createAnalyser();
   analyser.fftSize = 2048;
@@ -132,6 +172,30 @@ function ensureContext(): AudioContext | null {
   sink.connect(context.destination);
 
   return context;
+}
+
+export function getAudioContext(): AudioContext | null {
+  return ensureContext();
+}
+
+/** 混音流：供多输出设备桥接使用；不支持 MediaStream 的环境返回 `null`。 */
+export function getMixStream(): MediaStream | null {
+  const ctx = ensureContext();
+  if (!ctx || !mixDest) return null;
+  return mixDest.stream;
+}
+
+/** 系统默认输出这一路的独立音量（0~1）。 */
+export function setDefaultOutput(volumeValue: number, isMuted: boolean): void {
+  defaultSinkVolume = clamp(Number.isFinite(volumeValue) ? volumeValue : 1, 0, 1);
+  defaultSinkMuted = isMuted;
+  if (context && defaultSink) {
+    defaultSink.gain.setTargetAtTime(
+      defaultSinkMuted ? 0 : defaultSinkVolume,
+      context.currentTime,
+      0.012,
+    );
+  }
 }
 
 export function getAnalyserHandle(): AnalyserHandle | null {
@@ -173,6 +237,7 @@ export function applyAudioSettings(nextVolume: number, nextMuted: boolean, nextR
     }
     rate = nextRate;
     if (source) source.playbackRate.value = rate;
+    if (outgoing) outgoing.node.playbackRate.value = rate;
   }
 }
 
@@ -209,7 +274,7 @@ export function setLoopRegion(region: LoopRegion | null): void {
   }
 }
 
-export function startPlayback(): void {
+export function startPlayback(fadeIn: number = TRANSPORT_FADE_SECONDS): void {
   if (!buffer || playing || loading) return;
   const ctx = ensureContext();
   if (!ctx) return;
@@ -220,7 +285,7 @@ export function startPlayback(): void {
     if (region && (offset < region.start || offset >= region.end - 0.01)) {
       offset = region.start;
     }
-    spawnSource(offset);
+    spawnSource(offset, fadeIn);
     playing = true;
     emit('play');
     startClock();
@@ -249,7 +314,28 @@ export function pausePlayback(): void {
   if (!playing) return;
   offset = currentTime();
   playing = false;
-  stopSource();
+
+  const voice = takeVoice();
+  if (context && voice) {
+    const now = context.currentTime;
+    const gain = voice.gain.gain;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
+    gain.linearRampToValueAtTime(0, now + TRANSPORT_FADE_SECONDS);
+    window.setTimeout(() => stopVoice(voice), TRANSPORT_FADE_SECONDS * 1000 + 80);
+  }
+
+  // 交叉淡出中的旧声部也要一起收掉，否则按下暂停后它还会继续响到淡出结束。
+  if (outgoing && context) {
+    const fading = outgoing;
+    outgoing = null;
+    const now = context.currentTime;
+    const gain = fading.gain.gain;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
+    gain.linearRampToValueAtTime(0, now + TRANSPORT_FADE_SECONDS);
+    window.setTimeout(() => stopVoice(fading), TRANSPORT_FADE_SECONDS * 1000 + 80);
+  }
   stopClock();
   syncClock();
   emit('pause');
@@ -295,7 +381,14 @@ export function syncClock(): void {
 
 export async function loadSource(
   path: string,
-  { autoplay = true, restoreTime = 0, loop = null, onAutoplayBlocked }: LoadOptions = {},
+  {
+    autoplay = true,
+    restoreTime = 0,
+    loop = null,
+    crossfadeSeconds = 0,
+    fadeInSeconds = 0,
+    onAutoplayBlocked,
+  }: LoadOptions = {},
 ): Promise<LoadOutcome> {
   const token = (loadToken += 1);
   autoplayBlocked = onAutoplayBlocked ?? null;
@@ -308,18 +401,28 @@ export async function loadSource(
     return { status: 'failed', error: new Error('当前环境不支持 Web Audio') };
   }
 
-  // 加载期间禁止 startPlayback：否则会放出尚未被新曲替换的旧 buffer。
+  // 正在播放时切换曲目：保留旧声部继续发声，等新曲解码完成再做交叉淡出。
+  const crossfade = clamp(crossfadeSeconds, 0, 12);
+  const keepPlaying = autoplay && playing && source !== null && buffer !== null && crossfade > 0.05;
   const wasPlaying = playing;
-  playing = false;
+
   loading = true;
-  stopSource();
-  stopClock();
-  // 立即释放旧曲 PCM，避免解码新曲时新旧两份同时驻留。
-  buffer = null;
-  audioState.duration = 0;
-  audioState.currentTime = 0;
-  audioState.bufferedPercent = 0;
-  if (wasPlaying) emit('pause');
+  if (keepPlaying) {
+    // 新曲信息已经显示在界面上，进度先归零，避免沿用上一首的时长。
+    audioState.duration = 0;
+    audioState.currentTime = 0;
+    audioState.bufferedPercent = 0;
+  } else {
+    // 加载期间禁止 startPlayback：否则会放出尚未被新曲替换的旧 buffer。
+    playing = false;
+    stopSource();
+    stopClock();
+    buffer = null;
+    audioState.duration = 0;
+    audioState.currentTime = 0;
+    audioState.bufferedPercent = 0;
+    if (wasPlaying) emit('pause');
+  }
 
   let blob: Blob;
   try {
@@ -355,8 +458,18 @@ export async function loadSource(
   audioState.duration = decoded.duration;
   audioState.bufferedPercent = 100;
 
-  if (autoplay) {
-    startPlayback();
+  if (keepPlaying && playing) {
+    crossfadeTo(decoded, offset, crossfade);
+    startClock();
+    // 交叉淡入期间播放从未中断，重新广播一次 play，让界面状态与引擎保持一致。
+    emit('play');
+    return { status: 'loaded' };
+  }
+
+  // 未走交叉淡出的路径（关闭淡入淡出 / 原本暂停 / 上一首自然播完）在解码完成后
+  // 按调用方的 autoplay 意图播放；交叉淡出路径若中途被暂停则保持暂停。
+  if (autoplay && !keepPlaying) {
+    startPlayback(fadeInSeconds > 0.05 ? clamp(fadeInSeconds, 0, 12) : TRANSPORT_FADE_SECONDS);
   } else {
     syncClock();
   }
@@ -380,17 +493,72 @@ export function unloadSource(): void {
   audioState.loadedPath = '';
 }
 
-function spawnSource(position: number): void {
+/**
+ * 生成一个新声部并接到分析节点；`fadeIn` 大于 0 时从静音线性推到满音量。
+ * 返回的 token 与 `sourceToken` 对齐，用于丢弃被后续操作取代的 ended 回调。
+ */
+function spawnSource(position: number, fadeIn = 0): void {
   const ctx = context;
   if (!ctx || !buffer || !analyser || !kShelf) return;
 
   stopSource();
+  const voice = buildVoice(buffer, position, fadeIn);
+  if (!voice) return;
+  source = voice.node;
+  sourceGain = voice.gain;
+  sourceToken = voice.token;
+}
+
+/** 交叉淡出：旧声部在 `seconds` 内收到 0，新声部同时淡入。 */
+function crossfadeTo(nextBuffer: AudioBuffer, position: number, seconds: number): void {
+  const ctx = context;
+  if (!ctx || !analyser || !kShelf) return;
+
+  // 连续快速切歌时，上一轮正在淡出的声部直接停掉，避免叠出三层声音。
+  if (outgoing) {
+    stopVoice(outgoing);
+    outgoing = null;
+  }
+
+  const previous = takeVoice();
+  const voice = buildVoice(nextBuffer, position, seconds);
+  if (!voice) return;
+  source = voice.node;
+  sourceGain = voice.gain;
+  sourceToken = voice.token;
+  buffer = nextBuffer;
+  startedAt = ctx.currentTime;
+  offset = position;
+
+  if (previous) {
+    const now = ctx.currentTime;
+    const gain = previous.gain.gain;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
+    gain.linearRampToValueAtTime(0, now + seconds);
+    const fading = previous;
+    outgoing = fading;
+    window.setTimeout(() => {
+      stopVoice(fading);
+      if (outgoing === fading) outgoing = null;
+    }, seconds * 1000 + 120);
+  }
+}
+
+function buildVoice(
+  targetBuffer: AudioBuffer,
+  position: number,
+  fadeIn: number,
+): Voice | null {
+  const ctx = context;
+  if (!ctx || !analyser || !kShelf) return null;
+
   const node = ctx.createBufferSource();
-  node.buffer = buffer;
+  node.buffer = targetBuffer;
   node.playbackRate.value = rate;
 
-  const region = activeRegion();
-  let startPosition = clamp(position, 0, Math.max(0, buffer.duration - 0.02));
+  const region = activeRegionFor(targetBuffer);
+  let startPosition = clamp(position, 0, Math.max(0, targetBuffer.duration - 0.02));
   if (region) {
     startPosition = clamp(startPosition, region.start, Math.max(region.start, region.end - 0.01));
     node.loop = true;
@@ -398,44 +566,83 @@ function spawnSource(position: number): void {
     node.loopEnd = region.end;
   }
 
-  node.connect(analyser);
-  node.connect(kShelf);
+  const gain = ctx.createGain();
+  const now = ctx.currentTime;
+  if (fadeIn > 0.001) {
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(1, now + fadeIn);
+  } else {
+    gain.gain.setValueAtTime(1, now);
+  }
+
+  node.connect(gain);
+  gain.connect(analyser);
+  gain.connect(kShelf);
 
   offset = startPosition;
-  startedAt = ctx.currentTime;
+  startedAt = now;
   const token = (sourceToken += 1);
   node.onended = () => {
     if (token !== sourceToken || !playing) return;
     playing = false;
-    offset = buffer?.duration ?? 0;
+    offset = targetBuffer.duration;
     stopClock();
     syncClock();
     emit('ended');
   };
-
   node.start(0, startPosition);
-  source = node;
+  return { node, gain, token };
+}
+
+function activeRegionFor(target: AudioBuffer): LoopRegion | null {
+  if (!loopRegion) return null;
+  const start = clamp(loopRegion.start, 0, target.duration);
+  const end = clamp(loopRegion.end, 0, target.duration);
+  return end - start > 0.05 ? { start, end } : null;
+}
+
+/** 取出当前声部，同时作废它的 ended 回调。 */
+function takeVoice(): Voice | null {
+  const node = source;
+  const gain = sourceGain;
+  source = null;
+  sourceGain = null;
+  sourceToken += 1;
+  if (!node || !gain) return null;
+  node.onended = null;
+  return { node, gain, token: sourceToken };
+}
+
+function stopVoice(voice: Voice): void {
+  voice.node.onended = null;
+  try {
+    voice.node.stop();
+  } catch {
+    // 已经自然结束时 stop 会抛错，忽略即可。
+  }
+  voice.node.disconnect();
+  voice.gain.disconnect();
 }
 
 function stopSource(): void {
   sourceToken += 1;
-  const node = source;
+  const current = source && sourceGain ? { node: source, gain: sourceGain, token: sourceToken } : null;
   source = null;
-  if (!node) return;
-  node.onended = null;
-  try {
-    node.stop();
-  } catch {
-    // 已经自然结束时 stop 会抛错，忽略即可。
+  sourceGain = null;
+  if (current) stopVoice(current);
+
+  if (outgoing) {
+    stopVoice(outgoing);
+    outgoing = null;
   }
-  node.disconnect();
 }
 
 function startClock(): void {
   if (clockFrame) return;
   const tick = () => {
-    audioState.currentTime = currentTime();
-    audioState.duration = buffer?.duration ?? 0;
+    if (!loading) audioState.currentTime = currentTime();
+    // 加载新曲期间 buffer 仍是上一首，时长要跟随加载状态归零，避免界面显示旧时长。
+    audioState.duration = loading ? 0 : (buffer?.duration ?? 0);
     clockFrame = requestAnimationFrame(tick);
   };
   clockFrame = requestAnimationFrame(tick);

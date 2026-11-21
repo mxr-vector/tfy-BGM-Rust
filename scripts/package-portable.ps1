@@ -10,7 +10,7 @@
 # -EmptyBgm: create an empty category scaffold (~3.7 MB); point the app at a library later.
 #
 # Existing bgm/ files inside the package are preserved. For a clean rebuild, delete
-# dist\tfy-bgm manually. -EmptyBgm refuses to run if the existing bgm/ has mp3 files.
+# dist\tfy-bgm manually. -EmptyBgm refuses to run if the existing bgm/ has audio files.
 # -WithBgm is kept for compatibility and is equivalent to the default.
 # -SkipBuild reuses src-tauri\target\release\tfy-bgm.exe. -NoZip only assembles the folder.
 # The bgm/ folder is never embedded into the executable.
@@ -83,14 +83,18 @@ New-Item -ItemType Directory -Force (Join-Path $package "assets") | Out-Null
 Copy-Item (Join-Path $repo "assets\bg") (Join-Path $package "assets") -Recurse -Force
 
 $bgmTarget = Join-Path $package "bgm"
-$existingMp3 = 0
+$audioExtensions = @(".mp3", ".m4a", ".flac", ".wav", ".ogg")
+$existingAudio = 0
 if (Test-Path $bgmTarget) {
-    $existingMp3 = @(Get-ChildItem $bgmTarget -Recurse -File -Filter *.mp3).Count
+    $existingAudio = @(
+        Get-ChildItem $bgmTarget -Recurse -File |
+            Where-Object { $audioExtensions -contains $_.Extension.ToLowerInvariant() }
+    ).Count
 }
 
 if ($EmptyBgm -and -not $WithBgm) {
-    if ($existingMp3 -gt 0) {
-        throw "Existing bgm/ contains $existingMp3 mp3 files. Move it or choose another -OutputDir before building an empty package."
+    if ($existingAudio -gt 0) {
+        throw "Existing bgm/ contains $existingAudio audio files. Move it or choose another -OutputDir before building an empty package."
     }
     New-Item -ItemType Directory -Force $bgmTarget | Out-Null
     $categories = Get-Content (Join-Path $srcTauri "core\assets\categories.default.json") -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -99,8 +103,8 @@ if ($EmptyBgm -and -not $WithBgm) {
     }
     Write-Host "bgm/: empty category scaffold"
 } elseif (Test-Path $bgmSource) {
-    if ($existingMp3 -gt 0) {
-        Write-Host "bgm/: kept existing $existingMp3 mp3 files (not overwritten)"
+    if ($existingAudio -gt 0) {
+        Write-Host "bgm/: kept existing $existingAudio audio files (not overwritten)"
     } else {
         Copy-Item $bgmSource $bgmTarget -Recurse -Force
         Write-Host "bgm/: copied from $bgmSource"
@@ -128,7 +132,7 @@ if ($NoZip) {
     # writes entry names with "\", which breaks unzip on Linux/macOS. Entries must
     # use "/". Directories are added explicitly so an empty bgm/ scaffold survives.
     #
-    # CompressionLevel.Fastest: the payload is mostly already-compressed mp3,
+    # CompressionLevel.Fastest: the payload is mostly already-compressed audio,
     # Optimal only costs time.
     $level = [System.IO.Compression.CompressionLevel]::Fastest
     $rootName = "tfy-bgm"
@@ -165,7 +169,7 @@ Write-Checksums -DistDir $dist -Version $version
 
 Write-Host "[done]"
 Write-Host "Folder : $package"
-Write-Host "Layout : tfy-bgm.exe + bgm\<category>\*.mp3"
+Write-Host "Layout : tfy-bgm.exe + bgm\<category>\*.{mp3,m4a,flac,wav,ogg}"
 if (Test-Path $zipPath) {
     Write-Host ("Archive: $zipPath ({0})" -f (Format-FileSize (Get-Item $zipPath).Length))
     Write-Host "Upload the .zip; users extract it and run tfy-bgm.exe."

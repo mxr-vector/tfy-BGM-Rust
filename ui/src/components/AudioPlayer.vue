@@ -35,6 +35,7 @@ import { categoryById, state, visibleSongs } from '@/stores/state';
 import ExportSettingsPopover from './ExportSettingsPopover.vue';
 import Icon from './Icon.vue';
 import MarqueeText from './MarqueeText.vue';
+import OutputPanel from './OutputPanel.vue';
 
 const progressEl = ref<HTMLElement | null>(null);
 const dragging = ref(false);
@@ -433,12 +434,13 @@ onBeforeUnmount(() => {
               {{ Math.round(effectiveVolume * 100) }}%
             </span>
           </div>
+          <OutputPanel />
           <ExportSettingsPopover />
           <button
             type="button"
             class="action-btn"
             id="btn-download"
-            title="导出当前音频 (.mp3)"
+            title="导出当前音频（归一化时输出 mp3，否则保持原格式）"
             :disabled="exporting || !song"
             @click="song && exportSong(song.key)"
           >

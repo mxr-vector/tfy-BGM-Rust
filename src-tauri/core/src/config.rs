@@ -25,6 +25,9 @@ const MIN_AUTO_SKIPS: u32 = 0;
 const MAX_AUTO_SKIPS: u32 = 20;
 const MIN_TIMEOUT_MS: u64 = 1_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_API_PORT: u16 = 8737;
+const MIN_API_PORT: u16 = 1_024;
+const MAX_TOKEN_CHARS: usize = 128;
 
 /// `config.json` 的完整结构。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +36,28 @@ pub struct AppConfig {
     pub brand: BrandInfo,
     pub player: PlayerConfig,
     pub ui: UiCopy,
+    /// 本机开放接口（HTTP + SSE），供 OBS、Stream Deck、脚本等外部项目接入。
+    pub api: ApiConfig,
+}
+
+/// 开放接口配置：只监听回环地址，token 为空表示不做鉴权。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ApiConfig {
+    pub enabled: bool,
+    pub port: u16,
+    /// 可选的 Bearer token；非空时所有请求（含 SSE）都必须携带。
+    pub token: String,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: DEFAULT_API_PORT,
+            token: String::new(),
+        }
+    }
 }
 
 /// 品牌信息：界面标题、副标题与系统窗口标题。
@@ -122,6 +147,7 @@ impl Default for AppConfig {
                     results_title: "我的收藏夹".to_owned(),
                 },
             },
+            api: ApiConfig::default(),
         }
     }
 }
@@ -182,6 +208,19 @@ impl AppConfig {
         self.ui.all = all.normalize(&defaults.ui.all);
         let favorites = std::mem::take(&mut self.ui.favorites);
         self.ui.favorites = favorites.normalize(&defaults.ui.favorites);
+
+        let api = std::mem::take(&mut self.api);
+        self.api = api.normalize();
+        self
+    }
+}
+
+impl ApiConfig {
+    fn normalize(mut self) -> Self {
+        if self.port < MIN_API_PORT {
+            self.port = DEFAULT_API_PORT;
+        }
+        self.token = self.token.trim().chars().take(MAX_TOKEN_CHARS).collect();
         self
     }
 }
@@ -379,5 +418,19 @@ mod tests {
         assert!(json["ui"]["all"]["labelEn"].is_string());
         assert!(json["ui"]["all"]["resultsTitle"].is_string());
         assert!(json["ui"]["favorites"]["resultsTitle"].is_string());
+        assert_eq!(json["api"]["enabled"], true);
+        assert_eq!(json["api"]["port"], DEFAULT_API_PORT);
+        assert!(json["api"]["token"].is_string());
+    }
+
+    #[test]
+    fn api_port_and_token_are_normalized() {
+        let raw = r#"{ "api": { "enabled": false, "port": 80, "token": "  secret-token  " } }"#;
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+        let config = config.normalize();
+
+        assert!(!config.api.enabled);
+        assert_eq!(config.api.port, DEFAULT_API_PORT);
+        assert_eq!(config.api.token, "secret-token");
     }
 }

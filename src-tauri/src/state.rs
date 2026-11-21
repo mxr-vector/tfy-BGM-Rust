@@ -14,8 +14,8 @@ use bgm_core::export::ExportSettings;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
 use bgm_core::tags::MetaCache;
 use bgm_core::{
-    AppConfig, Category, LibrarySnapshot, LibrarySource, LoopBook, LoopPoint, Prefs, Schedule, Song,
-    scan_library_cached,
+    AppConfig, Category, LibrarySnapshot, LibrarySource, LoopBook, LoopPoint, Prefs, Schedule,
+    Song, scan_library_cached,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
@@ -285,6 +285,16 @@ impl AppState {
         self.runtime.read().library.song(key).cloned()
     }
 
+    /// 当前曲库快照（供开放接口读取，不占用界面）。
+    pub fn library_snapshot(&self) -> LibrarySnapshot {
+        self.runtime.read().library.clone()
+    }
+
+    /// 开放接口配置；修改 `config.json` 后重启应用生效。
+    pub fn api_config(&self) -> bgm_core::ApiConfig {
+        self.config.read().api.clone()
+    }
+
     pub fn root(&self) -> PathBuf {
         self.runtime.read().root.clone()
     }
@@ -303,7 +313,9 @@ impl AppState {
         if let Some(error) = schedule.overlap_error() {
             bail!("{error}");
         }
-        schedule.save(&self.schedule_path).context("保存节目单失败")?;
+        schedule
+            .save(&self.schedule_path)
+            .context("保存节目单失败")?;
         *self.schedule.write() = schedule.clone();
         Ok(schedule)
     }
@@ -367,7 +379,11 @@ impl AppState {
         let _guard = self.ops_lock.try_lock()?;
         let (root, source, previous) = {
             let runtime = self.runtime.read();
-            (runtime.root.clone(), runtime.source, runtime.library.clone())
+            (
+                runtime.root.clone(),
+                runtime.source,
+                runtime.library.clone(),
+            )
         };
         let categories = self.category_items();
         let mut next = scan_library_cached(&root, source, &categories, &self.meta_cache);
@@ -376,7 +392,8 @@ impl AppState {
         }
 
         let diff = diff_songs(&previous.songs, &next.songs);
-        next.warnings.extend(self.sync_track_metadata(&diff.moved, &diff.removed));
+        next.warnings
+            .extend(self.sync_track_metadata(&diff.moved, &diff.removed));
 
         *self.runtime.write() = Runtime {
             root,
@@ -704,7 +721,8 @@ fn diff_songs(previous: &[Song], next: &[Song]) -> SongDiff {
         .iter()
         .map(|song| (song.key.as_str(), song))
         .collect();
-    let new_by_key: HashMap<&str, &Song> = next.iter().map(|song| (song.key.as_str(), song)).collect();
+    let new_by_key: HashMap<&str, &Song> =
+        next.iter().map(|song| (song.key.as_str(), song)).collect();
 
     let mut moved = Vec::new();
     let mut removed = Vec::new();
@@ -767,8 +785,16 @@ mod tests {
 
     #[test]
     fn diff_reports_added_removed_and_moved() {
-        let previous = vec![song("cheerful", "a"), song("epic", "b"), song("solitude", "c")];
-        let next = vec![song("cheerful", "a"), song("memories", "b"), song("country", "d")];
+        let previous = vec![
+            song("cheerful", "a"),
+            song("epic", "b"),
+            song("solitude", "c"),
+        ];
+        let next = vec![
+            song("cheerful", "a"),
+            song("memories", "b"),
+            song("country", "d"),
+        ];
 
         let diff = diff_songs(&previous, &next);
 

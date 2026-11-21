@@ -3,8 +3,11 @@
 专为视频剪辑打造的本地 BGM 音频素材库桌面客户端，基于 **Rust + Tauri 2** 构建。
 分类扫描、收藏、检索、队列、场景排程、可视化诊断与全功能播放器全部在本地完成，离线可用；
 曲库目录变更由系统级文件监听自动同步，无需手动重新扫描。
+支持 **mp3 / m4a / flac / wav / ogg** 五种音频格式，切歌可交叉淡入淡出，
+并能把同一路音乐同时送到多个输出设备、每路独立调音量；另提供本机 HTTP 开放接口，
+方便 OBS、Stream Deck、直播脚本等外部项目接入控制。
 界面为 `ui/` 下的 **Vite + Vue 3 + TypeScript**：扫描、文件操作与配置持久化集中在 Rust 核心库，
-前端负责界面展示、Web Audio 播放与离线音频分析。
+前端负责界面展示、Web Audio 播放、多设备路由与离线音频分析。
 
 ---
 
@@ -21,7 +24,7 @@
 | **顶栏** | 品牌标识与副标题；搜索框（匹配曲名、中英文分类名与目录名，按 `/` 聚焦）；「导入音乐」；排序切换（推荐 / 按曲名）；界面壁纸（渐变 / 静态图 / MP4 动态壁纸）；设置齿轮（直接定位 `config.json`） |
 | **左侧栏** | 浏览：音乐库、我的收藏、播放队列、节目单；曲库管理：重新扫描、切换曲库目录、打开曲库文件夹、恢复默认曲库；底部常驻显示曲库状态、当前目录与当前时段节目 |
 | **主区** | 当前分类横幅（中英文标题、描述、曲目数、「全部播放」「随机试听」）→ 风格筛选栏（显示各分类曲目数，含「＋ 新增分类」）→ 曲目列表（序号、曲名、分类标签、收藏与更多操作，勾选后浮出批量操作条）；切换到「节目单」时显示每日节目时间轴，节目行可展开歌曲、就地编辑 |
-| **播放器** | 常驻底栏：封面（点击打开可视化诊断）、曲名（过长跑马灯）、艺人 / 专辑与分类、当前节目标签、收藏、循环点标记；循环模式、上一首 / 播放暂停 / 下一首、倍速列表；音量滑杆、导出设置（响度归一化与目标）、导出音频、播放队列入口 |
+| **播放器** | 常驻底栏：封面（点击打开可视化诊断）、曲名（过长跑马灯）、艺人 / 专辑与分类、当前节目标签、收藏、循环点标记；循环模式、上一首 / 播放暂停 / 下一首、倍速列表；音量滑杆、播放输出（多设备路由、每路独立音量、淡入淡出时长）、导出设置（响度归一化与目标）、导出音频、播放队列入口 |
 
 ### 播放队列
 
@@ -69,7 +72,7 @@
 
 | 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
-| 曲库音频 | `bgm/<分类>/*.mp3` | 文件名即曲名；外置存放，不打进 exe / 安装包 |
+| 曲库音频 | `bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}` | 文件名即曲名；外置存放，不打进 exe / 安装包 |
 | 内置壁纸 | `assets/bg/` | 随包壁纸：`1.mp4`（动态）+ `1.thumb.jpg` 缩略图 + `2.jpg`（静态），经 `bundle.resources` 打进安装包 |
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、ID3 标签解析与缓存、导入/重命名/移动/软删除、分类元数据、应用配置、节目单与循环点持久化、导出校验与 ffmpeg 响度归一化；可独立测试 |
 | 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 内置 6 个分类的默认文案与图标，编译期嵌入 |
@@ -85,7 +88,8 @@
 ```
 tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot ──IPC──▶ Vue 3 界面
               ├─ 节目单调度 ──▶ 节目歌曲 + 音量
-              └─ bgm/<分类>/*.mp3（exe 同级外置目录，不打进程序）
+              ├─ 本机 HTTP API（127.0.0.1:8737）◀──▶ OBS / Stream Deck / 脚本
+              └─ bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}（exe 同级外置目录，不打进程序）
 ```
 
 ---
@@ -93,7 +97,9 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 ## 🗂 分类与目录规范
 
 曲名直接取文件名（下划线 `_` 显示为空格），曲库内容完全由磁盘目录决定，
-增删 / 替换 mp3 后重新扫描即可生效。
+增删 / 替换音频后重新扫描即可生效。支持的扩展名：**mp3 / m4a / flac / wav / ogg**
+（大小写不敏感）。同一目录下若同时存在 `track.flac` 与 `track.mp3`，稳定 key 相同，
+扫描会保留优先级更高的格式（flac > wav > m4a > mp3 > ogg）并给出告警，避免同一曲目出现两次。
 
 | 中文分类 | 目录名 | 适用剪辑场景 |
 | :--- | :--- | :--- |
@@ -106,7 +112,7 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 
 注册分类与展示文案以 `categories.json` 为准：首次启动会按内置模板生成该文件，
 之后既可在界面中维护，也可直接用编辑器修改后点击「重新扫描」生效。
-放入未注册目录（即 `categories.json` 中不存在的目录）或 `bgm/` 根目录的 mp3 会被忽略，并在界面上给出告警。
+放入未注册目录（即 `categories.json` 中不存在的目录）或 `bgm/` 根目录的音频会被忽略，并在界面上给出告警。
 
 ### 分类维护
 
@@ -140,6 +146,11 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 | `player.maxAutoSkips` | 连续加载失败时最多自动跳过几首；`0` 表示不跳过 |
 | `player.loadTimeoutMs` | 读取音频 Blob 的超时时间（毫秒） |
 | `ui.all` / `ui.favorites` | 「全部」「收藏」页的 `title`、`labelEn`、`description`、`resultsTitle` |
+| `api.enabled` | 是否启动本机开放接口，默认 `true` |
+| `api.port` | 接口端口，默认 `8737`，只监听 `127.0.0.1` |
+| `api.token` | 可选 Bearer token；非空时除 `/v1/health` 外的所有接口（含 SSE）都必须携带 |
+
+`api.*` 在应用启动时读取，修改后需要重启应用才会重新绑定端口。
 
 `ui.*.description` 支持 `{categories}` 占位符，会替换为当前分类名称（以「、」连接）。
 所有取值都会被自动收敛：空文案回退默认、数值夹到安全区间、倍速去重并限制在 `0.25`–`4.0`；
@@ -170,14 +181,16 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 2. **曲库文件管理（CRUD）**
    - **分类**：右键分类标签或曲目分类标签编辑名称 / 主题色，`＋` 或右键菜单新增分类，
      右键菜单可直接打开本地 `categories.json` 配置文件。
-   - **新增**：顶部「导入音乐」选择多个 mp3，复制到指定分类目录；同名自动追加序号，不覆盖已有文件。
+   - **新增**：顶部「导入音乐」选择多个音频（mp3 / m4a / flac / wav / ogg），复制到指定分类目录；同名自动追加序号，不覆盖已有文件。
    - **编辑**：行内编辑曲名与分类；曲名变化会重命名文件，分类变化会移动文件，收藏 key 自动跟随。
    - **右键菜单**：曲目行支持播放、顺序播放、随机播放、收藏 / 取消收藏、重命名文件、修改分类、
      导出音频与删除；多选时对所选曲目执行收藏、移动分类、导出与删除。
    - **删除**：单首或批量删除为软删除，文件移动到曲库根目录的 `.tfy-trash/<批次>/`，可手动恢复。
    - **批量**：表头全选/单选/Shift 连选，批量导出、批量移动分类、批量删除。
 3. **音频导出**
-   - 每首曲目与播放器均可导出 mp3，弹出系统原生保存对话框。
+   - 每首曲目与播放器均可导出音频，弹出系统原生保存对话框；开启归一化、ffmpeg 可用且目标为 mp3 时输出 mp3，
+     关闭归一化、缺少 ffmpeg 或手动把目标扩展名改回源格式时按源格式复制，避免扩展名与内容不符。
+     源与目标格式不同又无法归一化时会直接报错并说明原因。
    - 多选后可批量导出到指定文件夹，同名自动追加序号。
    - **响度归一化（默认开启）**：基于 EBU R128 / BS.1770 人耳感知响度，借助 ffmpeg 两遍 `loudnorm` 统一电平，
      避免不同素材在时间线上忽大忽小；默认按 **视频剪辑**（-14 LUFS）目标归一化。
@@ -185,8 +198,8 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
      **专注/冥想**（-20 LUFS）、**广播/影视**（-23 LUFS），真峰值与响度范围随目标同步调整。
    - 点选目标即按该目标导出；关闭归一化后仅复制原文件。
      实测同一素材在 -14 与 -20 LUFS 目标下输出相差约 6 LU。
-   - ffmpeg 按 `TFY_FFMPEG` → exe 同级目录 → `PATH` 顺序查找；未检测到或处理失败时
-     自动回退为原文件复制，并在导出结果中提示原因。
+   - ffmpeg 按 `TFY_FFMPEG` → exe 同级目录 → `PATH` 顺序查找；未检测到、目标不是 mp3 或处理失败时
+     自动回退为原格式复制，并在导出结果中提示原因。
    - 复制后校验落盘字节数与源文件一致，失败会清理不完整文件。
 4. **全功能播放器**
    - 播放 / 暂停、上一首 / 下一首、顺序 / 单曲 / 智能随机（见下）。
@@ -195,11 +208,17 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
    - 音量滑杆、静音、播放队列抽屉（单曲移除与清空均带二次确认）、当前曲目收藏。
    - 曲名过长时跑马灯滚动；处于节目单时段时，播放器额外显示当前节目标签。
    - 音频经 Asset Protocol 读取后由 Web Audio 解码为 `AudioBuffer` 播放，兼容 Linux WebKitGTK，并支持采样级 A/B 循环。
+   - **切歌淡入淡出**：旧声部按设定时长（0–12 秒）线性淡出，新声部同时淡入；
+     曲目自然播完切到下一首时，新曲也按同一时长淡入，列表播放不会硬切。
+     暂停 / 恢复也有 80ms 短淡出，避免爆音。时长在「播放输出」面板或 `prefs.json` 的 `crossfadeSeconds` 调整。
+   - **多输出设备**：同一路混音可同时送到多个物理输出设备（扬声器、耳机、虚拟声卡等），
+     每路有独立音量与静音，互不影响；系统默认输出与额外设备都可单独启停。
+     首次使用需授权一次音频设备访问（应用不录音），之后按应用记住授权。
    - 加载失败自动跳过（最多连续 3 首）并提示原因，失败时会停下来而不会无限循环切歌。
 5. **曲库实时监听**
    - 基于系统级 `notify` 递归监听曲库目录，700ms 防抖后增量对比新增 / 删除 / 跨分类移动，并推送快照到界面。
    - 每 30 秒兜底校验一次，覆盖网络盘、休眠恢复等事件丢失场景；切换曲库目录时自动重建监听。
-   - 扫描时读取 ID3 标签（艺人、专辑、流派、时长），按「路径 + 大小 + 修改时间」缓存，重复扫描只解析新文件。
+   - 扫描时读取音频标签（ID3v2 / Vorbis Comment / iTunes `ilst` / RIFF INFO）与时长，按「路径 + 大小 + 修改时间」缓存，重复扫描只解析新文件。
 6. **智能随机与无缝循环**
    - 随机播放不是纯随机：同艺人 / 同专辑不连续、收藏与同风格加权、45 分钟内播过的曲目降权，长曲之后避免接短曲。
    - 任意曲目可设置 A/B 循环区间；播放器用 Web Audio `AudioBufferSourceNode` 的 `loopStart` / `loopEnd` 实现采样级无缝循环。
@@ -223,7 +242,8 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
      导出目标响度仅作对照。
    - 可在波形上直接标记并保存循环起止点。
 9. **收藏与偏好持久化**
-   - 收藏、音量、静音、倍速、播放模式、排序、导出响度开关与归一化目标由 Rust 写入应用配置目录的 `prefs.json`。
+   - 收藏、音量、静音、倍速、播放模式、排序、切歌淡入淡出、多输出路由、导出响度开关与归一化目标
+     由 Rust 写入应用配置目录的 `prefs.json`。
    - 收藏使用稳定键 `分类/文件名主干`；重命名 / 移动分类时收藏自动迁移，替换同名文件不会丢失收藏。
 10. **界面壁纸**
    - 顶栏调色板按钮可切换：默认样式、渐变蓝 / 绿 / 红，以及随包内置的两款壁纸（`assets/bg/1.mp4` 动态壁纸、`assets/bg/2.jpg` 雪山静态壁纸）。
@@ -237,6 +257,10 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 12. **桌面体验**
    - 运行时不依赖 Node / pnpm（前端在构建期打包），离线可用；音频由 Tauri Asset Protocol 从本地曲库读取后播放。
    - 中文本地字体栈，不请求任何远程字体或第三方资源。
+13. **本机开放接口**
+   - 启动时在 `127.0.0.1:8737` 提供 HTTP JSON API 与 SSE 事件流，可查询曲库 / 当前状态、控制播放、
+     调整主音量与每路输出，供 OBS、Stream Deck、直播脚本或其它项目接入。
+   - 默认只监听回环地址；可在 `config.json` 配置端口与 Bearer token，详见下方「开放接口」。
 
 ### 键盘快捷键
 
@@ -249,6 +273,106 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
 | `/` | 聚焦搜索框并选中当前关键词 |
 | `Enter` | 搜索框内确认并退出输入（不影响中文输入法上屏） |
 | `Esc` | 关闭诊断面板；关闭队列抽屉；清除批量选择；搜索框内清空搜索 |
+
+---
+
+## 🔌 开放接口
+
+应用启动后会在 **`http://127.0.0.1:8737/v1`** 提供本机 HTTP API，默认只监听回环地址，
+不需要任何额外进程；界面保持运行即可接受控制。端口与鉴权在 `config.json` 的 `api` 段配置。
+
+所有响应统一为：
+
+```json
+{ "ok": true, "data": { } }
+{ "ok": false, "error": "说明" }
+```
+
+失败时按语义返回状态码：`400` 参数错误、`401` token 缺失或错误、`403` 来源不被允许、
+`404` 曲目或命令不存在、`409` 与节目单冲突或输出路数已满、`503` 界面未就绪、`504` 界面执行超时。
+
+`api.token` 非空时，除 `/v1/health` 外的请求都需要带 `Authorization: Bearer <token>`（SSE 也可用 `?token=`）。
+播放器面板的「播放输出 → 开放接口」会显示当前地址与接口状态（是否启用 token、是否已监听）。
+
+浏览器来源只信任本机：应用自身 WebView（`tauri://localhost`）以及 `localhost` / `127.0.0.1` / `[::1]`
+上的页面。**非本机网页会收到 `403`**，避免任意网站跨域读取曲库路径或控制播放；
+curl、Stream Deck、OBS 脚本这类不带 `Origin` 的客户端不受影响。
+
+### 接口一览
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/health` | 服务状态、版本、是否就绪（无需鉴权） |
+| GET | `/v1/state` | 当前播放状态快照（曲目、进度、音量、淡入淡出、输出路由、队列） |
+| GET | `/v1/library` | 曲库根目录、分类与曲目列表，曲目额外带 `format` 字段（小写扩展名，如 `flac`） |
+| POST | `/v1/library/rescan` | 重新扫描曲库 |
+| POST | `/v1/play` | 播放指定曲目，body `{ "key": "cheerful/xxx", "queue": ["key", ...] }`，`queue` 可省略（默认整个曲库） |
+| POST | `/v1/pause` / `/v1/resume` / `/v1/toggle` | 暂停 / 继续 / 切换播放 |
+| POST | `/v1/next` / `/v1/previous` | 下一首 / 上一首 |
+| POST | `/v1/seek` | 跳转，body `{ "seconds": 42.5 }` |
+| POST | `/v1/volume` | 主音量，body `{ "volume": 0.8 }`（0–1） |
+| POST | `/v1/crossfade` | 切歌淡入淡出时长，body `{ "seconds": 2 }`（0–12，0 为硬切） |
+| GET | `/v1/outputs` | 输出设备、已启用的路由与每路音量 / 静音 |
+| POST | `/v1/outputs` | 更新一路输出：`{ "deviceId": "...", "enabled": true, "volume": 0.5, "muted": false }` |
+| GET | `/v1/events` | SSE 事件流，每秒推送一次 `state`，播放 / 切歌时立即推送 |
+| POST | `/v1/command/{action}` | 通用入口，body `{ "params": { } }`；`action` 同上表去掉 `/v1/` 的名称 |
+
+### 示例
+
+```bash
+BASE=http://127.0.0.1:8737/v1
+
+curl -s $BASE/state
+curl -s $BASE/library | jq '.data.songs[0]'
+curl -s -X POST $BASE/play -H 'Content-Type: application/json' \
+  -d '{"key":"cheerful/buttercup"}'
+curl -s -X POST $BASE/volume -H 'Content-Type: application/json' -d '{"volume":0.6}'
+curl -s -X POST $BASE/crossfade -H 'Content-Type: application/json' -d '{"seconds":3}'
+curl -s -N $BASE/events        # 持续接收状态事件
+```
+
+```js
+// Node 或本机页面（localhost）：先查曲目，再播放并把音量降到 60%
+const base = 'http://127.0.0.1:8737/v1';
+const library = await (await fetch(`${base}/library`)).json();
+const song = library.data.songs.find((item) => item.format === 'flac');
+
+await fetch(`${base}/play`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ key: song.key }),
+});
+
+const events = new EventSource(`${base}/events`);
+events.onmessage = (event) => {
+  const { type, state } = JSON.parse(event.data);
+  if (type === 'state') console.log(state.track?.title, state.position);
+};
+
+await fetch(`${base}/volume`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ volume: 0.6 }),
+});
+```
+
+多设备示例：`GET /v1/outputs` 拿到 `devices` 后，用 `deviceId` 打开某一路并单独设音量：
+
+```bash
+# 首次使用：解锁完整设备列表（等价于面板里的「读取设备列表」，不录音）
+curl -s -X POST $BASE/command/outputs.unlock
+
+curl -s -X POST $BASE/outputs -H 'Content-Type: application/json' \
+  -d '{"deviceId":"<deviceId>","enabled":true,"volume":0.35}'
+```
+
+> 首次读取完整设备列表需要一次音频设备授权（Chromium 限制），可在播放器「播放输出」面板点击
+> 「读取设备列表」完成；应用不会录音。Windows 上使用 WebView2 时支持多设备路由；
+> 若运行环境不支持 `AudioContext.setSinkId()`，界面会明确提示并回退为仅系统默认输出。
+
+状态快照的主要字段：`playing`、`position`、`duration`、`volume`、`muted`、`rate`、`playMode`、
+`crossfadeSeconds`、`track`（含 `key / title / category / format / artist / durationMs`）、
+`queue.length / index`、`outputs[]`（每路 `deviceId / label / volume / muted / enabled`）。
 
 ---
 
@@ -276,6 +400,10 @@ tfy-bgm.exe ──┬─ Rust 扫描 / 文件监听 ──▶ LibrarySnapshot �
   - **Windows**：Rust MSVC toolchain + Visual Studio Build Tools（勾选「使用 C++ 的桌面开发」）+ WebView2 Runtime（Win10/11 一般已预装）。
 - 音频由系统 WebView 解码，Linux 上如遇无声 / 无法拖动进度，请补装 GStreamer 插件：
   `sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-ugly`（Debian/Ubuntu 对应 `gstreamer1.0-plugins-good` / `-ugly`）。
+- **多输出设备**依赖 WebView 支持 `AudioContext.setSinkId()`：Windows WebView2（Chromium 110+）可直接使用；
+  Linux WebKitGTK 与 macOS WKWebView 未必支持，缺失时应用会自动降级为仅系统默认输出并在面板中说明。
+- 播放格式（mp3 / m4a / flac / wav / ogg）由 WebView 的解码器决定；Windows WebView2 均原生支持，
+  Linux 需要对应的 GStreamer 插件。
 
 ### 启动开发版
 
@@ -358,7 +486,7 @@ dist/
 - 构建前会先执行 `pnpm run build`（需要 Node.js 20+ 与 pnpm），确保 `ui/dist` 与 exe 同批次更新。
 - `-WithBgm` 仍可传入，等同于默认行为。
 - 重复打包只更新 exe / 说明文件，会保留 `dist\tfy-bgm\bgm` 里已有的曲库；需要从仓库重新同步时，先删除该 `bgm` 目录。
-- `-EmptyBgm` 检测到已有 mp3 时会拒绝执行，避免误删曲库。
+- `-EmptyBgm` 检测到已有音频（mp3 / m4a / flac / wav / ogg）时会拒绝执行，避免误删曲库。
 - `-SkipBuild` 复用 `src-tauri\target\release\tfy-bgm.exe`，只重新组装与压缩；`-NoZip` 只组装不打 zip。
 - 检测到 `dist\tfy-bgm` 下的程序正在运行时会提示先关闭，避免覆盖失败。
 - zip 内是单层 `tfy-bgm/` 目录，解压后直接得到 `tfy-bgm.exe` 与 `bgm/`；空曲库包也会保留分类空目录。条目分隔符按规范写成 `/`，中文名按 UTF-8 存储并置 UTF-8 标志位，跨平台解压不乱码。
@@ -481,6 +609,12 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 - **最小权限**：`capabilities/default.json` 仅启用 `core:default` 与无边框窗口所需的
   拖拽、最小化、最大化、关闭 4 项 window 权限；原生文件夹选择、保存对话框与「打开目录」
   全部在 Rust 侧调用插件，不向 WebView 暴露插件权限。
+- **多输出授权**：Chromium 只有在获得音频设备权限后才会返回完整输出设备列表。
+  应用仅用 `getUserMedia({ audio: true })` 解锁枚举，拿到列表后立即 `stop()` 所有音轨，
+  不录音、不落盘；权限按应用持久化，用户可在「播放输出」面板查看状态。
+- **开放接口**：HTTP 服务只绑定 `127.0.0.1`，不监听局域网；`api.token` 非空时除健康检查外的请求
+  （含 SSE）都要带 Bearer token。可执行的动作由前端白名单 `runAction` 限定，
+  接口不能读写任意文件，也不能修改曲库目录。
 - **资源授权**：Asset Protocol 仅授权当前曲库根目录（递归），可播放路径限定在扫描结果内。
 - **CSP**：默认仅允许本地脚本 / 样式，`media-src` 允许 `asset:` 与 `http://asset.localhost`，
   不加载远程脚本、字体或图片。
@@ -497,8 +631,8 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 ### 运行时配置文件位置
 
 由 Tauri `app_config_dir` 决定，五个文件并列存放：
-`config.json`（品牌/文案/播放参数）、`prefs.json`（偏好）、`categories.json`（分类）、
-`schedule.json`（节目单）、`loops.json`（循环点）。
+`config.json`（品牌/文案/播放参数/开放接口）、`prefs.json`（偏好、淡入淡出、多输出路由）、
+`categories.json`（分类）、`schedule.json`（节目单）、`loops.json`（循环点）。
 
 - Linux：`~/.config/com.yuanjie.tfybgm/`
 - macOS：`~/Library/Application Support/com.yuanjie.tfybgm/`
@@ -514,5 +648,5 @@ cargo check --workspace                # 需要上面的 WebKitGTK 等系统依�
 
 - 代码与文档采用 **Apache License 2.0** 授权（见 `LICENSE`，Copyright 2026 YuanJie）。
 - **音频素材版权归原权利人所有**。本仓库不附带任何音频授权，
-  `bgm/` 下的 mp3 不属于 Apache-2.0 授权范围。
+  `bgm/` 下的音频文件不属于 Apache-2.0 授权范围。
 - 素材仅供个人学习与剪辑练手；商业发布前请自行向版权方取得授权。

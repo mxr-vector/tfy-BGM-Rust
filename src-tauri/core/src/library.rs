@@ -1,7 +1,8 @@
 //! 曲库目录扫描器：文件名即曲名，不维护任何索引文件。
 //!
-//! 扫描只读取已注册分类目录下的 `.mp3`，并对「放错目录」「目录为空」「文件不可读」
-//! 等情况生成可展示的告警，避免音频无声消失。
+//! 扫描只读取已注册分类目录下的受支持音频（mp3 / m4a / flac / wav / ogg），
+//! 并对「放错目录」「目录为空」「文件不可读」「同名多格式」等情况生成可展示的告警，
+//! 避免音频无声消失。
 
 use std::collections::HashSet;
 use std::fs;
@@ -14,16 +15,43 @@ use crate::categories::Category;
 use crate::limits::MAX_KEY_LEN;
 use crate::tags::MetaCache;
 
-/// 曲库唯一接受的音频扩展名（小写，不含点）。
-pub const AUDIO_EXTENSION: &str = "mp3";
+/// 曲库支持的音频扩展名（小写，不含点）；顺序即同名文件共存时的取用优先级。
+///
+/// 同一目录下若出现 `track.flac` 与 `track.mp3`，稳定 key 都是 `分类/track`，
+/// 此时保留无损格式、忽略有损副本，并在告警中说明，避免同一曲目出现两次。
+pub const AUDIO_EXTENSIONS: [&str; 5] = ["flac", "wav", "m4a", "mp3", "ogg"];
 
-/// 文件名是否以音频扩展名结尾（大小写不敏感，按字节判断避免切坏多字节字符）。
-pub fn has_audio_extension(name: &str) -> bool {
+/// 导出与导入的兜底扩展名，同时也是响度归一化的输出格式（见
+/// [`crate::loudness::NORMALIZED_EXTENSION`]）；"mp3" 这个字面量只在这里出现。
+pub const DEFAULT_AUDIO_EXTENSION: &str = "mp3";
+
+/// 取文件名的音频扩展名（小写，不含点）；不是受支持格式时返回 `None`。
+///
+/// 按字节从末尾判断，避免把多字节文件名切坏。
+pub fn audio_extension(name: &str) -> Option<&'static str> {
     let bytes = name.as_bytes();
-    let ext = AUDIO_EXTENSION.as_bytes();
-    bytes.len() > ext.len()
-        && bytes[bytes.len() - ext.len() - 1] == b'.'
-        && bytes[bytes.len() - ext.len()..].eq_ignore_ascii_case(ext)
+    let dot = bytes.iter().rposition(|byte| *byte == b'.')?;
+    if dot == 0 || dot + 1 >= bytes.len() {
+        return None;
+    }
+    let ext = &name[dot + 1..];
+    AUDIO_EXTENSIONS
+        .iter()
+        .copied()
+        .find(|allowed| ext.eq_ignore_ascii_case(allowed))
+}
+
+/// 文件名是否以受支持的音频扩展名结尾（大小写不敏感）。
+pub fn has_audio_extension(name: &str) -> bool {
+    audio_extension(name).is_some()
+}
+
+/// 同名去重时的格式优先级：数字越小越优先。
+pub fn extension_rank(ext: &str) -> usize {
+    AUDIO_EXTENSIONS
+        .iter()
+        .position(|allowed| allowed.eq_ignore_ascii_case(ext))
+        .unwrap_or(AUDIO_EXTENSIONS.len())
 }
 
 /// 曲库来源，供界面区分外置曲库、用户自选目录与开发仓库。
@@ -142,7 +170,7 @@ pub fn scan_library_cached(
         collect_stray_warnings(root, categories, &mut warnings);
         if songs.is_empty() {
             warnings.push(format!(
-                "曲库目录中未发现任何 mp3：{}（请把音频放入 <分类>/ 子目录）",
+                "曲库目录中未发现任何受支持的音频（mp3 / m4a / flac / wav / ogg）：{}（请把音频放入 <分类>/ 子目录）",
                 root.display()
             ));
         }
@@ -184,7 +212,7 @@ fn scan_category(
         }
     };
 
-    let mut songs = Vec::new();
+    let mut found = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -233,13 +261,9 @@ fn scan_category(
             warnings.push(format!("跳过文件名过长的曲目：{file_name}"));
             continue;
         }
-        if !seen_keys.insert(key.clone()) {
-            warnings.push(format!("跳过重复曲目标识 {key}（{file_name}）"));
-            continue;
-        }
 
         let tags = cache.get(&path, &meta);
-        songs.push(Song {
+        found.push(Song {
             key,
             title: stem.replace('_', " "),
             file_name,
@@ -251,7 +275,33 @@ fn scan_category(
             duration_ms: tags.duration_ms,
         });
     }
+
+    // 同一主干可能同时存在多种格式（如 track.flac 与 track.mp3），key 会相同。
+    // 按格式优先级排序后保留第一个，其余给出告警，保证收藏 / 循环点的 key 稳定。
+    found.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then_with(|| song_format_rank(a).cmp(&song_format_rank(b)))
+            .then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    let mut songs = Vec::with_capacity(found.len());
+    for song in found {
+        if !seen_keys.insert(song.key.clone()) {
+            warnings.push(format!(
+                "跳过同名曲目 {}：同一曲名只保留优先级最高的格式（flac / wav / m4a / mp3 / ogg）",
+                song.file_name
+            ));
+            continue;
+        }
+        songs.push(song);
+    }
     songs
+}
+
+fn song_format_rank(song: &Song) -> usize {
+    audio_extension(&song.file_name)
+        .map(extension_rank)
+        .unwrap_or(usize::MAX)
 }
 
 fn collect_stray_warnings(root: &Path, categories: &[Category], warnings: &mut Vec<String>) {
@@ -270,10 +320,10 @@ fn collect_stray_warnings(root: &Path, categories: &[Category], warnings: &mut V
             if categories.iter().any(|category| category.id == name) || name.starts_with('.') {
                 continue;
             }
-            let stray_count = count_mp3(&path);
+            let stray_count = count_audio(&path);
             if stray_count > 0 {
                 warnings.push(format!(
-                    "目录 {name}/ 不是已注册分类，其中 {stray_count} 个 mp3 已被忽略"
+                    "目录 {name}/ 不是已注册分类，其中 {stray_count} 个音频文件已被忽略"
                 ));
             }
         } else if has_audio_extension(&name) {
@@ -282,7 +332,7 @@ fn collect_stray_warnings(root: &Path, categories: &[Category], warnings: &mut V
     }
 }
 
-fn count_mp3(dir: &Path) -> usize {
+fn count_audio(dir: &Path) -> usize {
     fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -321,9 +371,16 @@ mod tests {
         assert!(has_audio_extension("track.mp3"));
         assert!(has_audio_extension("track.MP3"));
         assert!(has_audio_extension("中文.mp3"));
+        assert!(has_audio_extension("track.flac"));
+        assert!(has_audio_extension("track.M4A"));
+        assert!(has_audio_extension("track.wav"));
+        assert!(has_audio_extension("track.OGG"));
         assert!(!has_audio_extension("mp3"));
         assert!(!has_audio_extension("track.mp3.txt"));
-        assert!(!has_audio_extension("track.flac"));
+        assert!(!has_audio_extension("track.aac"));
+        assert!(!has_audio_extension("track.wma"));
+        assert_eq!(audio_extension("Track.FLAC"), Some("flac"));
+        assert_eq!(audio_extension("track.aac"), None);
     }
 
     #[test]
@@ -354,6 +411,49 @@ mod tests {
     }
 
     #[test]
+    fn scans_all_supported_formats() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("cheerful")).unwrap();
+        for name in ["a.mp3", "b.m4a", "c.flac", "d.wav", "e.ogg"] {
+            touch(&root.join("cheerful").join(name));
+        }
+
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
+
+        let mut formats: Vec<_> = snapshot
+            .songs
+            .iter()
+            .map(|song| audio_extension(&song.file_name).unwrap())
+            .collect();
+        formats.sort_unstable();
+        assert_eq!(formats, ["flac", "m4a", "mp3", "ogg", "wav"]);
+        assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    }
+
+    #[test]
+    fn keeps_lossless_when_same_stem_has_multiple_formats() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("cheerful")).unwrap();
+        touch(&root.join("cheerful/same.mp3"));
+        touch(&root.join("cheerful/same.flac"));
+
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
+
+        assert_eq!(snapshot.songs.len(), 1);
+        assert_eq!(snapshot.songs[0].file_name, "same.flac");
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|w| w.contains("跳过同名曲目 same.mp3")),
+            "{:?}",
+            snapshot.warnings
+        );
+    }
+
+    #[test]
     fn warns_about_stray_files_and_unknown_directories() {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
@@ -376,7 +476,7 @@ mod tests {
             snapshot
                 .warnings
                 .iter()
-                .any(|w| w.contains("未发现任何 mp3"))
+                .any(|w| w.contains("未发现任何受支持的音频"))
         );
     }
 

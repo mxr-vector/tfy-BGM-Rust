@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use bgm_core::library::has_audio_extension;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -114,9 +115,9 @@ fn is_relevant(event: &Event) -> bool {
         path.extension().is_none()
             || path.is_dir()
             || path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(has_audio_extension)
     });
     if !touches_audio_or_dir {
         return false;

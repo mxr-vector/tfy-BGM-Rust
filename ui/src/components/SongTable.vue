@@ -139,8 +139,8 @@ function resetAll(): void {
     <template v-if="libraryEmpty">
       <h3 class="empty-title">曲库为空</h3>
       <p class="empty-text">
-        当前曲库目录：{{ state.library.root || '未找到' }}。请把 .mp3
-        放入对应分类子目录，或选择其他文件夹。
+        当前曲库目录：{{ state.library.root || '未找到' }}。请把 mp3 / m4a / flac / wav / ogg
+        音频放入对应分类子目录，或选择其他文件夹。
       </p>
       <button
         type="button"

@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { applyDocumentCopy } from '@/lib/config';
-import { COMMANDS } from '@/lib/constants';
+import { COMMANDS, EVENTS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
 import { invoke, isTauri, getCurrentWindow, listen } from '@/lib/tauri';
 import type { Bootstrap, LibraryChange } from '@/lib/types';
+import { installApiBridge } from '@/stores/api';
 import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
 import { installScheduler } from '@/composables/useScheduler';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
 import { applyBootstrap, applyExternalChange } from '@/stores/library';
+import { installOutputs } from '@/stores/outputs';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import DiagnosticsPanel from '@/components/DiagnosticsPanel.vue';
@@ -67,13 +69,15 @@ function reload(): void {
 
 applyDocumentCopy();
 void loadBuiltins();
+installOutputs();
+void installApiBridge();
 
 onMounted(async () => {
   void bootstrap();
 
   // 文件监听推送的增量变化；`applyExternalChange` 会丢弃比现有快照更旧的事件，
   // 因此与应用内写操作的返回值并发也不会让界面回退。
-  unlistenLibrary = await listen<LibraryChange>('library-changed', (change) => {
+  unlistenLibrary = await listen<LibraryChange>(EVENTS.libraryChanged, (change) => {
     applyExternalChange(change);
   });
 

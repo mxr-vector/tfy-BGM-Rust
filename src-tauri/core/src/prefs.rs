@@ -14,9 +14,15 @@ use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
 use crate::loudness::find_preset;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 2;
+pub const PREFS_VERSION: u32 = 3;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+/// 切歌交叉淡入淡出的默认时长（秒）；`0` 表示硬切。
+pub const DEFAULT_CROSSFADE_SECONDS: f32 = 2.0;
+/// 交叉淡入淡出的最大时长（秒）。
+pub const MAX_CROSSFADE_SECONDS: f32 = 12.0;
+/// 同时启用的输出设备上限，避免异常配置创建过多 AudioContext。
+pub const MAX_OUTPUT_ROUTES: usize = 8;
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -66,6 +72,48 @@ pub enum SortBy {
     Name,
 }
 
+/// 一路输出设备：`deviceId` 来自 WebView 的 `enumerateDevices()`，`default` 表示系统默认。
+///
+/// 音量是这一路的独立增益，叠加在播放器主音量之上；静音只影响这一路。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OutputRoute {
+    pub device_id: String,
+    pub label: String,
+    pub volume: f32,
+    pub muted: bool,
+    pub enabled: bool,
+}
+
+impl Default for OutputRoute {
+    fn default() -> Self {
+        Self {
+            device_id: "default".to_owned(),
+            label: "系统默认输出".to_owned(),
+            volume: 1.0,
+            muted: false,
+            enabled: true,
+        }
+    }
+}
+
+impl OutputRoute {
+    /// 把任意输入收敛为可持久化的一路输出。
+    fn normalize(mut self) -> Self {
+        self.device_id = self.device_id.trim().to_owned();
+        self.label = self.label.trim().chars().take(64).collect();
+        if self.label.is_empty() {
+            self.label = "输出设备".to_owned();
+        }
+        self.volume = if self.volume.is_finite() {
+            self.volume.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Prefs {
@@ -77,6 +125,10 @@ pub struct Prefs {
     pub playback_rate: f32,
     pub play_mode: PlayMode,
     pub sort_by: SortBy,
+    /// 切歌时的交叉淡入淡出时长（秒），`0` 为硬切。
+    pub crossfade_seconds: f32,
+    /// 多输出设备路由；每一项都有独立音量，`default` 表示系统默认输出。
+    pub output_routes: Vec<OutputRoute>,
     /// 导出时是否用 ffmpeg 做响度归一化（默认开启）。
     pub loudness_normalization: bool,
     /// 导出响度场景预设 id；空字符串表示不套用场景，使用默认人耳响度目标。
@@ -104,6 +156,8 @@ impl Default for Prefs {
             playback_rate: 1.0,
             play_mode: PlayMode::Sequence,
             sort_by: SortBy::Default,
+            crossfade_seconds: DEFAULT_CROSSFADE_SECONDS,
+            output_routes: vec![OutputRoute::default()],
             loudness_normalization: true,
             export_scene: String::new(),
             wallpaper: DEFAULT_WALLPAPER.to_owned(),
@@ -168,6 +222,35 @@ impl Prefs {
             String::new()
         };
 
+        self.crossfade_seconds = if self.crossfade_seconds.is_finite() {
+            self.crossfade_seconds.clamp(0.0, MAX_CROSSFADE_SECONDS)
+        } else {
+            DEFAULT_CROSSFADE_SECONDS
+        };
+
+        // 输出路由按 deviceId 去重，并保证「系统默认输出」始终有一个稳定的入口：
+        // 列表为空时默认启用，已有其它设备时默认关闭，避免无意中从扬声器外放。
+        let mut seen_devices = HashSet::new();
+        let mut routes: Vec<OutputRoute> = std::mem::take(&mut self.output_routes)
+            .into_iter()
+            .map(OutputRoute::normalize)
+            .filter(|route| {
+                !route.device_id.is_empty() && seen_devices.insert(route.device_id.clone())
+            })
+            .take(MAX_OUTPUT_ROUTES)
+            .collect();
+        if !routes.iter().any(|route| route.device_id == "default") {
+            let enabled = routes.is_empty();
+            routes.insert(
+                0,
+                OutputRoute {
+                    enabled,
+                    ..OutputRoute::default()
+                },
+            );
+        }
+        self.output_routes = routes;
+
         // 自定义壁纸路径只保留带受支持扩展名的值；文件是否还在由运行时判断。
         self.custom_wallpaper = self
             .custom_wallpaper
@@ -229,9 +312,7 @@ impl Prefs {
                     prefs.export_scene = String::new();
                     match prefs.save(path) {
                         Ok(()) => None,
-                        Err(error) => {
-                            Some(format!("偏好设置已升级，但保存迁移结果失败：{error}"))
-                        }
+                        Err(error) => Some(format!("偏好设置已升级，但保存迁移结果失败：{error}")),
                     }
                 } else {
                     None
@@ -365,11 +446,83 @@ mod tests {
         assert!(prefs.export_scene.is_empty());
 
         // 迁移结果应立即落盘，避免每次启动都重新迁移。
-        let saved: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["version"], PREFS_VERSION);
         assert_eq!(saved["loudnessNormalization"], true);
         assert_eq!(saved["exportScene"], "");
+    }
+
+    #[test]
+    fn crossfade_is_clamped_and_defaulted() {
+        let normal = Prefs {
+            crossfade_seconds: 30.0,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(normal.crossfade_seconds, MAX_CROSSFADE_SECONDS);
+
+        let off = Prefs {
+            crossfade_seconds: -3.0,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(off.crossfade_seconds, 0.0);
+
+        let broken = Prefs {
+            crossfade_seconds: f32::NAN,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(broken.crossfade_seconds, DEFAULT_CROSSFADE_SECONDS);
+    }
+
+    #[test]
+    fn output_routes_are_deduped_and_clamped() {
+        let prefs = Prefs {
+            output_routes: vec![
+                OutputRoute {
+                    device_id: " speakers ".into(),
+                    label: "".into(),
+                    volume: 4.0,
+                    muted: false,
+                    enabled: true,
+                },
+                OutputRoute {
+                    device_id: "speakers".into(),
+                    label: "重复项".into(),
+                    volume: 0.2,
+                    muted: true,
+                    enabled: true,
+                },
+                OutputRoute {
+                    device_id: "".into(),
+                    ..OutputRoute::default()
+                },
+            ],
+            ..Prefs::default()
+        }
+        .normalize();
+
+        assert_eq!(prefs.output_routes.len(), 2);
+        // 系统默认输出固定排在第一行，便于界面上快速回到默认路由。
+        assert_eq!(prefs.output_routes[0].device_id, "default");
+        assert!(!prefs.output_routes[0].enabled);
+        assert_eq!(prefs.output_routes[1].device_id, "speakers");
+        assert_eq!(prefs.output_routes[1].label, "输出设备");
+        assert_eq!(prefs.output_routes[1].volume, 1.0);
+    }
+
+    #[test]
+    fn empty_output_routes_keep_default_enabled() {
+        let prefs = Prefs {
+            output_routes: Vec::new(),
+            ..Prefs::default()
+        }
+        .normalize();
+
+        assert_eq!(prefs.output_routes.len(), 1);
+        assert_eq!(prefs.output_routes[0].device_id, "default");
+        assert!(prefs.output_routes[0].enabled);
     }
 
     #[test]

@@ -25,6 +25,15 @@ export const COMMANDS = {
   deleteTracks: 'delete_tracks',
   builtinWallpapers: 'builtin_wallpapers',
   chooseWallpaperFile: 'choose_wallpaper_file',
+  apiInfo: 'api_info',
+  apiPublishState: 'api_publish_state',
+  apiReply: 'api_reply',
+} as const;
+
+/** Rust 推给前端的事件名；与 `src-tauri/src/api.rs` 保持一致。 */
+export const EVENTS = {
+  libraryChanged: 'library-changed',
+  apiCommand: 'api-command',
 } as const;
 
 export const PLAY_MODES = {

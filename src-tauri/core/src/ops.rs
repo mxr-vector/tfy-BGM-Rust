@@ -16,7 +16,7 @@ use crate::categories::Category;
 use crate::export::{
     ExportError, ExportSettings, copy_validated, export_with_ffmpeg, safe_file_name,
 };
-use crate::library::{AUDIO_EXTENSION, Song};
+use crate::library::{DEFAULT_AUDIO_EXTENSION, Song, audio_extension};
 use crate::limits::{MAX_KEY_LEN, MAX_STEM_CHARS};
 use crate::loudness;
 use crate::paths::TRASH_DIR_NAME as TRASH_DIR;
@@ -87,7 +87,7 @@ pub enum OpError {
     TargetExists(PathBuf),
     #[error("源文件不存在或不是文件：{}", .0.display())]
     SourceMissing(PathBuf),
-    #[error("只支持 {AUDIO_EXTENSION} 音频：{}", .0.display())]
+    #[error("不支持的音频格式（仅支持 mp3 / m4a / flac / wav / ogg）：{}", .0.display())]
     UnsupportedFormat(PathBuf),
     #[error("曲目路径无效：{}", .0.display())]
     InvalidFile(PathBuf),
@@ -148,7 +148,7 @@ fn import_one(
     if !metadata.is_file() {
         return Err(OpError::SourceMissing(source.to_owned()));
     }
-    if !is_mp3(source) {
+    if !is_audio(source) {
         return Err(OpError::UnsupportedFormat(source.to_owned()));
     }
 
@@ -176,7 +176,7 @@ fn import_one(
         return Err(OpError::TitleTooLong);
     }
 
-    let target = unique_path(dir, &stem, AUDIO_EXTENSION);
+    let target = unique_path(dir, &stem, source_extension(source));
     copy_validated(source, &target)?;
     let name = target
         .file_name()
@@ -282,14 +282,15 @@ pub fn update_song(
 
     let target_dir = root.join(target_category);
     fs::create_dir_all(&target_dir)?;
+    let ext = source_extension(&source);
     let target = if renamed {
-        let exact = target_dir.join(format!("{stem}.{AUDIO_EXTENSION}"));
+        let exact = target_dir.join(format!("{stem}.{ext}"));
         if exact.exists() && !same_file(&source, &exact) {
             return Err(OpError::TargetExists(exact));
         }
         exact
     } else {
-        unique_path(&target_dir, &stem, AUDIO_EXTENSION)
+        unique_path(&target_dir, &stem, ext)
     };
 
     if !same_file(&source, &target) {
@@ -393,7 +394,9 @@ pub fn export_songs(
             }
         };
         let stem = safe_file_name(&song.title);
-        let target = unique_path(dest_dir, &stem, AUDIO_EXTENSION);
+        // 归一化由 ffmpeg 输出 mp3；未归一化（或没有 ffmpeg）时按源格式导出，避免扩展名说谎。
+        let ext = export_extension(&source, settings, ffmpeg.as_deref());
+        let target = unique_path(dest_dir, &stem, &ext);
         match export_with_ffmpeg(&source, &target, settings, ffmpeg.as_deref()) {
             Ok(result) => {
                 outcome.report.succeeded += 1;
@@ -478,21 +481,53 @@ fn song_file_path(root: &Path, categories: &[Category], song: &Song) -> Result<P
     Ok(path)
 }
 
-fn is_mp3(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(AUDIO_EXTENSION))
+fn is_audio(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| audio_extension(name).is_some())
+}
+
+/// 源文件的音频扩展名；调用方通常已确认是受支持格式。
+fn source_extension(path: &Path) -> &'static str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(audio_extension)
+        .unwrap_or(DEFAULT_AUDIO_EXTENSION)
+}
+
+/// 导出目标扩展名：归一化走 ffmpeg 输出 mp3，否则保持源格式。
+fn export_extension(source: &Path, settings: ExportSettings, ffmpeg: Option<&Path>) -> String {
+    if settings.normalize && ffmpeg.is_some() {
+        loudness::NORMALIZED_EXTENSION.to_owned()
+    } else {
+        source_extension(source).to_owned()
+    }
 }
 
 fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
-    let mut candidate = dir.join(format!("{stem}.{ext}"));
+    let shortened: String = stem.chars().take(100).collect();
+    let mut name = shortened.clone();
     let mut suffix = 2;
-    while candidate.exists() {
-        let shortened: String = stem.chars().take(100).collect();
-        candidate = dir.join(format!("{shortened} ({suffix}).{ext}"));
+    // 同主干不同格式也算冲突：track.mp3 与 track.flac 会映射到同一个曲目 key。
+    while stem_taken(dir, &name) {
+        name = format!("{shortened} ({suffix})");
         suffix += 1;
     }
-    candidate
+    dir.join(format!("{name}.{ext}"))
+}
+
+fn stem_taken(dir: &Path, stem: &str) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_file()
+            && path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(stem))
+    })
 }
 
 fn unique_trash_dir(root: &Path) -> PathBuf {
@@ -509,10 +544,11 @@ fn unique_trash_dir(root: &Path) -> PathBuf {
 
 fn unique_trash_path(batch_dir: &Path, song: &Song, used: &mut HashSet<String>) -> PathBuf {
     let safe = safe_file_name(&song.title);
-    let mut name = format!("{}__{safe}.{AUDIO_EXTENSION}", song.category);
+    let ext = audio_extension(&song.file_name).unwrap_or(DEFAULT_AUDIO_EXTENSION);
+    let mut name = format!("{}__{safe}.{ext}", song.category);
     let mut suffix = 2;
     while used.contains(&name) || batch_dir.join(&name).exists() {
-        name = format!("{}__{safe} ({suffix}).{AUDIO_EXTENSION}", song.category);
+        name = format!("{}__{safe} ({suffix}).{ext}", song.category);
         suffix += 1;
     }
     used.insert(name.clone());
@@ -581,6 +617,21 @@ mod tests {
     }
 
     #[test]
+    fn import_preserves_source_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+        let source = dir.path().join("lossless.flac");
+        fs::write(&source, b"flac-bytes").unwrap();
+
+        let report = import_files(&root, &categories(), "epic", &[source]);
+
+        assert_eq!(report.succeeded, 1, "{:?}", report.messages);
+        assert!(root.join("epic/lossless.flac").is_file());
+        assert!(!root.join("epic/lossless.mp3").exists());
+    }
+
+    #[test]
     fn import_rejects_unknown_category_and_non_mp3() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("library");
@@ -599,6 +650,32 @@ mod tests {
         let unsupported = import_files(&root, &categories(), "epic", &[source]);
         assert_eq!(unsupported.failed, 1);
         assert!(root.join("epic").is_dir());
+    }
+
+    #[test]
+    fn batch_export_keeps_source_format_without_normalization() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        let dest = dir.path().join("out");
+        fs::create_dir_all(root.join("epic")).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(root.join("epic/lossless.flac"), b"flac-bytes").unwrap();
+        let track = Song {
+            file_name: "lossless.flac".into(),
+            ..song("epic", "lossless")
+        };
+
+        let outcome = export_songs(
+            &root,
+            &categories(),
+            &dest,
+            &[&track],
+            ExportSettings::from_prefs(false, ""),
+        );
+
+        assert_eq!(outcome.report.succeeded, 1, "{:?}", outcome.report.messages);
+        assert!(dest.join("lossless.flac").is_file());
+        assert!(!dest.join("lossless.mp3").exists());
     }
 
     #[test]
@@ -631,6 +708,24 @@ mod tests {
             rename_song(root, &categories(), &current, "   "),
             Err(OpError::EmptyTitle)
         ));
+    }
+
+    #[test]
+    fn rename_keeps_source_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("epic")).unwrap();
+        fs::write(root.join("epic/old.flac"), b"flac").unwrap();
+        let track = Song {
+            file_name: "old.flac".into(),
+            ..song("epic", "old")
+        };
+
+        let change = rename_song(root, &categories(), &track, "new").unwrap();
+
+        assert_eq!(change.to, "epic/new");
+        assert!(root.join("epic/new.flac").is_file());
+        assert!(!root.join("epic/new.mp3").exists());
     }
 
     #[test]

@@ -96,7 +96,12 @@ watch(
     }
     const time = currentTime();
     const wasPlaying = previous ? state.playing : false;
-    void loadSongSource(song, { autoplay: wasPlaying, restoreTime: previous ? time : 0 });
+    // 同一曲目换了路径（重命名 / 外部移动）不是切歌：硬切重载，避免同内容叠加淡入淡出。
+    void loadSongSource(song, {
+      autoplay: wasPlaying,
+      restoreTime: previous ? time : 0,
+      crossfade: 0,
+    });
   },
 );
 
@@ -134,11 +139,17 @@ export function refreshLoopRegion(): void {
   setLoopRegion(loopRegionFor(state.currentSong));
 }
 
+/** 当前设置的切歌淡入淡出时长（秒）；0 表示硬切。 */
+function crossfadeSeconds(): number {
+  return state.prefs?.crossfadeSeconds ?? 0;
+}
+
 export function playSong(
   song: Song,
   newQueue: Song[] | null = null,
   forcePlay = false,
   autoplay = true,
+  fadeInSeconds = 0,
 ): void {
   if (!song) return;
 
@@ -158,10 +169,10 @@ export function playSong(
 
   state.currentKey = song.key;
   state.currentSong = song;
-  state.playing = false;
+  // 交叉淡入淡出时旧曲仍在发声：播放状态保持不变，避免按钮与界面闪一下暂停。
   playbackError.value = '';
   recordPlay(song.key);
-  void loadSongSource(song, { autoplay });
+  void loadSongSource(song, { autoplay, fadeInSeconds });
 }
 
 export function playSongWithMode(song: Song, list: Song[] | null, mode: PlayMode): void {
@@ -178,7 +189,17 @@ export function setPlayMode(mode: PlayMode): void {
 
 async function loadSongSource(
   song: Song,
-  { autoplay = true, restoreTime = 0 }: { autoplay?: boolean; restoreTime?: number } = {},
+  {
+    autoplay = true,
+    restoreTime = 0,
+    crossfade = crossfadeSeconds(),
+    fadeInSeconds = 0,
+  }: {
+    autoplay?: boolean;
+    restoreTime?: number;
+    crossfade?: number;
+    fadeInSeconds?: number;
+  } = {},
 ): Promise<void> {
   // 整曲解码为 float32 PCM：48kHz 立体声约 23MB/分钟，过长曲目会撑爆 WebView 内存。
   const seconds = (song.durationMs ?? 0) / 1000;
@@ -192,6 +213,8 @@ async function loadSongSource(
     autoplay,
     restoreTime,
     loop: loopRegionFor(song),
+    crossfadeSeconds: crossfade,
+    fadeInSeconds,
     onAutoplayBlocked: () => {
       state.playing = false;
     },
@@ -217,11 +240,11 @@ export function seekTo(seconds: number): void {
   seekAudio(seconds);
 }
 
-export function nextTrack(forcePlay = true): void {
+export function nextTrack(forcePlay = true, fadeInSeconds = 0): void {
   if (state.queue.length === 0) return;
   if (state.queue.length === 1) {
     rewindToStart();
-    if (forcePlay) startPlayback();
+    if (forcePlay) startPlayback(fadeInSeconds || undefined);
     return;
   }
 
@@ -231,7 +254,7 @@ export function nextTrack(forcePlay = true): void {
       : nextSequentialIndex();
   if (nextIndex < 0) return;
   state.queueIndex = nextIndex;
-  playSong(state.queue[nextIndex]!, null, forcePlay, forcePlay);
+  playSong(state.queue[nextIndex]!, null, forcePlay, forcePlay, fadeInSeconds);
 }
 
 export function prevTrack(forcePlay = true): void {
@@ -255,12 +278,14 @@ export function prevTrack(forcePlay = true): void {
 
 function handleEnded(): void {
   if (endedHandler?.()) return;
+  // 自然播完后没有旧声部可交叉，用相同时长给新曲补一个淡入，避免列表播放时每次都是硬切。
+  const fade = crossfadeSeconds();
   if (state.prefs?.playMode === PLAY_MODES.repeatOne) {
     rewindToStart();
-    startPlayback();
+    startPlayback(fade || undefined);
     return;
   }
-  nextTrack(true);
+  nextTrack(true, fade);
 }
 
 /** 连续失败不超过上限时自动跳下一首，否则停下来提示。 */

@@ -16,6 +16,11 @@ use thiserror::Error;
 /// 未指定或未知场景时使用的默认预设。
 pub const DEFAULT_PRESET_ID: &str = "video-editing";
 
+/// 响度归一化输出容器：两遍 loudnorm 固定用 libmp3lame 编码。
+///
+/// 直接复用曲库的兜底扩展名，保证「归一化输出格式」只在一处定义。
+pub const NORMALIZED_EXTENSION: &str = crate::library::DEFAULT_AUDIO_EXTENSION;
+
 /// 导出场景预设：目标响度按主流平台与广播标准归纳。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,7 +88,9 @@ pub fn preset_or_default(id: &str) -> ExportPreset {
 
 /// 定位可用的 ffmpeg；每个候选都会执行 `-version` 做存活探测。
 pub fn ffmpeg_path() -> Option<PathBuf> {
-    ffmpeg_candidates().into_iter().find(|program| can_run(program))
+    ffmpeg_candidates()
+        .into_iter()
+        .find(|program| can_run(program))
 }
 
 /// 用 ffmpeg 两遍 loudnorm 把 `source` 归一化到 `preset`，输出 mp3 到 `destination`。
@@ -235,7 +242,11 @@ fn ffmpeg_candidates() -> Vec<PathBuf> {
 }
 
 fn ffmpeg_program() -> &'static str {
-    if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
 }
 
 fn can_run(program: &Path) -> bool {
