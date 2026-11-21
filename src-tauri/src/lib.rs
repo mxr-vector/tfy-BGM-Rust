@@ -1,6 +1,7 @@
 mod api;
 mod commands;
 mod desktop;
+mod fonts;
 mod library_root;
 mod library_watch;
 mod settings;
@@ -71,6 +72,7 @@ pub fn run() {
             commands::hide_to_tray,
             commands::quit_app,
             commands::reload_config,
+            commands::system_fonts,
             commands::builtin_wallpapers,
             commands::choose_wallpaper_file,
             commands::open_config_file,

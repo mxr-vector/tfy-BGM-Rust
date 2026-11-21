@@ -19,6 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::api::{ApiBridge, ApiEndpoint, ApiStatus, CommandFailure};
 use crate::desktop::{self, DesktopState};
+use crate::fonts;
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
@@ -135,6 +136,15 @@ pub fn api_reply(
 #[tauri::command]
 pub fn reload_config(app: AppHandle, state: State<'_, AppState>) -> ConfigReload {
     state.reload_config(&app)
+}
+
+/// 系统已安装字体清单。字体选择改用系统字体后，「选项存在」即代表本机已安装。
+#[tauri::command]
+pub async fn system_fonts() -> CommandResult<Vec<fonts::SystemFont>> {
+    // 需要逐个读取字体文件的 name 表，放到阻塞线程池，避免占用异步运行时。
+    tauri::async_runtime::spawn_blocking(fonts::list)
+        .await
+        .map_err(|error| format!("字体扫描失败：{error}"))
 }
 
 /// 内置壁纸清单；资源缺失的条目会被后端过滤，前端据此隐藏对应选项。

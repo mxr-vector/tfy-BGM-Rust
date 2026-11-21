@@ -24,10 +24,10 @@ pub const MAX_CROSSFADE_SECONDS: f32 = 12.0;
 /// 同时启用的输出设备上限，避免异常配置创建过多 AudioContext。
 pub const MAX_OUTPUT_ROUTES: usize = 8;
 
-/// 「基本系统配置 · 常规」可选的界面字体 id；未知值回退 `system`。
-pub const UI_FONT_IDS: [&str; 5] = ["system", "harmony", "misans", "pingfang", "yahei"];
-/// 默认使用应用内置字体栈。
+/// 界面字体：`system` 表示应用内置字体栈，其余为系统字体族名。
 pub const DEFAULT_UI_FONT: &str = "system";
+/// 字体族名长度上限，避免异常配置写入超长字符串。
+const MAX_UI_FONT_LEN: usize = 128;
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -163,7 +163,7 @@ pub struct Prefs {
     pub wallpaper_fit: String,
 
     // ---- 基本系统配置 · 常规 ----
-    /// 界面字体 id，见 [`UI_FONT_IDS`]。
+    /// 界面字体：`system` 或系统字体族名（见 [`DEFAULT_UI_FONT`]）。
     pub ui_font: String,
     /// 开机自动启动。
     pub autostart: bool,
@@ -336,11 +336,16 @@ impl Prefs {
             _ => DEFAULT_WALLPAPER_FIT.to_owned(),
         };
 
-        let font = self.ui_font.trim().to_ascii_lowercase();
-        self.ui_font = if UI_FONT_IDS.contains(&font.as_str()) {
-            font
-        } else {
+        let font = self.ui_font.trim();
+        self.ui_font = if font.is_empty()
+            || font.chars().count() > MAX_UI_FONT_LEN
+            || font
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '"' | '\\' | ';' | '{' | '}'))
+        {
             DEFAULT_UI_FONT.to_owned()
+        } else {
+            font.to_owned()
         };
         self
     }
@@ -773,20 +778,36 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ui_font_falls_back_to_system() {
-        let known = Prefs {
-            ui_font: "  Harmony ".into(),
+    fn ui_font_accepts_system_family_names() {
+        // 字体选择改为读取系统字体后，族名（含空格、中文）都应原样保留。
+        let family = Prefs {
+            ui_font: "  Microsoft YaHei  ".into(),
             ..Prefs::default()
         }
         .normalize();
-        assert_eq!(known.ui_font, "harmony");
+        assert_eq!(family.ui_font, "Microsoft YaHei");
 
-        let unknown = Prefs {
-            ui_font: "comic-sans".into(),
+        let chinese = Prefs {
+            ui_font: "站酷高端黑".into(),
             ..Prefs::default()
         }
         .normalize();
-        assert_eq!(unknown.ui_font, DEFAULT_UI_FONT);
+        assert_eq!(chinese.ui_font, "站酷高端黑");
+
+        let empty = Prefs {
+            ui_font: "   ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(empty.ui_font, DEFAULT_UI_FONT);
+
+        // 会破坏根元素 CSS 变量值的字符一律回退默认字体。
+        let unsafe_value = Prefs {
+            ui_font: "\"Onest\", url(evil)".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(unsafe_value.ui_font, DEFAULT_UI_FONT);
     }
 
     #[test]

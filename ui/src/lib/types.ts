@@ -56,6 +56,16 @@ export interface CorsConfig {
   origins: string[];
 }
 
+/** `system_fonts` 命令返回的系统字体。 */
+export interface SystemFont {
+  /** CSS `font-family` 使用的族名。 */
+  family: string;
+  /** 展示名，优先简体中文（如「微软雅黑」）。 */
+  label: string;
+  /** 是否含中文字形。 */
+  cjk: boolean;
+}
+
 /** 一路输出设备路由；`deviceId` 为 `default` 时代表系统默认输出。 */
 export interface OutputRoute {
   deviceId: string;
@@ -92,7 +102,7 @@ export interface Prefs {
   wallpaperOpacity: number;
   wallpaperBlur: number;
   wallpaperFit: WallpaperFit;
-  /** 界面字体 id：system / harmony / misans / pingfang / yahei。 */
+  /** 界面字体：`system` 或系统字体族名（见 `system_fonts` 命令）。 */
   uiFont: string;
   autostart: boolean;
   minimizeToTray: boolean;

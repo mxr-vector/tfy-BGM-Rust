@@ -5,6 +5,7 @@ export const COMMANDS = {
   bootstrap: 'bootstrap',
   reloadConfig: 'reload_config',
   openConfigFile: 'open_config_file',
+  systemFonts: 'system_fonts',
   savePrefs: 'save_prefs',
   saveSchedule: 'save_schedule',
   saveLoopPoint: 'save_loop_point',
@@ -84,14 +85,16 @@ export const DEFAULT_WALLPAPER_FIT = 'cover' as const;
 export const DEFAULT_FONT_STACK =
   '"HarmonyOS Sans SC", "MiSans", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif';
 
-/** 「常规 · 字体选择」可选字体，id 与 Rust `prefs::UI_FONT_IDS` 一致。 */
-export const FONT_OPTIONS = [
-  { id: 'system', label: '系统默认', stack: DEFAULT_FONT_STACK },
-  { id: 'harmony', label: 'HarmonyOS Sans', stack: '"HarmonyOS Sans SC", "HarmonyOS Sans", sans-serif' },
-  { id: 'misans', label: 'MiSans', stack: '"MiSans", "MiSans VF", sans-serif' },
-  { id: 'pingfang', label: '苹方 PingFang SC', stack: '"PingFang SC", "Hiragino Sans GB", sans-serif' },
-  { id: 'yahei', label: '微软雅黑 Microsoft YaHei', stack: '"Microsoft YaHei", "PingFang SC", sans-serif' },
-] as const;
+/**
+ * 旧版本 `prefs.json` 保存的字体 id → 系统字体族名。
+ * 字体选择改为读取系统字体后，仅在读取旧配置时做一次映射，新配置直接存族名。
+ */
+export const LEGACY_UI_FONT_FAMILIES: Readonly<Record<string, string>> = {
+  harmony: 'HarmonyOS Sans SC',
+  misans: 'MiSans',
+  pingfang: 'PingFang SC',
+  yahei: 'Microsoft YaHei',
+};
 
 /** 打开「音乐淡入淡出」且此前为硬切时使用的默认时长（秒），与 Rust 默认值一致。 */
 export const DEFAULT_CROSSFADE_SECONDS = 2;

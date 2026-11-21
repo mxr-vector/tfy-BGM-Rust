@@ -8,6 +8,8 @@
  */
 
 import { computed, nextTick, ref, watch } from 'vue';
+import { cachedFonts, fontOptions, loadSystemFonts, type FontOption } from '@/lib/fonts';
+import { normalizeError } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { wakeLockSupported } from '@/composables/useSystemIntegration';
 import type { CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
@@ -73,6 +75,29 @@ const corsOriginsText = ref('');
 const savingCors = ref(false);
 const copied = ref(false);
 
+const fontsLoading = ref(false);
+const fontList = ref<FontOption[]>(fontOptions());
+
+/**
+ * 读取系统字体。首次打开「常规」时扫描一次，之后复用会话缓存；
+ * 用户安装新字体后可用下拉框里的「重新扫描」刷新。
+ */
+async function ensureFonts(force = false): Promise<void> {
+  if (!force && cachedFonts().length > 0) {
+    fontList.value = fontOptions();
+    return;
+  }
+  fontsLoading.value = true;
+  try {
+    await loadSystemFonts(force);
+  } catch (error) {
+    toast(`读取系统字体失败：${normalizeError(error)}`, 'error');
+  } finally {
+    fontList.value = fontOptions();
+    fontsLoading.value = false;
+  }
+}
+
 const apiStateLabel = computed(() => {
   const status = apiStatus.value;
   if (!status) return '未启用';
@@ -93,6 +118,7 @@ const corsHint = computed(
 
 function selectTab(tab: SettingsTab): void {
   settingsTab.value = tab;
+  if (tab === 'general') void ensureFonts();
   if (tab === 'playback') void refreshOutputs();
   if (tab === 'integrations') void syncIntegrationForm();
 }
@@ -203,6 +229,7 @@ function onPanelKeydown(event: KeyboardEvent): void {
 
 watch(settingsOpen, async (open) => {
   if (!open) return;
+  if (settingsTab.value === 'general') void ensureFonts();
   if (settingsTab.value === 'playback') void refreshOutputs();
   if (settingsTab.value === 'integrations') void syncIntegrationForm();
   await nextTick();
@@ -279,12 +306,15 @@ watch(settingsOpen, async (open) => {
               <div class="settings-row">
                 <div class="settings-row-text">
                   <strong>字体选择</strong>
-                  <span>界面文字使用的字体；系统未安装时自动回退</span>
+                  <span>界面文字使用的字体，列表直接读取系统已安装的字体</span>
                 </div>
                 <div class="settings-font">
                   <FontSelect
                     :model-value="prefs?.uiFont ?? 'system'"
+                    :options="fontList"
+                    :loading="fontsLoading"
                     @update:model-value="setUiFont"
+                    @refresh="ensureFonts(true)"
                   />
                 </div>
               </div>

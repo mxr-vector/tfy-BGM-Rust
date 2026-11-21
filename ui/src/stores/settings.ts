@@ -9,7 +9,8 @@
  */
 
 import { computed, ref } from 'vue';
-import { COMMANDS, DEFAULT_CROSSFADE_SECONDS, FONT_OPTIONS } from '@/lib/constants';
+import { COMMANDS, DEFAULT_CROSSFADE_SECONDS } from '@/lib/constants';
+import { fontStack } from '@/lib/fonts';
 import { normalizeError } from '@/lib/format';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
@@ -49,11 +50,9 @@ export function updatePrefs(patch: Partial<Prefs>): void {
 
 // ---------------- 常规 ----------------
 
-/** 把字体选择写到根元素；`system` 使用应用内置字体栈。 */
+/** 把字体选择写到根元素；`system` 使用应用内置字体栈，其余按系统字体族名应用。 */
 export function applyUiFont(fontId: string | undefined = state.prefs?.uiFont): void {
-  const option =
-    FONT_OPTIONS.find((item) => item.id === (fontId ?? 'system')) ?? FONT_OPTIONS[0];
-  document.documentElement.style.setProperty('--font-sans', option.stack);
+  document.documentElement.style.setProperty('--font-sans', fontStack(fontId));
 }
 
 export function setUiFont(fontId: string): void {
