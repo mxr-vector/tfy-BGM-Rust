@@ -7,6 +7,7 @@ mod icons;
 mod library;
 mod text_input;
 mod view;
+mod watch;
 
 use gpui::{
     App, Application, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,

@@ -9,7 +9,9 @@ publish = false
 [dependencies]
 anyhow = "1"
 bgm-core = { path = "core" }
+chrono = "0.4"
 dirs = "6"
 gpui = "0.2.2"
+notify = "8"
 rodio = "0.23"
 unicode-segmentation = "1"
