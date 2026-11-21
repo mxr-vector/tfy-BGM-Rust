@@ -14,6 +14,7 @@ export function applyBootstrap(boot: Bootstrap): void {
   applyConfig(boot.config);
   state.prefs = boot.prefs;
   state.library = boot.library;
+  state.platform = boot.platform;
   state.favorites = new Set(boot.prefs.favorites);
   state.selected = new Set();
   state.sortBy = boot.prefs.sortBy;

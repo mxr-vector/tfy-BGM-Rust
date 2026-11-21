@@ -48,7 +48,34 @@ pub struct ApiConfig {
     pub port: u16,
     /// 可选的 Bearer token；非空时所有请求（含 SSE）都必须携带。
     pub token: String,
+    /// 浏览器跨域访问策略。
+    pub cors: CorsConfig,
 }
+
+/// 跨域策略：默认只允许本机页面（应用 WebView 与 localhost）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CorsMode {
+    /// 仅本机页面。
+    #[default]
+    Local,
+    /// 允许任意来源；响应会回写请求方的 Origin。
+    Any,
+    /// 本机页面 + [`CorsConfig::origins`] 中列出的来源。
+    Custom,
+}
+
+/// 跨域来源白名单；只在 `mode = custom` 时参与判断。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CorsConfig {
+    pub mode: CorsMode,
+    /// 形如 `https://example.com` 的来源；`*` 等价于放行全部来源。
+    pub origins: Vec<String>,
+}
+
+/// 自定义来源条数上限，避免异常配置让中间件逐条比较过久。
+const MAX_CORS_ORIGINS: usize = 16;
 
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -56,6 +83,7 @@ impl Default for ApiConfig {
             enabled: true,
             port: DEFAULT_API_PORT,
             token: String::new(),
+            cors: CorsConfig::default(),
         }
     }
 }
@@ -216,13 +244,62 @@ impl AppConfig {
 }
 
 impl ApiConfig {
-    fn normalize(mut self) -> Self {
+    /// 收敛端口、token 与跨域来源；供界面保存配置时复用。
+    pub fn normalize(mut self) -> Self {
         if self.port < MIN_API_PORT {
             self.port = DEFAULT_API_PORT;
         }
         self.token = self.token.trim().chars().take(MAX_TOKEN_CHARS).collect();
+        self.cors = self.cors.normalize();
         self
     }
+}
+
+impl CorsConfig {
+    fn normalize(mut self) -> Self {
+        let mut origins: Vec<String> = Vec::new();
+        for origin in self.origins.iter() {
+            let origin = origin.trim().trim_end_matches('/').to_owned();
+            if !is_allowed_origin_text(&origin) {
+                continue;
+            }
+            // `*` 不进入列表，直接按「放行全部来源」处理；放在截断之前判断，
+            // 避免 `*` 排在 16 条之后时被丢弃。
+            if origin == "*" {
+                self.mode = CorsMode::Any;
+                continue;
+            }
+            if origins.len() >= MAX_CORS_ORIGINS {
+                continue;
+            }
+            if !origins
+                .iter()
+                .any(|seen| seen.eq_ignore_ascii_case(&origin))
+            {
+                origins.push(origin);
+            }
+        }
+        self.origins = origins;
+        self
+    }
+}
+
+/// 来源文本是否可用：`*` 或带 http(s) 协议的 origin，不接受路径与查询串。
+///
+/// 协议部分不区分大小写：浏览器只会发送小写协议，但用户手输 `HTTPS://...` 时
+/// 也应视为有效（后续比较本身也是大小写不敏感的）。
+fn is_allowed_origin_text(origin: &str) -> bool {
+    if origin == "*" {
+        return true;
+    }
+    let lower = origin.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    !rest.is_empty() && !rest.contains('/') && !rest.contains('?') && !rest.contains('#')
 }
 
 impl BrandInfo {
@@ -421,6 +498,8 @@ mod tests {
         assert_eq!(json["api"]["enabled"], true);
         assert_eq!(json["api"]["port"], DEFAULT_API_PORT);
         assert!(json["api"]["token"].is_string());
+        assert_eq!(json["api"]["cors"]["mode"], "local");
+        assert!(json["api"]["cors"]["origins"].is_array());
     }
 
     #[test]
@@ -432,5 +511,70 @@ mod tests {
         assert!(!config.api.enabled);
         assert_eq!(config.api.port, DEFAULT_API_PORT);
         assert_eq!(config.api.token, "secret-token");
+        // api 段存在但没有 cors 时，沿用默认的「仅本机」策略。
+        assert_eq!(config.api.cors.mode, CorsMode::Local);
+        assert!(config.api.cors.origins.is_empty());
+    }
+
+    #[test]
+    fn cors_defaults_to_local_only() {
+        let config = AppConfig::default();
+        assert_eq!(config.api.cors.mode, CorsMode::Local);
+        assert!(config.api.cors.origins.is_empty());
+    }
+
+    #[test]
+    fn cors_origins_are_trimmed_deduped_and_validated() {
+        let raw = r#"{
+            "api": {
+                "cors": {
+                    "mode": "custom",
+                    "origins": [
+                        " https://example.com/ ",
+                        "https://example.com",
+                        "https://example.com/path",
+                        "not-an-origin",
+                        ""
+                    ]
+                }
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+        let config = config.normalize();
+
+        assert_eq!(config.api.cors.mode, CorsMode::Custom);
+        assert_eq!(config.api.cors.origins, ["https://example.com"]);
+    }
+
+    #[test]
+    fn wildcard_origin_switches_mode_to_any() {
+        let raw = r#"{ "api": { "cors": { "mode": "custom", "origins": ["*"] } } }"#;
+        let config = serde_json::from_str::<AppConfig>(raw).unwrap().normalize();
+        assert_eq!(config.api.cors.mode, CorsMode::Any);
+    }
+
+    #[test]
+    fn wildcard_beyond_origin_cap_still_switches_mode() {
+        // `*` 排在第 17 条之后也不应被截断逻辑吞掉。
+        let mut origins: Vec<String> = (0..MAX_CORS_ORIGINS)
+            .map(|index| format!("https://site{index}.example"))
+            .collect();
+        origins.push("*".to_owned());
+        let raw =
+            serde_json::json!({ "api": { "cors": { "mode": "custom", "origins": origins } } });
+        let config = serde_json::from_value::<AppConfig>(raw)
+            .unwrap()
+            .normalize();
+
+        assert_eq!(config.api.cors.mode, CorsMode::Any);
+        assert_eq!(config.api.cors.origins.len(), MAX_CORS_ORIGINS);
+    }
+
+    #[test]
+    fn origin_scheme_is_case_insensitive() {
+        let raw =
+            r#"{ "api": { "cors": { "mode": "custom", "origins": ["HTTPS://Example.com"] } } }"#;
+        let config = serde_json::from_str::<AppConfig>(raw).unwrap().normalize();
+        assert_eq!(config.api.cors.origins, ["HTTPS://Example.com"]);
     }
 }

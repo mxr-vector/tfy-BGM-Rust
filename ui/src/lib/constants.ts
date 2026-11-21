@@ -26,6 +26,11 @@ export const COMMANDS = {
   builtinWallpapers: 'builtin_wallpapers',
   chooseWallpaperFile: 'choose_wallpaper_file',
   apiInfo: 'api_info',
+  apiEndpoints: 'api_endpoints',
+  updateApiConfig: 'update_api_config',
+  applyDesktopSettings: 'apply_desktop_settings',
+  hideToTray: 'hide_to_tray',
+  quitApp: 'quit_app',
   apiPublishState: 'api_publish_state',
   apiReply: 'api_reply',
 } as const;
@@ -74,6 +79,22 @@ export const DEFAULT_WALLPAPER = 'default';
 export const DEFAULT_WALLPAPER_OPACITY = 0.35;
 export const DEFAULT_WALLPAPER_BLUR = 0;
 export const DEFAULT_WALLPAPER_FIT = 'cover' as const;
+
+/** 内置字体栈，与 main.css 的 `--font-sans` 保持一致；字体选择为「系统默认」时使用。 */
+export const DEFAULT_FONT_STACK =
+  '"HarmonyOS Sans SC", "MiSans", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif';
+
+/** 「常规 · 字体选择」可选字体，id 与 Rust `prefs::UI_FONT_IDS` 一致。 */
+export const FONT_OPTIONS = [
+  { id: 'system', label: '系统默认', stack: DEFAULT_FONT_STACK },
+  { id: 'harmony', label: 'HarmonyOS Sans', stack: '"HarmonyOS Sans SC", "HarmonyOS Sans", sans-serif' },
+  { id: 'misans', label: 'MiSans', stack: '"MiSans", "MiSans VF", sans-serif' },
+  { id: 'pingfang', label: '苹方 PingFang SC', stack: '"PingFang SC", "Hiragino Sans GB", sans-serif' },
+  { id: 'yahei', label: '微软雅黑 Microsoft YaHei', stack: '"Microsoft YaHei", "PingFang SC", sans-serif' },
+] as const;
+
+/** 打开「音乐淡入淡出」且此前为硬切时使用的默认时长（秒），与 Rust 默认值一致。 */
+export const DEFAULT_CROSSFADE_SECONDS = 2;
 
 export const WALLPAPER_OPTIONS = [
   { id: 'default', label: '默认样式', hint: '当前配色', preview: 'default' },

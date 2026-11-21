@@ -2,13 +2,15 @@
 //!
 //! 设计约束：
 //! - 只监听 `127.0.0.1`，默认端口 8737，避免暴露到局域网；
-//! - 浏览器来源只信任本机（`tauri://localhost` 与 `localhost` / `127.0.0.1` / `[::1]`），
+//! - 浏览器来源默认只信任本机（`tauri://localhost` 与 `localhost` / `127.0.0.1` / `[::1]`），
+//!   可在「基本系统配置 · 第三方接入」里改为放行全部来源或追加自定义来源；
 //!   非浏览器客户端（curl、Stream Deck 等）不带 `Origin`，不受影响；
 //! - `config.json` 的 `api.token` 非空时，所有请求都必须带 `Authorization: Bearer`；
+//!   界面保存 token 后立即生效，无需重启；
 //! - 播放控制由前端执行，Rust 只负责转发命令与缓存最近一次状态快照；
 //! - 曲库读取直接走 [`AppState`]，不依赖界面是否打开。
 //!
-//! 接口清单见 README 的「开放接口」章节。
+//! 接口清单见 [`endpoints`]，界面「第三方接入」直接展示同一份数据。
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -23,8 +25,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bgm_core::ApiConfig;
 use bgm_core::library::audio_extension;
+use bgm_core::{ApiConfig, CorsConfig, CorsMode};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -51,7 +53,8 @@ struct Inner {
     app: AppHandle,
     enabled: bool,
     port: u16,
-    token: String,
+    token: Mutex<String>,
+    cors: Mutex<CorsConfig>,
     running: AtomicBool,
     ready: AtomicBool,
     error: Mutex<Option<String>>,
@@ -96,7 +99,127 @@ pub struct ApiStatus {
     pub port: u16,
     pub base_url: String,
     pub token: String,
+    /// 当前生效的跨域策略。
+    pub cors: CorsConfig,
     pub error: Option<String>,
+}
+
+/// 「第三方接入」里展示的一条接口说明；与 [`router`] 注册的路由一一对应。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiEndpoint {
+    pub method: &'static str,
+    pub path: &'static str,
+    pub summary: &'static str,
+    pub description: &'static str,
+}
+
+/// 当前开放接口清单；新增路由时同步补充，界面会自动展示。
+pub fn endpoints() -> Vec<ApiEndpoint> {
+    vec![
+        ApiEndpoint {
+            method: "GET",
+            path: "/v1/health",
+            summary: "健康检查",
+            description: "返回服务版本、监听端口与就绪状态，不校验 token。",
+        },
+        ApiEndpoint {
+            method: "GET",
+            path: "/v1/state",
+            summary: "播放状态",
+            description: "当前曲目、进度、音量、播放模式、队列与输出路由快照。",
+        },
+        ApiEndpoint {
+            method: "GET",
+            path: "/v1/library",
+            summary: "曲库内容",
+            description: "全部曲目的 key、路径、分类与音频格式，可直接用于 /v1/play。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/library/rescan",
+            summary: "重新扫描曲库",
+            description: "重新读取磁盘并返回最新曲库快照。",
+        },
+        ApiEndpoint {
+            method: "GET",
+            path: "/v1/events",
+            summary: "状态事件流（SSE）",
+            description: "每秒推送一次播放状态；SSE 无法自定义请求头，可用 ?token= 鉴权。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/play",
+            summary: "播放曲目",
+            description: "请求体 {\"key\":\"分类/曲名\",\"queue\":[\"分类/曲名\"]}，queue 可选。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/pause",
+            summary: "暂停",
+            description: "暂停当前播放；未在播放时不做任何操作。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/resume",
+            summary: "继续播放",
+            description: "从暂停位置继续播放。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/toggle",
+            summary: "播放 / 暂停切换",
+            description: "等价于界面上的播放按钮。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/next",
+            summary: "下一首",
+            description: "按当前播放模式切到下一首。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/previous",
+            summary: "上一首",
+            description: "播放超过重播阈值时先回到开头，否则切到上一首。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/seek",
+            summary: "跳转进度",
+            description: "请求体 {\"seconds\":12.5}，单位为秒。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/volume",
+            summary: "设置主音量",
+            description: "请求体 {\"volume\":0.6}，取值 0~1。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/crossfade",
+            summary: "设置淡入淡出",
+            description: "请求体 {\"seconds\":2}，取值 0~12，0 表示硬切。",
+        },
+        ApiEndpoint {
+            method: "GET",
+            path: "/v1/outputs",
+            summary: "输出设备与路由",
+            description: "可用输出设备、每路路由的开关、独立音量与静音状态。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/outputs",
+            summary: "更新一路输出",
+            description: "请求体 {\"deviceId\":\"...\",\"enabled\":true,\"volume\":0.8,\"muted\":false}。",
+        },
+        ApiEndpoint {
+            method: "POST",
+            path: "/v1/command/{action}",
+            summary: "通用命令",
+            description: "把 action 直接转给界面执行，参数放在 params 里；未知 action 返回 404。",
+        },
+    ]
 }
 
 impl ApiBridge {
@@ -108,7 +231,8 @@ impl ApiBridge {
                 app,
                 enabled: config.enabled,
                 port: config.port,
-                token: config.token.trim().to_owned(),
+                token: Mutex::new(config.token.trim().to_owned()),
+                cors: Mutex::new(config.cors.clone()),
                 running: AtomicBool::new(false),
                 ready: AtomicBool::new(false),
                 error: Mutex::new(None),
@@ -117,6 +241,28 @@ impl ApiBridge {
                 events,
                 next_id: AtomicU64::new(1),
             }),
+        }
+    }
+
+    /// 界面保存 token / 跨域策略后立即生效，不需要重启应用。
+    pub fn apply_config(&self, token: &str, cors: &CorsConfig) {
+        *self.inner.token.lock() = token.trim().to_owned();
+        *self.inner.cors.lock() = cors.clone();
+    }
+
+    /// 该浏览器来源是否允许跨域访问；非浏览器请求不带 Origin，由中间件直接放行。
+    fn cors_allows(&self, origin: &str) -> bool {
+        if origin_allowed(origin) {
+            return true;
+        }
+        let cors = self.inner.cors.lock().clone();
+        match cors.mode {
+            CorsMode::Local => false,
+            CorsMode::Any => true,
+            CorsMode::Custom => cors
+                .origins
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(origin)),
         }
     }
 
@@ -168,7 +314,8 @@ impl ApiBridge {
             ready: self.inner.ready.load(Ordering::Relaxed),
             port: self.inner.port,
             base_url: format!("http://127.0.0.1:{}", self.inner.port),
-            token: self.inner.token.clone(),
+            token: self.inner.token.lock().clone(),
+            cors: self.inner.cors.lock().clone(),
             error: self.inner.error.lock().clone(),
         }
     }
@@ -228,7 +375,8 @@ impl ApiBridge {
     }
 
     fn authorize(&self, headers: &HeaderMap, query_token: Option<&str>) -> Result<(), ApiError> {
-        if self.inner.token.is_empty() {
+        let token = self.inner.token.lock().clone();
+        if token.is_empty() {
             return Ok(());
         }
         let bearer = headers
@@ -241,7 +389,7 @@ impl ApiBridge {
             .and_then(|value| value.to_str().ok())
             .map(str::trim);
         let supplied = bearer.or(custom).or(query_token);
-        if supplied == Some(self.inner.token.as_str()) {
+        if supplied == Some(token.as_str()) {
             Ok(())
         } else {
             Err(ApiError::new(
@@ -258,6 +406,7 @@ impl ApiBridge {
 
 /// 路由与跨域中间件；所有接口都在 `/v1` 下，避免与其它本地服务冲突。
 fn router(bridge: ApiBridge) -> Router {
+    let cors_state = bridge.clone();
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/state", get(get_state))
@@ -275,7 +424,7 @@ fn router(bridge: ApiBridge) -> Router {
         .route("/v1/crossfade", post(crossfade))
         .route("/v1/outputs", get(outputs).post(update_output))
         .route("/v1/command/{action}", post(command))
-        .layer(middleware::from_fn(cors))
+        .layer(middleware::from_fn_with_state(cors_state, cors))
         .with_state(bridge)
 }
 
@@ -319,21 +468,21 @@ fn payload(data: Value) -> Json<Value> {
     Json(json!({ "ok": true, "data": data }))
 }
 
-/// 跨域策略：只信任本机来源，非浏览器客户端（不带 `Origin`）直接放行。
+/// 跨域策略：默认只信任本机来源，非浏览器客户端（不带 `Origin`）直接放行。
 ///
 /// 服务本身已在回环地址上，这里再拦一层浏览器来源，避免用户访问的任意网页
 /// 通过跨域请求读取曲库路径或控制播放。本机的 `localhost` 页面（例如自建控制台）
-/// 与应用自身的 WebView 仍然可用。
-async fn cors(request: Request, next: Next) -> Response {
+/// 与应用自身的 WebView 仍然可用；放行范围由「第三方接入」里的 CORS 配置决定。
+async fn cors(State(api): State<ApiBridge>, request: Request, next: Next) -> Response {
     let origin = request
         .headers()
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     if let Some(origin) = origin.as_deref()
-        && !origin_allowed(origin)
+        && !api.cors_allows(origin)
     {
-        return ApiError::forbidden("不允许的来源访问本机接口，仅接受本机页面").into_response();
+        return ApiError::forbidden("不允许的来源访问本机接口，请检查 CORS 配置").into_response();
     }
 
     if request.method() == Method::OPTIONS {
@@ -347,7 +496,7 @@ async fn cors(request: Request, next: Next) -> Response {
 }
 
 fn cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
-    // 只有本机来源才回写 ACAO；脚本请求没有 Origin，不需要该头。
+    // 回写被中间件放行的来源（本机或 CORS 配置允许的来源）；脚本请求没有 Origin，不需要该头。
     if let Some(origin) = origin
         && let Ok(value) = origin.parse::<HeaderValue>()
     {

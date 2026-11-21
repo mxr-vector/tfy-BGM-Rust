@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { config } from '@/lib/config';
 import { SORT_KEYS } from '@/lib/constants';
 import type { SortBy } from '@/lib/types';
-import { openConfigFile, openImport, busyAction } from '@/stores/actions';
+import { openImport, busyAction } from '@/stores/actions';
+import { openSettings } from '@/stores/settings';
 import { setSearch } from '@/stores/library';
 import { setSortBy } from '@/stores/prefs';
 import { state } from '@/stores/state';
@@ -247,9 +248,9 @@ onBeforeUnmount(() => {
         type="button"
         class="icon-tool"
         id="btn-config"
-        title="打开应用配置 config.json"
-        aria-label="打开应用配置"
-        @click="openConfigFile"
+        title="设置 · 基本系统配置"
+        aria-label="设置"
+        @click="openSettings()"
       >
         <Icon name="settings" />
       </button>

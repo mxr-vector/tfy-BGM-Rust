@@ -79,6 +79,12 @@ let defaultSinkVolume = 1;
 let defaultSinkMuted = false;
 /** 供其它输出设备桥接的混音流；没有多设备需求时不会产生额外输出。 */
 let mixDest: MediaStreamAudioDestinationNode | null = null;
+/** 系统音频增强（Windows）：总线上的温和压缩，关闭时为直通。 */
+let enhancer: DynamicsCompressorNode | null = null;
+/** 系统空间音效（Windows）：总线上的 HRTF 声像，关闭时为直通。 */
+let spatializer: PannerNode | null = null;
+let enhancementEnabled = false;
+let spatialEnabled = false;
 let analyser: AnalyserNode | null = null;
 let loudness: AnalyserNode[] | null = null;
 let kShelf: BiquadFilterNode | null = null;
@@ -126,15 +132,16 @@ function ensureContext(): AudioContext | null {
   // 默认输出与外部设备各有一路增益：主音量是全局的，设备音量只作用于本路。
   defaultSink = context.createGain();
   defaultSink.gain.value = defaultSinkMuted ? 0 : defaultSinkVolume;
-  master.connect(defaultSink);
   defaultSink.connect(context.destination);
 
   // 多设备路由：把混音复制成 MediaStream，由各设备自己的 AudioContext 播放，
   // 这样所有设备共享同一条渲染时钟，不会因多路独立播放而逐渐跑偏。
   if (typeof context.createMediaStreamDestination === 'function') {
     mixDest = context.createMediaStreamDestination();
-    master.connect(mixDest);
   }
+
+  // 总线依次串联「音频增强 → 空间音效 → 输出」，开关只影响这一段。
+  rewireOutputChain();
 
   analyser = context.createAnalyser();
   analyser.fftSize = 2048;
@@ -176,6 +183,78 @@ function ensureContext(): AudioContext | null {
 
 export function getAudioContext(): AudioContext | null {
   return ensureContext();
+}
+
+/** 重建总线：`master → [音频增强] → [空间音效] → defaultSink / mixDest`。 */
+function rewireOutputChain(): void {
+  if (!context || !master || !defaultSink) return;
+  try {
+    master.disconnect();
+  } catch {
+    // 尚未建立任何连接时 disconnect 可能抛错，忽略即可。
+  }
+  for (const node of [enhancer, spatializer]) {
+    if (!node) continue;
+    try {
+      node.disconnect();
+    } catch {
+      // 同上。
+    }
+  }
+
+  let tail: AudioNode = master;
+  if (enhancementEnabled) {
+    enhancer ??= buildEnhancer(context);
+    tail.connect(enhancer);
+    tail = enhancer;
+  }
+  if (spatialEnabled) {
+    spatializer ??= buildSpatializer(context);
+    tail.connect(spatializer);
+    tail = spatializer;
+  }
+  tail.connect(defaultSink);
+  if (mixDest) tail.connect(mixDest);
+}
+
+/** 温和的总线压缩：抬高低电平细节并压住峰值，听感更「饱满」。 */
+function buildEnhancer(ctx: AudioContext): DynamicsCompressorNode {
+  const node = ctx.createDynamicsCompressor();
+  node.threshold.value = -18;
+  node.knee.value = 12;
+  node.ratio.value = 2.2;
+  node.attack.value = 0.01;
+  node.release.value = 0.25;
+  return node;
+}
+
+/** HRTF 声像固定在人耳正前方，为耳机提供空间感而不过度改变定位。 */
+function buildSpatializer(ctx: AudioContext): PannerNode {
+  const node = ctx.createPanner();
+  node.panningModel = 'HRTF';
+  node.distanceModel = 'inverse';
+  node.refDistance = 1;
+  node.rolloffFactor = 0.15;
+  node.positionX.value = 0;
+  node.positionY.value = 0;
+  node.positionZ.value = -1;
+  return node;
+}
+
+/** 应用 Windows 平台特有的总线处理；其它平台由调用方传 `false`。 */
+export function setOutputProcessing(options: {
+  enhancement: boolean;
+  spatial: boolean;
+}): void {
+  if (
+    options.enhancement === enhancementEnabled &&
+    options.spatial === spatialEnabled
+  ) {
+    return;
+  }
+  enhancementEnabled = options.enhancement;
+  spatialEnabled = options.spatial;
+  rewireOutputChain();
 }
 
 /** 混音流：供多输出设备桥接使用；不支持 MediaStream 的环境返回 `null`。 */

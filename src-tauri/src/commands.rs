@@ -17,7 +17,8 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::api::{ApiBridge, ApiStatus, CommandFailure};
+use crate::api::{ApiBridge, ApiEndpoint, ApiStatus, CommandFailure};
+use crate::desktop::{self, DesktopState};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
@@ -60,6 +61,48 @@ pub fn bootstrap(state: State<'_, AppState>) -> Bootstrap {
 #[tauri::command]
 pub fn api_info(bridge: State<'_, ApiBridge>) -> ApiStatus {
     bridge.status()
+}
+
+/// 「第三方接入」展示的开放接口清单。
+#[tauri::command]
+pub fn api_endpoints() -> Vec<ApiEndpoint> {
+    crate::api::endpoints()
+}
+
+/// 保存 token 与跨域策略；立即作用于正在运行的接口服务，并写回 `config.json`。
+#[tauri::command]
+pub fn update_api_config(
+    state: State<'_, AppState>,
+    bridge: State<'_, ApiBridge>,
+    token: String,
+    cors: bgm_core::CorsConfig,
+) -> CommandResult<ApiStatus> {
+    let api = state.update_api_config(token, cors).map_err(describe)?;
+    bridge.apply_config(&api.token, &api.cors);
+    Ok(bridge.status())
+}
+
+/// 「常规」中立即生效的桌面集成项：开机自动启动与最小化托盘。
+#[tauri::command]
+pub fn apply_desktop_settings(
+    app: AppHandle,
+    desktop_state: State<'_, DesktopState>,
+    autostart: bool,
+    minimize_to_tray: bool,
+) -> CommandResult<()> {
+    desktop::apply(&app, &desktop_state, autostart, minimize_to_tray).map_err(describe)
+}
+
+/// 关闭提示中选择「最小化托盘」：确保托盘存在后隐藏窗口。
+#[tauri::command]
+pub fn hide_to_tray(app: AppHandle) -> CommandResult<()> {
+    desktop::hide_to_tray(&app).map_err(describe)
+}
+
+/// 关闭提示中选择「关闭程序」：即使存在托盘图标也立即退出。
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 /// 前端把当前播放状态推给接口层；同时广播给 SSE 订阅者。

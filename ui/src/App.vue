@@ -8,15 +8,18 @@ import type { Bootstrap, LibraryChange } from '@/lib/types';
 import { installApiBridge } from '@/stores/api';
 import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
 import { installScheduler } from '@/composables/useScheduler';
+import { autoplayOnStartIfEnabled, installSystemIntegration } from '@/composables/useSystemIntegration';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
 import { applyBootstrap, applyExternalChange } from '@/stores/library';
 import { installOutputs } from '@/stores/outputs';
 import AudioPlayer from '@/components/AudioPlayer.vue';
+import ClosePrompt from '@/components/ClosePrompt.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import DiagnosticsPanel from '@/components/DiagnosticsPanel.vue';
 import Icon from '@/components/Icon.vue';
 import ModalHost from '@/components/ModalHost.vue';
 import QueueDrawer from '@/components/QueueDrawer.vue';
+import SettingsDialog from '@/components/SettingsDialog.vue';
 import Sidebar from '@/components/Sidebar.vue';
 import ToastHost from '@/components/ToastHost.vue';
 import TopBar from '@/components/TopBar.vue';
@@ -58,6 +61,7 @@ async function bootstrap(): Promise<void> {
     const boot = await invoke<Bootstrap>(COMMANDS.bootstrap);
     applyBootstrap(boot);
     uninstallHotkeys ??= installGlobalHotkeys();
+    autoplayOnStartIfEnabled();
   } catch (error) {
     fatal.value = { title: '曲库加载失败', message: normalizeError(error) };
   }
@@ -70,6 +74,7 @@ function reload(): void {
 applyDocumentCopy();
 void loadBuiltins();
 installOutputs();
+installSystemIntegration();
 void installApiBridge();
 
 onMounted(async () => {
@@ -125,6 +130,8 @@ onBeforeUnmount(() => {
 
   <WallpaperPopover />
   <DiagnosticsPanel />
+  <SettingsDialog />
+  <ClosePrompt />
   <ModalHost />
   <ContextMenu />
 </template>

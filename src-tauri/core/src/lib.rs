@@ -16,11 +16,11 @@ pub mod schedule;
 pub mod tags;
 
 pub use categories::{Categories, Category};
-pub use config::{ApiConfig, AppConfig};
+pub use config::{ApiConfig, AppConfig, CorsConfig, CorsMode};
 pub use export::{ExportOutcome, ExportSettings};
 pub use library::{LibrarySnapshot, LibrarySource, Song, scan_library, scan_library_cached};
 pub use loops::{LoopBook, LoopPoint};
 pub use loudness::ExportPreset;
 pub use ops::{BatchOutcome, BatchReport, KeyChange};
-pub use prefs::{OutputRoute, PlayMode, Prefs, SortBy};
+pub use prefs::{CloseAction, OutputRoute, PlayMode, Prefs, SortBy};
 pub use schedule::{Schedule, ScheduleEntry, ScheduleSong};

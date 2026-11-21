@@ -41,6 +41,21 @@ export type SortBy = 'default' | 'name';
 export type WallpaperFit = 'cover' | 'contain';
 export type WallpaperKind = 'image' | 'video';
 
+/** 当前运行平台；平台特有配置项据此显示。 */
+export type AppPlatform = 'windows' | 'linux' | 'macos' | 'other';
+
+/** 点击标题栏关闭按钮的行为；`ask` 表示每次弹出选择框。 */
+export type CloseAction = 'ask' | 'quit' | 'tray';
+
+/** 浏览器跨域策略：仅本机 / 任意来源 / 本机 + 自定义来源。 */
+export type CorsMode = 'local' | 'any' | 'custom';
+
+export interface CorsConfig {
+  mode: CorsMode;
+  /** 仅在 `mode = 'custom'` 时参与判断；`*` 等价于放行全部来源。 */
+  origins: string[];
+}
+
 /** 一路输出设备路由；`deviceId` 为 `default` 时代表系统默认输出。 */
 export interface OutputRoute {
   deviceId: string;
@@ -77,6 +92,24 @@ export interface Prefs {
   wallpaperOpacity: number;
   wallpaperBlur: number;
   wallpaperFit: WallpaperFit;
+  /** 界面字体 id：system / harmony / misans / pingfang / yahei。 */
+  uiFont: string;
+  autostart: boolean;
+  minimizeToTray: boolean;
+  /** 关闭后需要重启应用才会切换 WebView 渲染后端。 */
+  gpuAcceleration: boolean;
+  autoplayOnStart: boolean;
+  preventSleep: boolean;
+  /** 点击标题栏关闭按钮时的行为。 */
+  closeAction: CloseAction;
+  /** Windows：系统媒体传输控制。 */
+  smtc: boolean;
+  /** Windows：系统空间音效。 */
+  spatialAudio: boolean;
+  /** Windows：系统音频增强。 */
+  audioEnhancement: boolean;
+  /** Linux：MPRIS2（仅 Wayland 会话生效）。 */
+  mpris2: boolean;
 }
 
 export interface BrandInfo {
@@ -116,6 +149,7 @@ export interface Bootstrap {
   config: AppConfig;
   schedule: Schedule;
   loops: LoopBook;
+  platform: AppPlatform;
 }
 
 export interface ScheduleSong {
@@ -253,5 +287,14 @@ export interface ApiStatus {
   port: number;
   baseUrl: string;
   token: string;
+  cors: CorsConfig;
   error: string | null;
+}
+
+/** 开放接口清单条目，与 Rust `api::endpoints()` 对应。 */
+export interface ApiEndpoint {
+  method: string;
+  path: string;
+  summary: string;
+  description: string;
 }

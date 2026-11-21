@@ -1,6 +1,7 @@
 import { computed, reactive } from 'vue';
 import { ALL_CATEGORY, SORT_KEYS } from '@/lib/constants';
 import type {
+  AppPlatform,
   CategorySummary,
   LibrarySnapshot,
   LibrarySource,
@@ -30,6 +31,8 @@ export interface AppState {
   view: AppView;
   schedule: ScheduleEntry[];
   loopPoints: Record<string, LoopPoint>;
+  /** 当前运行平台，bootstrap 后写入；平台特有配置项据此显示。 */
+  platform: AppPlatform;
 }
 
 export function emptyLibrary(): LibrarySnapshot {
@@ -60,6 +63,7 @@ export const state = reactive<AppState>({
   view: 'library',
   schedule: [],
   loopPoints: {},
+  platform: 'other',
 });
 
 const collator = new Intl.Collator(['zh-Hans-CN', 'zh', 'en'], {

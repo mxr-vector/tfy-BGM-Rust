@@ -52,6 +52,12 @@ async function flushPrefs(): Promise<void> {
   }
 }
 
+/** 立即落盘并等待完成；关闭程序 / 隐藏窗口前必须调用，避免请求被中断。 */
+export function flushPrefsNow(): Promise<void> {
+  window.clearTimeout(saveTimer);
+  return flushPrefs();
+}
+
 export function toggleFavorite(key: string | null): void {
   if (!key) return;
   if (state.favorites.has(key)) {

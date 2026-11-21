@@ -14,8 +14,8 @@ use bgm_core::export::ExportSettings;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
 use bgm_core::tags::MetaCache;
 use bgm_core::{
-    AppConfig, Category, LibrarySnapshot, LibrarySource, LoopBook, LoopPoint, Prefs, Schedule,
-    Song, scan_library_cached,
+    ApiConfig, AppConfig, Category, CorsConfig, LibrarySnapshot, LibrarySource, LoopBook,
+    LoopPoint, Prefs, Schedule, Song, scan_library_cached,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
@@ -60,6 +60,8 @@ pub struct Bootstrap {
     pub config: AppConfig,
     pub schedule: Schedule,
     pub loops: LoopBook,
+    /// 当前操作系统标识：`windows` / `linux` / `macos` / `other`。
+    pub platform: &'static str,
 }
 
 /// 外部文件变化后的增量结果；前端据此更新队列并提示增删。
@@ -162,7 +164,18 @@ impl AppState {
             config: self.config.read().clone(),
             schedule: self.schedule.read().clone(),
             loops: self.loops.read().clone(),
+            platform: crate::desktop::platform(),
         }
+    }
+
+    /// 「常规」里的桌面集成开关：开机自动启动、最小化托盘、GPU 加速。
+    pub fn desktop_prefs(&self) -> (bool, bool, bool) {
+        let prefs = self.prefs.read();
+        (
+            prefs.autostart,
+            prefs.minimize_to_tray,
+            prefs.gpu_acceleration,
+        )
     }
 
     pub fn save_prefs(&self, incoming: Prefs) -> Result<Prefs> {
@@ -293,6 +306,20 @@ impl AppState {
     /// 开放接口配置；修改 `config.json` 后重启应用生效。
     pub fn api_config(&self) -> bgm_core::ApiConfig {
         self.config.read().api.clone()
+    }
+
+    /// 保存 token 与跨域策略并立即写回 `config.json`；端口与启用状态保持不变。
+    pub fn update_api_config(&self, token: String, cors: CorsConfig) -> Result<ApiConfig> {
+        let mut config = self.config.read().clone();
+        config.api.token = token;
+        config.api.cors = cors;
+        config.api = config.api.normalize();
+        config
+            .save(&self.config_path)
+            .context("保存开放接口配置失败")?;
+        let api = config.api.clone();
+        *self.config.write() = config;
+        Ok(api)
     }
 
     pub fn root(&self) -> PathBuf {

@@ -24,6 +24,11 @@ pub const MAX_CROSSFADE_SECONDS: f32 = 12.0;
 /// 同时启用的输出设备上限，避免异常配置创建过多 AudioContext。
 pub const MAX_OUTPUT_ROUTES: usize = 8;
 
+/// 「基本系统配置 · 常规」可选的界面字体 id；未知值回退 `system`。
+pub const UI_FONT_IDS: [&str; 5] = ["system", "harmony", "misans", "pingfang", "yahei"];
+/// 默认使用应用内置字体栈。
+pub const DEFAULT_UI_FONT: &str = "system";
+
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
 /// 未选择壁纸时的默认样式（沿用应用自身的墨绿底色）。
@@ -70,6 +75,19 @@ pub enum SortBy {
     #[default]
     Default,
     Name,
+}
+
+/// 点击标题栏关闭按钮时的行为：每次询问 / 直接退出 / 最小化到托盘。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloseAction {
+    /// 弹出「关闭程序 / 最小化托盘」选择框。
+    #[default]
+    Ask,
+    /// 直接退出应用。
+    Quit,
+    /// 隐藏到系统托盘，继续后台播放。
+    Tray,
 }
 
 /// 一路输出设备：`deviceId` 来自 WebView 的 `enumerateDevices()`，`default` 表示系统默认。
@@ -143,6 +161,34 @@ pub struct Prefs {
     pub wallpaper_blur: u32,
     /// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
     pub wallpaper_fit: String,
+
+    // ---- 基本系统配置 · 常规 ----
+    /// 界面字体 id，见 [`UI_FONT_IDS`]。
+    pub ui_font: String,
+    /// 开机自动启动。
+    pub autostart: bool,
+    /// 最小化时隐藏到系统托盘。
+    pub minimize_to_tray: bool,
+    /// 是否允许 WebView 使用 GPU 加速（重启应用后生效）。
+    pub gpu_acceleration: bool,
+
+    // ---- 基本系统配置 · 播放 ----
+    /// 应用启动后自动开始播放。
+    pub autoplay_on_start: bool,
+    /// 播放时阻止系统休眠与熄屏。
+    pub prevent_sleep: bool,
+    /// 点击标题栏关闭按钮时的行为；`ask` 表示每次询问。
+    pub close_action: CloseAction,
+
+    // ---- 平台特有（仅对应平台读取）----
+    /// Windows：系统媒体传输控制（SMTC）。
+    pub smtc: bool,
+    /// Windows：系统空间音效。
+    pub spatial_audio: bool,
+    /// Windows：系统音频增强。
+    pub audio_enhancement: bool,
+    /// Linux：MPRIS2（仅 Wayland 会话生效）。
+    pub mpris2: bool,
 }
 
 impl Default for Prefs {
@@ -165,6 +211,17 @@ impl Default for Prefs {
             wallpaper_opacity: DEFAULT_WALLPAPER_OPACITY,
             wallpaper_blur: DEFAULT_WALLPAPER_BLUR,
             wallpaper_fit: DEFAULT_WALLPAPER_FIT.to_owned(),
+            ui_font: DEFAULT_UI_FONT.to_owned(),
+            autostart: false,
+            minimize_to_tray: false,
+            gpu_acceleration: true,
+            autoplay_on_start: false,
+            prevent_sleep: false,
+            close_action: CloseAction::Ask,
+            smtc: false,
+            spatial_audio: false,
+            audio_enhancement: true,
+            mpris2: false,
         }
     }
 }
@@ -277,6 +334,13 @@ impl Prefs {
         self.wallpaper_fit = match self.wallpaper_fit.trim().to_ascii_lowercase().as_str() {
             "contain" => "contain".to_owned(),
             _ => DEFAULT_WALLPAPER_FIT.to_owned(),
+        };
+
+        let font = self.ui_font.trim().to_ascii_lowercase();
+        self.ui_font = if UI_FONT_IDS.contains(&font.as_str()) {
+            font
+        } else {
+            DEFAULT_UI_FONT.to_owned()
         };
         self
     }
@@ -674,5 +738,79 @@ mod tests {
         }
         .normalize();
         assert_eq!(invalid_fit.wallpaper_fit, "cover");
+    }
+
+    #[test]
+    fn system_settings_defaults_match_spec() {
+        let prefs = Prefs::default();
+        assert_eq!(prefs.ui_font, DEFAULT_UI_FONT);
+        assert!(!prefs.autostart);
+        assert!(!prefs.minimize_to_tray);
+        assert!(prefs.gpu_acceleration);
+        assert!(!prefs.autoplay_on_start);
+        assert!(!prefs.prevent_sleep);
+        assert_eq!(prefs.close_action, CloseAction::Ask);
+        // Windows 平台特有项：SMTC / 空间音效默认关闭，音频增强默认开启。
+        assert!(!prefs.smtc);
+        assert!(!prefs.spatial_audio);
+        assert!(prefs.audio_enhancement);
+        // Linux 平台特有项：MPRIS2 默认关闭。
+        assert!(!prefs.mpris2);
+    }
+
+    #[test]
+    fn missing_system_fields_fall_back_to_defaults() {
+        // 旧版本 prefs.json 没有这些字段：容器级 serde(default) 必须取结构体默认值，
+        // 而不是 bool 的零值，否则 GPU 加速与音频增强会被错误地默认关闭。
+        let prefs: Prefs = serde_json::from_str(r#"{ "volume": 0.5 }"#).unwrap();
+        assert_eq!(prefs.volume, 0.5);
+        assert!(prefs.gpu_acceleration);
+        assert!(prefs.audio_enhancement);
+        assert!(!prefs.smtc);
+        assert!(!prefs.spatial_audio);
+        assert!(!prefs.mpris2);
+        assert_eq!(prefs.ui_font, DEFAULT_UI_FONT);
+    }
+
+    #[test]
+    fn unknown_ui_font_falls_back_to_system() {
+        let known = Prefs {
+            ui_font: "  Harmony ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(known.ui_font, "harmony");
+
+        let unknown = Prefs {
+            ui_font: "comic-sans".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(unknown.ui_font, DEFAULT_UI_FONT);
+    }
+
+    #[test]
+    fn system_settings_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            ui_font: "yahei".into(),
+            autostart: true,
+            minimize_to_tray: true,
+            gpu_acceleration: false,
+            autoplay_on_start: true,
+            prevent_sleep: true,
+            close_action: CloseAction::Tray,
+            smtc: true,
+            spatial_audio: true,
+            audio_enhancement: false,
+            mpris2: true,
+            ..Prefs::default()
+        };
+
+        prefs.save(&path).unwrap();
+        let (loaded, warning) = Prefs::load(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded, prefs);
     }
 }

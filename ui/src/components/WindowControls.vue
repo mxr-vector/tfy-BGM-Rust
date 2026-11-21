@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { getCurrentWindow } from '@/lib/tauri';
+import { openClosePrompt, performCloseAction } from '@/stores/closePrompt';
+import { state } from '@/stores/state';
 import Icon from './Icon.vue';
 
 const appWindow = getCurrentWindow();
@@ -9,6 +11,17 @@ let unlisten: (() => void) | null = null;
 
 function swallow(promise: Promise<unknown>): void {
   void promise.catch((error) => console.warn('[window]', error));
+}
+
+/** 关闭按钮：默认询问「关闭程序 / 最小化托盘」，记住选择后直接执行。 */
+function onClose(): void {
+  if (!appWindow) return;
+  const action = state.prefs?.closeAction ?? 'ask';
+  if (action === 'ask') {
+    openClosePrompt();
+    return;
+  }
+  void performCloseAction(action, false);
 }
 
 async function syncMaximize(): Promise<void> {
@@ -62,7 +75,7 @@ onBeforeUnmount(() => unlisten?.());
       id="win-close"
       title="关闭"
       aria-label="关闭"
-      @click="appWindow && swallow(appWindow.close())"
+      @click="onClose"
     >
       <Icon name="win-close" />
     </button>
