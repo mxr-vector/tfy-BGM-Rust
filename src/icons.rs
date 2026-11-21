@@ -117,6 +117,15 @@ pub fn source(name: &str) -> String {
             r##"<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>"##
         }
         "check" => r##"<path d="M20 6 9 17l-5-5"/>"##,
+        "image" => {
+            r##"<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>"##
+        }
+        "sliders" => {
+            r##"<line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/>"##
+        }
+        "grip" => {
+            r##"<circle cx="9" cy="5" r="1" fill="#fff" stroke="none"/><circle cx="9" cy="12" r="1" fill="#fff" stroke="none"/><circle cx="9" cy="19" r="1" fill="#fff" stroke="none"/><circle cx="15" cy="5" r="1" fill="#fff" stroke="none"/><circle cx="15" cy="12" r="1" fill="#fff" stroke="none"/><circle cx="15" cy="19" r="1" fill="#fff" stroke="none"/>"##
+        }
         _ => {
             r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##
         }
