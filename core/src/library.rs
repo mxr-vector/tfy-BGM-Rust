@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::categories::Category;
 use crate::limits::MAX_KEY_LEN;
+use crate::tags::MetaCache;
 
 /// 曲库唯一接受的音频扩展名（小写，不含点）。
 pub const AUDIO_EXTENSION: &str = "mp3";
@@ -25,11 +26,14 @@ pub fn has_audio_extension(name: &str) -> bool {
         && bytes[bytes.len() - ext.len()..].eq_ignore_ascii_case(ext)
 }
 
-/// 曲库来源，供界面区分内置曲库与用户自选目录。
+/// 曲库来源，供界面区分外置曲库、用户自选目录与开发仓库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LibrarySource {
+    /// 随应用/开发仓库提供的曲库（仅开发模式使用）。
     Bundled,
+    /// 程序同级或应用配置目录下的外置曲库挂载点。
+    External,
     Custom,
     Env,
 }
@@ -43,6 +47,15 @@ pub struct Song {
     pub file_name: String,
     pub category: String,
     pub path: String,
+    /// ID3 标签，缺失时为 `null`；用于智能随机与诊断展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +111,16 @@ pub fn scan_library(
     source: LibrarySource,
     categories: &[Category],
 ) -> LibrarySnapshot {
+    scan_library_cached(root, source, categories, &MetaCache::default())
+}
+
+/// 带标签缓存的扫描；watch 事件触发的重复扫描只读取新文件的 ID3。
+pub fn scan_library_cached(
+    root: &Path,
+    source: LibrarySource,
+    categories: &[Category],
+    cache: &MetaCache,
+) -> LibrarySnapshot {
     let mut warnings = Vec::new();
     let mut songs = Vec::new();
     let mut summaries = Vec::with_capacity(categories.len());
@@ -106,7 +129,7 @@ pub fn scan_library(
     if root.is_dir() {
         for category in categories {
             let dir = root.join(&category.id);
-            let mut local = scan_category(&dir, category, &mut warnings, &mut seen_keys);
+            let mut local = scan_category(&dir, category, &mut warnings, &mut seen_keys, cache);
             local.sort_by(|a, b| {
                 a.title
                     .to_lowercase()
@@ -147,6 +170,7 @@ fn scan_category(
     category: &Category,
     warnings: &mut Vec<String>,
     seen_keys: &mut HashSet<String>,
+    cache: &MetaCache,
 ) -> Vec<Song> {
     if !dir.is_dir() {
         return Vec::new();
@@ -182,14 +206,14 @@ fn scan_category(
             continue;
         }
 
-        match fs::metadata(&path) {
-            Ok(meta) if meta.is_file() => {}
+        let meta = match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => meta,
             Ok(_) => continue,
             Err(error) => {
                 warnings.push(format!("无法读取文件信息 {}：{error}", path.display()));
                 continue;
             }
-        }
+        };
 
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             warnings.push(format!("跳过无法解析文件名的曲目：{}", path.display()));
@@ -214,12 +238,17 @@ fn scan_category(
             continue;
         }
 
+        let tags = cache.get(&path, &meta);
         songs.push(Song {
             key,
             title: stem.replace('_', " "),
             file_name,
             category: category.id.clone(),
             path: path_str.to_owned(),
+            artist: tags.artist,
+            album: tags.album,
+            genre: tags.genre,
+            duration_ms: tags.duration_ms,
         });
     }
     songs

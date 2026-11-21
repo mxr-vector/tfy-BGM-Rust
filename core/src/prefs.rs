@@ -1,4 +1,4 @@
-//! 用户偏好：收藏、音量、倍速、播放模式与排序。
+//! 用户偏好：收藏、音量、倍速、播放模式、排序、导出响度与界面壁纸。
 //!
 //! 所有来自前端的数据都会经过 `normalize`，落盘采用「临时文件 + 重命名」，
 //! 损坏的偏好文件回退为默认值而不是让应用启动失败。
@@ -11,11 +11,43 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
+use crate::loudness::find_preset;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 1;
+pub const PREFS_VERSION: u32 = 2;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
+pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
+/// 未选择壁纸时的默认样式（沿用应用自身的墨绿底色）。
+pub const DEFAULT_WALLPAPER: &str = "default";
+/// 界面透明度默认值（0.0 ~ 1.0，0.0 为完全实底，1.0 为最大通透）。
+pub const DEFAULT_WALLPAPER_OPACITY: f32 = 0.35;
+/// 界面毛玻璃模糊默认值（px，0 为完全不模糊）。
+pub const DEFAULT_WALLPAPER_BLUR: u32 = 0;
+/// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
+pub const DEFAULT_WALLPAPER_FIT: &str = "cover";
+/// 内置壁纸选项的合法 id；`custom` 需要搭配自定义文件路径才生效。
+pub const BUILTIN_WALLPAPER_IDS: [&str; 5] = [
+    "gradient-blue",
+    "gradient-green",
+    "gradient-red",
+    "builtin-1",
+    "builtin-2",
+];
+
+/// 自定义壁纸路径是否带受支持的扩展名（不检查文件是否存在，由调用方决定）。
+pub fn is_wallpaper_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            WALLPAPER_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,6 +77,20 @@ pub struct Prefs {
     pub playback_rate: f32,
     pub play_mode: PlayMode,
     pub sort_by: SortBy,
+    /// 导出时是否用 ffmpeg 做响度归一化（默认开启）。
+    pub loudness_normalization: bool,
+    /// 导出响度场景预设 id；空字符串表示不套用场景，使用默认人耳响度目标。
+    pub export_scene: String,
+    /// 当前界面壁纸 id：`default`、三个渐变色、两个内置资源或 `custom`。
+    pub wallpaper: String,
+    /// 上一次使用的自定义壁纸绝对路径，切换回内置壁纸后仍保留。
+    pub custom_wallpaper: Option<String>,
+    /// 界面透明度（0.0 ~ 1.0，0.0 为完全实底，1.0 为最大通透）。
+    pub wallpaper_opacity: f32,
+    /// 界面毛玻璃模糊半径（0 ~ 20 px）。
+    pub wallpaper_blur: u32,
+    /// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
+    pub wallpaper_fit: String,
 }
 
 impl Default for Prefs {
@@ -58,6 +104,13 @@ impl Default for Prefs {
             playback_rate: 1.0,
             play_mode: PlayMode::Sequence,
             sort_by: SortBy::Default,
+            loudness_normalization: true,
+            export_scene: String::new(),
+            wallpaper: DEFAULT_WALLPAPER.to_owned(),
+            custom_wallpaper: None,
+            wallpaper_opacity: DEFAULT_WALLPAPER_OPACITY,
+            wallpaper_blur: DEFAULT_WALLPAPER_BLUR,
+            wallpaper_fit: DEFAULT_WALLPAPER_FIT.to_owned(),
         }
     }
 }
@@ -106,6 +159,42 @@ impl Prefs {
                 rates.first().copied().unwrap_or(1.0)
             };
         }
+
+        let scene = self.export_scene.trim().to_ascii_lowercase();
+        self.export_scene = if find_preset(&scene).is_some() {
+            scene
+        } else {
+            // 未选择或未知场景保持为空：归一化仍按默认人耳响度目标执行。
+            String::new()
+        };
+
+        // 自定义壁纸路径只保留带受支持扩展名的值；文件是否还在由运行时判断。
+        self.custom_wallpaper = self
+            .custom_wallpaper
+            .map(|path| path.trim().to_owned())
+            .filter(|path| is_wallpaper_path(path));
+
+        let wallpaper = self.wallpaper.trim().to_ascii_lowercase();
+        let is_builtin = BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str());
+        let is_custom = wallpaper == "custom" && self.custom_wallpaper.is_some();
+        self.wallpaper = if is_builtin || is_custom {
+            wallpaper
+        } else {
+            DEFAULT_WALLPAPER.to_owned()
+        };
+
+        self.wallpaper_opacity = if self.wallpaper_opacity.is_finite() {
+            self.wallpaper_opacity.clamp(0.0, 1.0)
+        } else {
+            DEFAULT_WALLPAPER_OPACITY
+        };
+
+        self.wallpaper_blur = self.wallpaper_blur.min(20);
+
+        self.wallpaper_fit = match self.wallpaper_fit.trim().to_ascii_lowercase().as_str() {
+            "contain" => "contain".to_owned(),
+            _ => DEFAULT_WALLPAPER_FIT.to_owned(),
+        };
         self
     }
 
@@ -131,7 +220,24 @@ impl Prefs {
         };
 
         match serde_json::from_slice::<Self>(&bytes) {
-            Ok(prefs) => (prefs.normalize_with_rates(rates), None),
+            Ok(prefs) => {
+                let stored_version = prefs.version;
+                let mut prefs = prefs.normalize_with_rates(rates);
+                let warning = if stored_version < 2 {
+                    // v1 的场景预设曾默认勾选；升级后默认不套用场景，
+                    // 归一化开关保持用户原值（v1 默认也是开启）。
+                    prefs.export_scene = String::new();
+                    match prefs.save(path) {
+                        Ok(()) => None,
+                        Err(error) => {
+                            Some(format!("偏好设置已升级，但保存迁移结果失败：{error}"))
+                        }
+                    }
+                } else {
+                    None
+                };
+                (prefs, warning)
+            }
             Err(error) => (
                 Self::default(),
                 Some(format!("偏好设置文件损坏，已重置为默认值：{error}")),
@@ -197,6 +303,76 @@ mod tests {
     }
 
     #[test]
+    fn export_defaults_to_normalization_on_without_scene() {
+        let prefs = Prefs::default();
+        assert!(prefs.loudness_normalization);
+        assert!(prefs.export_scene.is_empty());
+    }
+
+    #[test]
+    fn export_scene_is_normalized_and_validated() {
+        let normalized = Prefs {
+            export_scene: "  PODCAST ".into(),
+            loudness_normalization: true,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(normalized.export_scene, "podcast");
+        assert!(normalized.loudness_normalization);
+
+        let unknown = Prefs {
+            export_scene: "unknown-scene".into(),
+            loudness_normalization: true,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert!(unknown.export_scene.is_empty());
+        // 未知场景回退为“不套用场景”，但人耳响度归一化仍然开启。
+        assert!(unknown.loudness_normalization);
+    }
+
+    #[test]
+    fn empty_scene_keeps_base_normalization() {
+        let prefs = Prefs {
+            export_scene: String::new(),
+            loudness_normalization: true,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert!(prefs.loudness_normalization);
+        assert!(prefs.export_scene.is_empty());
+    }
+
+    #[test]
+    fn version_one_migrates_to_unchecked_scene_with_normalization_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        fs::write(
+            &path,
+            br#"{
+                "version": 1,
+                "loudnessNormalization": true,
+                "exportScene": "video-editing"
+            }"#,
+        )
+        .unwrap();
+
+        let (prefs, warning) = Prefs::load(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(prefs.version, PREFS_VERSION);
+        assert!(prefs.loudness_normalization);
+        assert!(prefs.export_scene.is_empty());
+
+        // 迁移结果应立即落盘，避免每次启动都重新迁移。
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], PREFS_VERSION);
+        assert_eq!(saved["loudnessNormalization"], true);
+        assert_eq!(saved["exportScene"], "");
+    }
+
+    #[test]
     fn roundtrip_preserves_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/prefs.json");
@@ -207,6 +383,8 @@ mod tests {
             playback_rate: 1.5,
             play_mode: PlayMode::Shuffle,
             sort_by: SortBy::Name,
+            loudness_normalization: false,
+            export_scene: "focus".into(),
             library_dir: Some("/tmp/bgm".into()),
             ..Prefs::default()
         };
@@ -242,5 +420,106 @@ mod tests {
         }
         .normalize_with_rates(&rates);
         assert_eq!(fallback.playback_rate, 1.0);
+    }
+
+    #[test]
+    fn unknown_wallpaper_falls_back_to_default() {
+        let prefs = Prefs {
+            wallpaper: "  GRADIENT-BLUE ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper, "gradient-blue");
+
+        let broken = Prefs {
+            wallpaper: "gradient-purple".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(broken.wallpaper, DEFAULT_WALLPAPER);
+    }
+
+    #[test]
+    fn custom_wallpaper_requires_supported_file() {
+        let missing = Prefs {
+            wallpaper: "custom".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(missing.wallpaper, "default");
+        assert!(missing.custom_wallpaper.is_none());
+
+        let unsupported = Prefs {
+            wallpaper: "custom".into(),
+            custom_wallpaper: Some("C:/壁纸/动画.gif".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(unsupported.wallpaper, "default");
+        assert!(unsupported.custom_wallpaper.is_none());
+
+        let valid = Prefs {
+            wallpaper: "custom".into(),
+            custom_wallpaper: Some("  C:/壁纸/夜空.MP4 ".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(valid.wallpaper, "custom");
+        assert_eq!(valid.custom_wallpaper.as_deref(), Some("C:/壁纸/夜空.MP4"));
+    }
+
+    #[test]
+    fn custom_path_is_kept_after_switching_away() {
+        let prefs = Prefs {
+            wallpaper: "gradient-green".into(),
+            custom_wallpaper: Some("/pics/clouds.webp".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper, "gradient-green");
+        assert_eq!(prefs.custom_wallpaper.as_deref(), Some("/pics/clouds.webp"));
+    }
+
+    #[test]
+    fn wallpaper_opacity_clamped_and_defaulted() {
+        let prefs = Prefs {
+            wallpaper_opacity: 1.5,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper_opacity, 1.0);
+
+        let prefs_neg = Prefs {
+            wallpaper_opacity: -0.2,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs_neg.wallpaper_opacity, 0.0);
+
+        let prefs_nan = Prefs {
+            wallpaper_opacity: f32::NAN,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs_nan.wallpaper_opacity, DEFAULT_WALLPAPER_OPACITY);
+    }
+
+    #[test]
+    fn wallpaper_blur_and_fit_normalized() {
+        let prefs = Prefs {
+            wallpaper_blur: 50,
+            wallpaper_fit: "  CONTAIN  ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.wallpaper_blur, 20);
+        assert_eq!(prefs.wallpaper_fit, "contain");
+
+        let invalid_fit = Prefs {
+            wallpaper_fit: "stretch".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(invalid_fit.wallpaper_fit, "cover");
     }
 }

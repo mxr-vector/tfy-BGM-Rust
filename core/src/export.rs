@@ -1,4 +1,7 @@
 //! 音频导出：复制到用户选择的位置，并校验落盘字节数与源文件一致。
+//!
+//! 开启响度归一化时先经 ffmpeg 两遍 `loudnorm` 处理；ffmpeg 缺失或处理失败
+//! 会自动回退为原文件复制，保证导出始终能完成。
 
 use std::fs;
 use std::io;
@@ -7,6 +10,110 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::limits::MAX_STEM_CHARS;
+use crate::loudness::{self, DEFAULT_PRESET_ID, ExportPreset, preset_or_default};
+
+/// 一次导出使用的响度设置；`preset` 是本次归一化的目标，未选场景时使用默认目标。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExportSettings {
+    pub normalize: bool,
+    pub preset: ExportPreset,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            normalize: true,
+            preset: preset_or_default(DEFAULT_PRESET_ID),
+        }
+    }
+}
+
+impl ExportSettings {
+    /// 用偏好里的开关与场景 id 构造设置；空字符串或未知场景回退为默认目标。
+    pub fn from_prefs(normalize: bool, scene: &str) -> Self {
+        Self {
+            normalize,
+            preset: preset_or_default(scene),
+        }
+    }
+}
+
+/// 单个文件的导出结果：是否完成归一化，以及需要提示用户的回退原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportOutcome {
+    pub bytes: u64,
+    pub normalized: bool,
+    pub warning: Option<String>,
+}
+
+/// 按设置导出单个音频；归一化不可用时自动降级为原文件复制。
+pub fn export_audio(
+    source: &Path,
+    destination: &Path,
+    settings: ExportSettings,
+) -> Result<ExportOutcome, ExportError> {
+    let ffmpeg = settings.normalize.then(loudness::ffmpeg_path).flatten();
+    export_with_ffmpeg(source, destination, settings, ffmpeg.as_deref())
+}
+
+/// 批量导出时由调用方只探测一次 ffmpeg，再逐首复用。
+pub(crate) fn export_with_ffmpeg(
+    source: &Path,
+    destination: &Path,
+    settings: ExportSettings,
+    ffmpeg: Option<&Path>,
+) -> Result<ExportOutcome, ExportError> {
+    let metadata = fs::metadata(source).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => ExportError::SourceMissing(source.to_owned()),
+        _ => ExportError::Read(error),
+    })?;
+    if !metadata.is_file() {
+        return Err(ExportError::SourceMissing(source.to_owned()));
+    }
+    if source == destination || same_file(source, destination) {
+        return Err(ExportError::SameFile);
+    }
+
+    if !settings.normalize {
+        let bytes = copy_validated(source, destination)?;
+        return Ok(ExportOutcome {
+            bytes,
+            normalized: false,
+            warning: None,
+        });
+    }
+
+    let Some(ffmpeg) = ffmpeg else {
+        let bytes = copy_validated(source, destination)?;
+        return Ok(ExportOutcome {
+            bytes,
+            normalized: false,
+            warning: Some("未检测到 ffmpeg，响度归一化已跳过".to_owned()),
+        });
+    };
+
+    match loudness::normalize_file(ffmpeg, source, destination, settings.preset) {
+        Ok(()) => {
+            let bytes = fs::metadata(destination)
+                .map_err(ExportError::Read)?
+                .len();
+            Ok(ExportOutcome {
+                bytes,
+                normalized: true,
+                warning: None,
+            })
+        }
+        Err(error) => {
+            let _ = fs::remove_file(destination);
+            let bytes = copy_validated(source, destination)?;
+            Ok(ExportOutcome {
+                bytes,
+                normalized: false,
+                warning: Some(format!("响度归一化失败，已按原文件导出：{error}")),
+            })
+        }
+    }
+}
 
 /// 复制源音频到目标路径，成功后返回复制字节数。
 /// 大小校验失败时会删除目标文件，避免留下不完整的音频。
@@ -78,6 +185,22 @@ pub enum ExportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_normalization_targets_video_preset_and_scene_overrides_it() {
+        let defaults = ExportSettings::default();
+        assert!(defaults.normalize);
+        assert_eq!(defaults.preset.id, DEFAULT_PRESET_ID);
+
+        let base = ExportSettings::from_prefs(true, "");
+        assert_eq!(base.preset.target_lufs, -14.0);
+
+        let focus = ExportSettings::from_prefs(true, "focus");
+        assert_eq!(focus.preset.target_lufs, -20.0);
+
+        let disabled = ExportSettings::from_prefs(false, "focus");
+        assert!(!disabled.normalize);
+    }
 
     #[test]
     fn copies_file_and_matches_size() {
