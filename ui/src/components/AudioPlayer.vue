@@ -10,6 +10,13 @@ import { playerConfig } from '@/lib/config';
 import { DEFAULT_ACCENT, PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
 import { audioState } from '@/stores/audio-engine';
+import {
+  desktopLyricsAvailable,
+  desktopLyricsBusy,
+  desktopLyricsEnabled,
+  desktopLyricsHint,
+  toggleDesktopLyrics,
+} from '@/stores/desktop-lyrics';
 import { openDiagnostics } from '@/stores/diagnostics';
 import { loopPointFor, openLoopEditor } from '@/stores/loops';
 import {
@@ -436,6 +443,19 @@ onBeforeUnmount(() => {
           </div>
           <OutputPanel />
           <ExportSettingsPopover />
+          <button
+            type="button"
+            class="action-btn"
+            :class="{ 'is-active': desktopLyricsEnabled }"
+            id="btn-desktop-lyrics"
+            :title="desktopLyricsHint"
+            :aria-label="desktopLyricsHint"
+            :aria-pressed="desktopLyricsEnabled"
+            :disabled="!desktopLyricsAvailable || desktopLyricsBusy"
+            @click="toggleDesktopLyrics"
+          >
+            <Icon name="lyrics" />
+          </button>
           <button
             type="button"
             class="action-btn"

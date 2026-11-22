@@ -18,6 +18,7 @@ import {
   openRenameTrack,
 } from '@/stores/actions';
 import { clearSelection, selectedKeys, setSelected } from '@/stores/library';
+import { addSubtitleRecord } from '@/stores/subtitles';
 import { clearLoopPoint, loopPointFor, openLoopEditor } from '@/stores/loops';
 import { exportSong, playSong, playSongWithMode } from '@/stores/player';
 import { setFavorites } from '@/stores/prefs';
@@ -125,6 +126,12 @@ export function openSongMenu(
       label: multiple ? `导出所选 (${keys.length})` : '导出音频',
       action: () =>
         multiple ? void exportSelection(keys) : void exportSong(song.key),
+    },
+    {
+      // 右键菜单与行内「更多」菜单共用 openSongMenu，因此两种入口都会出现此项。
+      icon: 'captions',
+      label: '字幕生成',
+      action: () => addSubtitleRecord(song),
     },
     separator(),
     {

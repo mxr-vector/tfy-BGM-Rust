@@ -16,6 +16,7 @@ import { wakeLockSupported } from '@/composables/useSystemIntegration';
 import type { CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
 import { apiStatus, refreshApiInfo } from '@/stores/api';
 import {
+  autoLoading,
   cancelDownload,
   chooseModelsDir,
   clearTranscript,
@@ -25,13 +26,16 @@ import {
   downloadUrlDraft,
   downloading,
   loadAsrModel,
+  loadStatus,
   loadingModelPath,
+  modelBusy,
   modelsInfo,
   modelsLoading,
   modelsRootBadge,
   openModelsDir,
   refreshModels,
   resetModelsDir,
+  retryModelLoad,
   saveDownloadUrl,
   transcribeWav,
   transcribing,
@@ -153,6 +157,34 @@ const progressText = computed(() => {
   if (!progress) return '准备下载…';
   const file = progress.file || '准备中';
   return `${file} · ${formatBytes(progress.overallReceived)} / ${formatBytes(progress.overallBytes)}`;
+});
+
+/** 模型加载四态反馈；下载完成后的自动加载与手动加载共用同一状态条。 */
+const loadStatusTitle = computed(() => {
+  if (autoLoading.value) return '下载完成，正在自动加载模型…';
+  switch (loadStatus.value.phase) {
+    case 'loading':
+      return '正在加载 ASR 模型…';
+    case 'success':
+      return `模型加载成功${loadedModel.value ? ` · ${loadedModel.value.name}` : ''}`;
+    case 'failed':
+      return '模型加载失败';
+    default:
+      return '模型未加载';
+  }
+});
+
+const loadStatusIcon = computed(() => {
+  switch (loadStatus.value.phase) {
+    case 'loading':
+      return 'refresh';
+    case 'success':
+      return 'check-circle';
+    case 'failed':
+      return 'alert';
+    default:
+      return 'chip';
+  }
 });
 
 function selectTab(tab: SettingsTab): void {
@@ -697,6 +729,31 @@ watch(settingsOpen, async (open) => {
                   <span class="settings-muted">{{ models.length }} 个 · 引擎 sherpa-onnx</span>
                 </div>
 
+                <div
+                  class="model-load-status"
+                  :class="`is-${loadStatus.phase}`"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div class="model-load-head">
+                    <Icon :name="loadStatusIcon" class="model-load-icon" />
+                    <strong>{{ loadStatusTitle }}</strong>
+                    <span v-if="loadStatus.phase === 'loading'" class="model-load-spinner"></span>
+                    <button
+                      v-if="loadStatus.phase === 'failed'"
+                      type="button"
+                      class="settings-btn is-primary model-load-retry"
+                      :disabled="modelBusy"
+                      @click="retryModelLoad"
+                    >
+                      {{ modelBusy ? '重试中…' : '重试加载' }}
+                    </button>
+                  </div>
+                  <p v-if="loadStatus.error" class="model-load-error">{{ loadStatus.error }}</p>
+                  <p v-else-if="loadStatus.path" class="model-load-path">{{ loadStatus.path }}</p>
+                  <p v-else class="model-load-path">下载完成后将自动加载，无需手动点击「加载」。</p>
+                </div>
+
                 <div v-if="defaultModel && !defaultModel.installed" class="settings-model-callout">
                   <div class="settings-model-callout-text">
                     <strong>默认模型未安装</strong>
@@ -715,11 +772,13 @@ watch(settingsOpen, async (open) => {
                     :disabled="modelDownloading"
                     @click="downloadDefaultModel"
                   >
-                    {{ modelDownloading ? '下载中…' : '下载' }}
+                    {{ autoLoading ? '自动加载中…' : modelDownloading ? '下载中…' : '下载' }}
                   </button>
                 </div>
 
-                <div v-if="modelDownloading" class="settings-download">
+                <!-- 下载完成后命令仍在自动加载模型：此时隐藏下载进度与「取消下载」，
+                 避免用户点击一个不会生效的取消按钮。 -->
+                <div v-if="modelDownloading && !autoLoading" class="settings-download">
                   <div class="settings-download-bar">
                     <span class="settings-download-fill" :style="{ width: `${downloadPercent}%` }"></span>
                   </div>
@@ -767,7 +826,7 @@ watch(settingsOpen, async (open) => {
                     <button
                       type="button"
                       class="settings-btn"
-                      :disabled="!model.loadable || Boolean(loadingModelPath)"
+                      :disabled="!model.loadable || modelBusy"
                       @click="loadAsrModel(model)"
                     >
                       {{
@@ -815,6 +874,8 @@ watch(settingsOpen, async (open) => {
                       v-if="loadedModel"
                       type="button"
                       class="settings-link"
+                      :disabled="modelBusy"
+                      :title="modelBusy ? '模型加载中，暂不能释放' : '释放已加载的模型'"
                       @click="unloadAsrModel"
                     >
                       释放模型
@@ -955,3 +1016,81 @@ watch(settingsOpen, async (open) => {
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+/* 模型加载四态：下载完成后的自动加载与手动加载共用 */
+.model-load-status {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.model-load-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-load-head strong {
+  font-size: 13px;
+  color: var(--text);
+}
+.model-load-icon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-2);
+}
+.model-load-icon :deep(svg) {
+  width: 16px;
+  height: 16px;
+}
+.model-load-status.is-success {
+  border-color: rgba(25, 217, 139, 0.35);
+  background: rgba(25, 217, 139, 0.08);
+}
+.model-load-status.is-success .model-load-icon {
+  color: var(--accent-bright);
+}
+.model-load-status.is-loading {
+  border-color: rgba(111, 243, 188, 0.28);
+}
+.model-load-status.is-failed {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
+}
+.model-load-status.is-failed .model-load-icon {
+  color: #f87171;
+}
+.model-load-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent-bright);
+  border-radius: 50%;
+  animation: model-load-spin 0.8s linear infinite;
+}
+@keyframes model-load-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.model-load-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #fca5a5;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.model-load-path {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+  word-break: break-all;
+}
+.model-load-retry {
+  margin-left: auto;
+}
+</style>

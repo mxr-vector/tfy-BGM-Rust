@@ -124,7 +124,15 @@ export interface Prefs {
   modelsDir: string | null;
   /** ASR 模型下载地址；空字符串表示内置的 0.6B-int8 地址。 */
   asrDownloadUrl: string;
+  /** 上次加载成功的模型 id（相对模型目录）；由后端维护，启动时自动恢复。 */
+  lastAsrModel: string | null;
+  /** 桌面歌词开关；由后端维护，模型可用时随启动恢复。 */
+  desktopLyricsEnabled: boolean;
+  /** 字幕预览偏好格式。 */
+  subtitleFormat: SubtitleFormat;
 }
+
+export type SubtitleFormat = 'srt' | 'lrc';
 
 export interface BrandInfo {
   title: string;
@@ -212,11 +220,6 @@ export interface LibraryChange {
   moved: KeyChange[];
 }
 
-export interface ConfigReload {
-  config: AppConfig;
-  warnings: string[];
-}
-
 export interface BatchReport {
   total: number;
   succeeded: number;
@@ -285,13 +288,7 @@ export interface WallpaperPick {
   label: string;
 }
 
-export interface WallpaperSelection {
-  id: string;
-  path: string | null;
-  opacity: number;
-  blur: number;
-  fit: WallpaperFit;
-}
+
 
 /** 本机开放接口状态。 */
 export interface ApiStatus {
@@ -350,6 +347,16 @@ export interface LoadedAsrModel {
 }
 
 /** 「模型」分组快照。 */
+/** 模型加载阶段：自动加载与手动加载共用。 */
+export type ModelLoadPhase = 'idle' | 'loading' | 'success' | 'failed';
+
+/** 最近一次模型加载状态；`error` 为失败原因，供重试入口展示。 */
+export interface ModelLoadStatus {
+  phase: ModelLoadPhase;
+  path: string | null;
+  error: string | null;
+}
+
 export interface ModelsInfo {
   root: string;
   /** 是否使用默认目录（系统「下载」目录下的 `bgm-models/`）。 */
@@ -360,6 +367,8 @@ export interface ModelsInfo {
   defaultModel: DefaultModelStatus;
   models: AsrModel[];
   loaded: LoadedAsrModel | null;
+  /** 最近一次模型加载状态；桌面歌词开关据此判断是否可用。 */
+  loadStatus: ModelLoadStatus;
   downloading: boolean;
   warnings: string[];
 }
@@ -375,4 +384,122 @@ export interface ModelDownloadProgress {
   overallBytes: number;
   done: boolean;
   error: string | null;
+}
+
+// ---------------- 字幕生成 ----------------
+
+/** 一条带起止时间的字幕。 */
+export interface SubtitleSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export type SubtitleStage = 'normalizing' | 'transcribing' | 'done' | 'error';
+
+/** `subtitle-progress` 事件负载。 */
+export interface SubtitleProgress {
+  stage: SubtitleStage;
+  message: string;
+  current: number;
+  total: number;
+  error: string | null;
+}
+
+/** `generate_subtitles` 的完整结果，含可预览的 SRT / LRC 文本。 */
+export interface SubtitleResult {
+  key: string;
+  title: string;
+  sourcePath: string;
+  sourceFormat: string;
+  converted: boolean;
+  note: string | null;
+  duration: number;
+  segments: SubtitleSegment[];
+  srt: string;
+  lrc: string;
+  savedPath: string;
+}
+
+export interface SubtitleExportResult {
+  path: string;
+  bytes: number;
+  format: string;
+}
+
+/** 持久化在应用配置目录的字幕；桌面歌词据此读取歌词行。 */
+export interface StoredSubtitle {
+  key: string;
+  title: string;
+  segments: SubtitleSegment[];
+  createdAtMs: number;
+  /** 源音频文件名；旧字幕文件缺失，展示时用曲目 key 末段兜底。 */
+  fileName?: string;
+  /** 源音频时长（毫秒）；旧字幕文件缺失。 */
+  durationMs?: number;
+  /** 后端按统一规则格式化好的文本，预览与导出共用。 */
+  srt: string;
+  lrc: string;
+}
+
+// ---------------- 桌面歌词 ----------------
+
+export interface LyricLine {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** 主窗口推给后端、再广播给歌词窗口的播放 / 歌词快照。 */
+export interface LyricsSnapshot {
+  trackKey: string | null;
+  title: string;
+  playing: boolean;
+  position: number;
+  /** 播放倍速；歌词窗口在两次快照之间按同一速率本地推进。 */
+  rate: number;
+  lines: LyricLine[];
+  hasLyrics: boolean;
+}
+
+export interface LyricsBootstrap {
+  enabled: boolean;
+  snapshot: LyricsSnapshot;
+}
+
+/** 桌面歌词窗口的显示样式；保存在歌词窗口自身的 localStorage 中。 */
+export interface LyricsStyle {
+  /** 字体族名（来自 `system_fonts`）；空串表示使用默认字体栈。 */
+  fontFamily: string;
+  /** 当前行字号（px）。 */
+  fontSize: number;
+  /** 高亮色（#rrggbb）。 */
+  highlight: string;
+  /** 背景不透明度（0–90，百分比）。 */
+  background: number;
+  /** 窗口宽度（逻辑像素）。 */
+  width: number;
+  /** 窗口高度（逻辑像素）。 */
+  height: number;
+  /** 锁定：只显示歌词、隐藏边框/控件并默认鼠标穿透。 */
+  locked: boolean;
+}
+
+/** `desktop-lyrics-hover` 事件负载：锁定态下鼠标是否进入歌词热区。 */
+export interface LyricsHover {
+  hovered: boolean;
+}
+
+/** 锁定态歌词热区（窗口内逻辑像素），用于 Rust 侧光标轮询命中检测。 */
+export interface LyricsHotZone {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** `desktop-lyrics-size` 事件负载：窗口当前逻辑尺寸。 */
+export interface LyricsWindowSize {
+  width: number;
+  height: number;
 }

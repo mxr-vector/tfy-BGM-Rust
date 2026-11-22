@@ -83,6 +83,11 @@ const PATHS = {
   'win-restore':
     '<path d="M8.5 9.5V8a2 2 0 0 1 2-2h6.5a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2h-1.5"/><rect x="5" y="9.5" width="10" height="10" rx="2"/>',
   'win-close': '<path d="M6 6 18 18"/><path d="M18 6 6 18"/>',
+  captions:
+    '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 11h4"/><path d="M15 11h2"/><path d="M7 15h7"/><path d="M15 15h2"/>',
+  lyrics:
+    '<path d="M4 6h16"/><path d="M4 11h10"/><path d="M4 16h9"/><circle cx="17.5" cy="16" r="2.5"/>',
+  'check-circle': '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;
@@ -94,8 +99,4 @@ export function iconMarkup(name: string, svgClass = ''): string {
   const path = PATHS[name as IconName] ?? PATHS.music;
   const open = svgClass ? SVG_OPEN.replace('<svg ', `<svg class="${svgClass}" `) : SVG_OPEN;
   return `${open}${path}</svg>`;
-}
-
-export function isIconName(name: string): name is IconName {
-  return Object.prototype.hasOwnProperty.call(PATHS, name);
 }

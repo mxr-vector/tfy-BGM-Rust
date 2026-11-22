@@ -101,7 +101,7 @@ fn notify_frontend(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    if let Some(change) = state.handle_watch_event() {
+    if let Some(change) = state.handle_watch_event(app) {
         let _ = app.emit(LIBRARY_CHANGED_EVENT, change);
     }
 }

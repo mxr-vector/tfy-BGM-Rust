@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>桌面歌词</title>
+    <style>
+      * { box-sizing: border-box; }
+      /* 显示样式的可覆盖变量；由 lyrics.ts 读取 localStorage 后写入。 */
+      :root {
+        --lyrics-font: "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+        --lyrics-size: 24px;
+        --lyrics-side-size: 14px;
+        --lyrics-highlight: #19d98b;
+        --lyrics-text: #d7e9e1;
+        --lyrics-side: rgba(208, 231, 221, 0.6);
+        --lyrics-sung-line: rgba(25, 217, 139, 0.55);
+        --lyrics-glow: rgba(25, 217, 139, 0.45);
+        --lyrics-bg-top: rgba(4, 14, 11, 0.62);
+        --lyrics-bg-bottom: rgba(4, 14, 11, 0.34);
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      body {
+        color: #fff;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #lyrics {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        width: 100%;
+        height: 100%;
+        padding: 8px 48px 10px;
+        font-family: var(--lyrics-font);
+        background: linear-gradient(180deg, var(--lyrics-bg-top), var(--lyrics-bg-bottom));
+        border: 1px solid rgba(111, 243, 188, 0.16);
+        border-radius: 16px;
+        /* deep 拖动区域：按住窗口任意空白处（含歌词文本、设置面板空白处）即可拖动，
+           按钮 / 下拉框 / 滑杆等可交互元素会被 Tauri 自动排除，不会误触拖动。 */
+        cursor: move;
+      }
+      .lyrics-top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+        width: 100%;
+        font-size: 11px;
+        color: rgba(230, 255, 244, 0.7);
+      }
+      #lyrics-title {
+        max-width: 62%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #lyrics-status {
+        color: rgba(111, 243, 188, 0.85);
+        white-space: nowrap;
+      }
+      .lyrics-tool-btn {
+        flex: none;
+        height: 20px;
+        min-width: 22px;
+        padding: 0 4px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.78);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 18px;
+        text-align: center;
+        cursor: pointer;
+      }
+      /* 字号入口常驻工具栏：不打开设置面板也能快速调整字体大小。 */
+      .lyrics-size-step {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        flex: none;
+        margin-left: auto;
+      }
+      .lyrics-size-step .lyrics-tool-btn {
+        min-width: 24px;
+        padding: 0 3px;
+        font-size: 11px;
+      }
+      #lyrics-size-badge {
+        min-width: 24px;
+        text-align: center;
+        color: #c9fbe4;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        cursor: default;
+      }
+      .lyrics-tool-btn:hover, .lyrics-tool-btn.is-open {
+        background: rgba(25, 217, 139, 0.2);
+        border-color: rgba(111, 243, 188, 0.45);
+        color: #fff;
+      }
+      .lyrics-tool-btn:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      #lyrics-close:hover {
+        background: rgba(248, 113, 113, 0.35);
+        border-color: rgba(248, 113, 113, 0.5);
+        color: #fff;
+      }
+      .lyrics-line {
+        max-width: 100%;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.85), 0 0 2px rgba(0, 0, 0, 0.9);
+      }
+      .lyrics-line.is-prev, .lyrics-line.is-next {
+        font-size: var(--lyrics-side-size);
+        min-height: 17px;
+      }
+      /* 已唱过的行保留高亮色但更柔和；未到的行使用中性浅色，区分已唱 / 未唱。 */
+      .lyrics-line.is-prev { color: var(--lyrics-sung-line); }
+      .lyrics-line.is-next { color: var(--lyrics-side); }
+      .lyrics-line.is-current {
+        font-size: var(--lyrics-size);
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        min-height: 32px;
+        text-shadow: 0 2px 12px rgba(0, 0, 0, 0.9), 0 0 16px var(--lyrics-glow);
+      }
+      /* 当前行逐词着色：已唱部分用高亮色，未唱部分用加深后的浅色。 */
+      .lyrics-word.is-sung { color: var(--lyrics-highlight); }
+      .lyrics-word.is-unsung { color: var(--lyrics-text); }
+      .lyrics-word {
+        white-space: pre;
+        /* 已唱 / 未唱之间的颜色渐变；JS 会按进度写入内联色，形成连续推进。 */
+        transition: color 240ms linear;
+      }
+
+      /* ---------------- 锁定态：只有歌词，无边框 / 背景 / 控件 ---------------- */
+      #lyrics.is-locked {
+        padding: 0 18px;
+        background: none;
+        border-color: transparent;
+        border-radius: 0;
+        cursor: default;
+      }
+      #lyrics.is-locked .lyrics-top,
+      #lyrics.is-locked .lyrics-panel {
+        display: none;
+      }
+      #lyrics.is-locked .lyrics-line { cursor: default; }
+      #lyrics.is-locked .lyrics-line.is-current { text-shadow: 0 2px 12px rgba(0, 0, 0, 0.92), 0 0 18px var(--lyrics-glow); }
+
+      /* 锁定态悬停歌词后出现；点击恢复边框、控件与正常交互。 */
+      .lyrics-unlock {
+        position: fixed;
+        top: 7px;
+        right: 9px;
+        z-index: 20;
+        display: inline-flex;
+        align-items: center;
+        height: 26px;
+        padding: 0 13px;
+        border: 1px solid rgba(25, 217, 139, 0.55);
+        border-radius: 999px;
+        background: rgba(6, 16, 13, 0.9);
+        color: #c9fbe4;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+      }
+      .lyrics-unlock:hover {
+        background: rgba(25, 217, 139, 0.28);
+        border-color: rgba(111, 243, 188, 0.8);
+        color: #fff;
+      }
+      .lyrics-unlock[hidden] { display: none; }
+
+      /* 窄窗口下收紧工具栏，避免 A−/A+ 与锁 / 设置 / 关闭按钮挤出画面。 */
+      @media (max-width: 620px) {
+        #lyrics:not(.is-locked) { padding-left: 14px; padding-right: 14px; }
+        .lyrics-top { gap: 5px; }
+        #lyrics-status { display: none; }
+        #lyrics-title { max-width: 40%; }
+      }
+
+      /* ---------------- 显示设置面板 ---------------- */
+      /* 面板打开时把歌词行让到左侧，仍可实时预览字体 / 字号效果。 */
+      #lyrics.is-panel-open .lyrics-line { opacity: 0.35; }
+      @media (min-width: 680px) {
+        #lyrics.is-panel-open .lyrics-line {
+          opacity: 1;
+          transform: translateX(-160px);
+          max-width: calc(100% - 350px);
+        }
+      }
+      .lyrics-panel {
+        position: absolute;
+        /* 工具栏已改为文档流定位：面板从工具栏下方开始，保证 Aa / 关闭按钮始终可点击。 */
+        top: 32px;
+        right: 8px;
+        bottom: 6px;
+        z-index: 5;
+        width: 306px;
+        padding: 9px 11px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 10px;
+        align-content: start;
+        overflow-y: auto;
+        border: 1px solid rgba(111, 243, 188, 0.28);
+        border-radius: 12px;
+        background: rgba(6, 16, 13, 0.95);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+        font-size: 11px;
+        color: rgba(230, 255, 244, 0.82);
+      }
+      .lyrics-panel[hidden] { display: none; }
+      .lyrics-panel::-webkit-scrollbar { width: 6px; }
+      .lyrics-panel::-webkit-scrollbar-thumb { background: rgba(111, 243, 188, 0.25); border-radius: 3px; }
+      .lp-wide { grid-column: 1 / -1; }
+      .lp-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 12px;
+        color: #fff;
+      }
+      .lp-head strong { font-weight: 600; }
+      .lp-close {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.1);
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 14px;
+        line-height: 17px;
+        cursor: pointer;
+      }
+      .lp-close:hover { background: rgba(248, 113, 113, 0.35); color: #fff; }
+      .lp-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+      .lp-field > span, .lp-label { color: rgba(230, 255, 244, 0.62); }
+      .lp-field b { color: #6ff3bc; font-weight: 600; }
+      .lp-field select {
+        width: 100%;
+        height: 24px;
+        padding: 0 6px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.07);
+        color: #fff;
+        font-family: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .lp-field select option { background: #101c18; color: #fff; }
+      .lp-field input[type="range"] {
+        width: 100%;
+        height: 18px;
+        margin: 0;
+        accent-color: #19d98b;
+        cursor: pointer;
+      }
+      .lp-colors { display: flex; gap: 7px; margin-top: 4px; }
+      .lp-swatch {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: 2px solid rgba(255, 255, 255, 0.25);
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      .lp-swatch.is-active { border-color: #fff; box-shadow: 0 0 0 2px rgba(111, 243, 188, 0.45); }
+      .lp-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: 22px;
+      }
+      #lp-top-state { color: #6ff3bc; }
+      #lp-top-state.is-bad { color: #fca5a5; }
+      .lp-hint { color: rgba(230, 255, 244, 0.45); }
+      .lp-btn {
+        flex: none;
+        padding: 2px 9px;
+        border: 1px solid rgba(111, 243, 188, 0.32);
+        border-radius: 6px;
+        background: rgba(25, 217, 139, 0.12);
+        color: #c9fbe4;
+        font-family: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .lp-btn:hover { background: rgba(25, 217, 139, 0.24); color: #fff; }
+      .lp-actions { display: flex; flex: none; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="lyrics" data-tauri-drag-region="deep">
+      <div class="lyrics-top">
+        <span id="lyrics-title">未在播放</span>
+        <span id="lyrics-status"></span>
+        <div class="lyrics-size-step" role="group" aria-label="字体大小">
+          <button id="lyrics-size-down" class="lyrics-tool-btn" type="button" title="减小字体大小" aria-label="减小字体大小">A−</button>
+          <span id="lyrics-size-badge" title="当前字体大小" aria-live="polite">24</span>
+          <button id="lyrics-size-up" class="lyrics-tool-btn" type="button" title="增大字体大小" aria-label="增大字体大小">A+</button>
+        </div>
+        <button id="lyrics-lock" class="lyrics-tool-btn" type="button" title="锁定：仅显示歌词并鼠标穿透" aria-label="锁定桌面歌词">锁</button>
+        <button id="lyrics-settings" class="lyrics-tool-btn" type="button" title="字体与显示设置" aria-label="字体与显示设置">Aa</button>
+        <button id="lyrics-close" class="lyrics-tool-btn" type="button" title="关闭桌面歌词" aria-label="关闭桌面歌词">&times;</button>
+      </div>
+      <div id="lyrics-prev" class="lyrics-line is-prev"></div>
+      <div id="lyrics-current" class="lyrics-line is-current">等待播放曲目…</div>
+      <div id="lyrics-next" class="lyrics-line is-next"></div>
+      <button id="lyrics-unlock" class="lyrics-unlock" type="button" title="解锁桌面歌词" hidden>解锁</button>
+
+      <!-- 面板本身不禁用拖动：控件自动排除，按住面板空白处仍可拖动窗口。 -->
+      <div id="lyrics-panel" class="lyrics-panel" hidden>
+        <div class="lp-head lp-wide">
+          <strong>歌词显示设置</strong>
+          <button id="lp-close" class="lp-close" type="button" title="收起设置" aria-label="收起设置">&times;</button>
+        </div>
+        <label class="lp-field lp-wide" for="lp-size">
+          <span>字体大小 <b id="lp-size-value">24px</b></span>
+          <input id="lp-size" type="range" min="12" max="64" step="1" value="24" />
+        </label>
+        <label class="lp-field lp-wide" for="lp-font">
+          <span>字体（本机已安装）</span>
+          <select id="lp-font" aria-label="歌词字体" disabled></select>
+          <span id="lp-font-state" class="lp-hint">正在读取系统字体…</span>
+        </label>
+        <label class="lp-field" for="lp-bg">
+          <span>背景浓度 <b id="lp-bg-value">62%</b></span>
+          <input id="lp-bg" type="range" min="0" max="90" step="2" value="62" />
+        </label>
+        <label class="lp-field" for="lp-width">
+          <span>窗口宽度 <b id="lp-width-value">760px</b></span>
+          <input id="lp-width" type="range" min="420" max="1600" step="10" value="760" />
+        </label>
+        <label class="lp-field" for="lp-height">
+          <span>窗口高度 <b id="lp-height-value">120px</b></span>
+          <input id="lp-height" type="range" min="120" max="900" step="6" value="120" />
+        </label>
+        <div class="lp-wide">
+          <span class="lp-label">高亮颜色</span>
+          <div id="lp-colors" class="lp-colors"></div>
+        </div>
+        <div class="lp-row lp-wide">
+          <span class="lp-hint">锁定后只显示歌词，点击穿透到下层页面</span>
+          <button id="lp-lock" class="lp-btn" type="button">锁定歌词</button>
+        </div>
+        <div class="lp-row lp-wide">
+          <span id="lp-top-state">正在确认置顶…</span>
+          <span class="lp-actions">
+            <button id="lp-repin" class="lp-btn" type="button">重新置顶</button>
+            <button id="lp-reset" class="lp-btn" type="button">恢复默认</button>
+          </span>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/lyrics.ts"></script>
+  </body>
+</html>

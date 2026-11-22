@@ -4,13 +4,16 @@ mod desktop;
 mod fonts;
 mod library_root;
 mod library_watch;
+mod lyrics;
 mod models;
 mod settings;
 mod state;
+mod subtitles;
 mod wallpapers;
 
 use api::ApiBridge;
 use desktop::DesktopState;
+use lyrics::LyricsState;
 use state::AppState;
 use tauri::Manager;
 use tauri::webview::{PermissionKind, PermissionResponse};
@@ -45,6 +48,8 @@ pub fn run() {
             let api_config = state.api_config();
             let (autostart, minimize_to_tray, _) = state.desktop_prefs();
             app.manage(state);
+            // 桌面歌词窗口的开关与最新快照；歌词窗口启动时从此处拉取初始状态。
+            app.manage(LyricsState::default());
 
             // 托盘与最小化行为在窗口事件里读取，先注册状态再挂事件。
             app.manage(DesktopState::new(minimize_to_tray));
@@ -60,6 +65,9 @@ pub fn run() {
             if let Some(error) = bridge.status().error {
                 eprintln!("[api] {error}");
             }
+
+            // 上次加载成功的 ASR 模型在后台恢复：重新编译 / 重启后无需再手动加载。
+            commands::spawn_restore_last_model(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -94,6 +102,18 @@ pub fn run() {
             commands::unload_asr_model,
             commands::cancel_asr_download,
             commands::transcribe_wav,
+            commands::generate_subtitles,
+            commands::export_subtitle,
+            commands::subtitle_for_track,
+            commands::list_subtitles,
+            commands::delete_subtitle,
+            commands::set_desktop_lyrics_enabled,
+            commands::sync_desktop_lyrics,
+            commands::desktop_lyrics_snapshot,
+            commands::keep_desktop_lyrics_on_top,
+            commands::resize_desktop_lyrics,
+            commands::place_desktop_lyrics,
+            commands::set_desktop_lyrics_lock,
             commands::export_info,
             commands::export_track,
             commands::create_category,

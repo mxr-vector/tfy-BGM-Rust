@@ -6,22 +6,24 @@ use std::path::{Path, PathBuf};
 use bgm_core::BatchReport;
 use bgm_core::LibrarySnapshot;
 use bgm_core::Prefs;
-use bgm_core::export::export_audio;
+use bgm_core::export::{export_audio, safe_file_name};
 use bgm_core::library::{AUDIO_EXTENSIONS, DEFAULT_AUDIO_EXTENSION, audio_extension};
 use bgm_core::loudness::{EXPORT_PRESETS, ExportPreset, NORMALIZED_EXTENSION, ffmpeg_path};
 use bgm_core::paths::TRASH_DIR_NAME;
 use bgm_core::{LoopBook, Schedule};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::api::{ApiBridge, ApiEndpoint, ApiStatus, CommandFailure};
 use crate::desktop::{self, DesktopState};
 use crate::fonts;
-use crate::models::ModelsInfo;
+use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, LyricsState};
+use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
+use crate::subtitles;
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
 type CommandResult<T> = Result<T, String>;
@@ -104,6 +106,10 @@ pub fn hide_to_tray(app: AppHandle) -> CommandResult<()> {
 /// 关闭提示中选择「关闭程序」：即使存在托盘图标也立即退出。
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
+    // 退出会关闭所有窗口；先置标记，避免歌词窗口的关闭事件把「开启」偏好清掉。
+    if let Some(desktop) = app.try_state::<DesktopState>() {
+        desktop.begin_quit();
+    }
     app.exit(0);
 }
 
@@ -310,6 +316,9 @@ pub fn open_models_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRes
 }
 
 /// 下载默认 ASR 模型（固定 0.6B-int8 清单）；进度通过 `model-download-progress` 推送。
+///
+/// 下载成功后无需用户再点「加载」：本命令紧接着自动触发模型加载，加载状态通过
+/// `model-load-status` 事件实时推送，并随返回的 `ModelsInfo` 一并带回。
 #[tauri::command]
 pub async fn download_asr_model(
     app: AppHandle,
@@ -319,30 +328,216 @@ pub async fn download_asr_model(
     let root = state.models_root();
     let url = state.asr_download_url();
     let task_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || runtime.download(&task_app, &root, &url))
-        .await
-        .map_err(|error| format!("下载任务异常结束：{error}"))?
-        .map_err(describe)?;
+    let task_root = root.clone();
+    let task_runtime = runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        task_runtime.download(&task_app, &task_root, &url)
+    })
+    .await
+    .map_err(|error| format!("下载任务异常结束：{error}"))?
+    .map_err(describe)?;
+
+    let dir = root.join(models::DEFAULT_MODEL_NAME);
+    auto_load_after_download(&app, &runtime, &root, &dir).await;
+    // 自动加载失败不覆盖「下载成功」的结果：失败原因已进入 loadStatus，
+    // 由界面状态条展示并提供重试入口。
+    // 只有下载的目录确实加载成功才记为启动恢复目标：并发的手动加载可能让
+    // auto_load_after_download 提前返回，不能拿「别人的成功」当依据。
+    if runtime.is_loaded_path(&dir) {
+        state.remember_loaded_model(relative_model_id(&root, &dir));
+    }
     Ok(state.models_info())
+}
+
+/// 模型相对模型根目录的 id（`/` 分隔），用于写入偏好供下次启动自动恢复。
+fn relative_model_id(root: &Path, dir: &Path) -> Option<String> {
+    dir.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|id| !id.is_empty())
+}
+
+/// 启动后后台恢复上次加载成功的模型。
+///
+/// 模型只存在于进程内存，重新编译或重启应用后必须重新读入；这里按偏好里的相对
+/// id 自动恢复，省去每次手动点「加载」。目录缺失或构件不全时静默跳过；加载失败
+/// 仍会写入状态，界面可手动重试或释放（释放后不再自动恢复）。
+pub fn spawn_restore_last_model(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Some(id) = state.last_asr_model() else {
+        return;
+    };
+    let root = state.models_root();
+    let dir = root.join(&id);
+    if !dir.starts_with(&root) || !models::is_loadable(&dir) {
+        return;
+    }
+    let runtime = state.model_runtime();
+    // 手动加载 / 下载后的自动加载已经在跑时跳过恢复，避免覆盖它的状态与结果。
+    if runtime.is_loading() {
+        return;
+    }
+    let app = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let display = dir.to_string_lossy().into_owned();
+        emit_load_status(
+            &app,
+            &ModelLoadStatus {
+                phase: LoadPhase::Loading,
+                path: Some(display.clone()),
+                error: None,
+            },
+        );
+        let task_runtime = runtime.clone();
+        let task_root = root.clone();
+        let task_dir = dir.clone();
+        let result =
+            tauri::async_runtime::spawn_blocking(move || task_runtime.load(&task_root, &task_dir))
+                .await;
+        let status = match result {
+            // `load` 内部已写入 success / failed（含完整错误链）。
+            Ok(_) => runtime.load_status(),
+            Err(error) => {
+                let status = ModelLoadStatus {
+                    phase: LoadPhase::Failed,
+                    path: Some(display),
+                    error: Some(format!("自动恢复模型失败：{error}")),
+                };
+                runtime.set_load_status(status.clone());
+                status
+            }
+        };
+        emit_load_status(&app, &status);
+    });
+}
+
+/// 下载完成后的自动加载。已加载成功的同一模型直接跳过，避免重复加载 1GB 模型。
+async fn auto_load_after_download(
+    app: &AppHandle,
+    runtime: &ModelRuntime,
+    root: &Path,
+    dir: &Path,
+) {
+    let display = dir.to_string_lossy().into_owned();
+    if runtime.is_loaded_path(dir) {
+        emit_load_status(
+            app,
+            &ModelLoadStatus {
+                phase: LoadPhase::Success,
+                path: Some(display),
+                error: None,
+            },
+        );
+        return;
+    }
+
+    // 已有（手动）加载任务在跑：不抢占，也不覆盖它的状态。
+    if runtime.is_loading() {
+        return;
+    }
+
+    emit_load_status(
+        app,
+        &ModelLoadStatus {
+            phase: LoadPhase::Loading,
+            path: Some(display.clone()),
+            error: None,
+        },
+    );
+
+    let task_runtime = (*runtime).clone();
+    let task_root = root.to_path_buf();
+    let task_dir = dir.to_path_buf();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || task_runtime.load(&task_root, &task_dir))
+            .await;
+
+    let status = match result {
+        // `load` 内部已写入 success / failed（含完整错误链）。
+        Ok(_) => runtime.load_status(),
+        // 阻塞线程 panic：load 来不及写入状态，这里补写失败。
+        Err(error) => {
+            let status = ModelLoadStatus {
+                phase: LoadPhase::Failed,
+                path: Some(display),
+                error: Some(format!("自动加载任务异常结束：{error}")),
+            };
+            runtime.set_load_status(status.clone());
+            status
+        }
+    };
+    emit_load_status(app, &status);
+}
+
+/// 推送模型加载状态；自动加载、手动加载、释放与重试共用同一通道。
+fn emit_load_status(app: &AppHandle, status: &ModelLoadStatus) {
+    let _ = app.emit(models::LOAD_STATUS_EVENT, status);
 }
 
 /// 用 sherpa-onnx 加载指定模型目录；加载 1GB 左右的模型会占用数秒。
+/// 全过程推送 `loading → success / failed`，失败原因随状态返回给界面。
 #[tauri::command]
-pub async fn load_asr_model(state: State<'_, AppState>, path: String) -> CommandResult<ModelsInfo> {
+pub async fn load_asr_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<ModelsInfo> {
     let runtime = state.model_runtime();
     let root = state.models_root();
     let dir = PathBuf::from(path);
-    tauri::async_runtime::spawn_blocking(move || runtime.load(&root, &dir))
-        .await
-        .map_err(|error| format!("加载任务异常结束：{error}"))?
-        .map_err(describe)?;
+    let display = dir.to_string_lossy().into_owned();
+
+    // 已有加载任务时直接拒绝，避免把正在进行的状态覆盖成 Failed。
+    if runtime.is_loading() {
+        return Err("已有模型加载任务正在进行".to_owned());
+    }
+
+    // 状态（loading → success / failed）由 `ModelRuntime::load` 原子地维护；
+    // 命令层不再预先广播 Loading，避免与并发加载任务的状态互相覆盖。
+    let model_id = relative_model_id(&root, &dir);
+    let task_runtime = runtime.clone();
+    let result =
+        match tauri::async_runtime::spawn_blocking(move || task_runtime.load(&root, &dir)).await {
+            Ok(result) => result,
+            // 阻塞线程 panic：load 来不及写入状态，这里补写失败并广播。
+            Err(error) => {
+                let message = format!("加载任务异常结束：{error}");
+                let status = ModelLoadStatus {
+                    phase: LoadPhase::Failed,
+                    path: Some(display),
+                    error: Some(message.clone()),
+                };
+                runtime.set_load_status(status.clone());
+                emit_load_status(&app, &status);
+                return Err(message);
+            }
+        };
+    // `load` 内部已写入 success / failed（含完整错误链），这里只补发事件。
+    emit_load_status(&app, &runtime.load_status());
+    result.map_err(describe)?;
+    // 记住成功加载的模型，下次启动（含重新编译）自动恢复。
+    state.remember_loaded_model(model_id);
     Ok(state.models_info())
 }
 
-/// 释放已加载的模型，归还内存。
+/// 释放已加载的模型，归还内存；同步把加载状态复位，桌面歌词开关随之禁用。
 #[tauri::command]
-pub async fn unload_asr_model(state: State<'_, AppState>) -> CommandResult<ModelsInfo> {
-    state.model_runtime().unload();
+pub async fn unload_asr_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<ModelsInfo> {
+    let runtime = state.model_runtime();
+    // 加载任务结束后会把模型重新写回内存；此时释放只会被覆盖，直接拒绝。
+    if runtime.is_loading() {
+        return Err("模型正在加载中，请等待加载完成后再释放".to_owned());
+    }
+    runtime.unload();
+    // 显式释放表示下次启动不再自动恢复，否则「释放模型」只在本次进程内有效。
+    state.remember_loaded_model(None);
+    emit_load_status(&app, &runtime.load_status());
     Ok(state.models_info())
 }
 
@@ -352,7 +547,8 @@ pub fn cancel_asr_download(state: State<'_, AppState>) -> bool {
     state.model_runtime().cancel_download()
 }
 
-/// 选择 WAV 文件并用已加载的模型识别；取消选择时返回 `null`。
+/// 选择 WAV 文件并用已加载的模型识别；任意采样率会在识别前自动重采样到 16 kHz，
+/// 取消选择时返回 `null`。
 #[tauri::command]
 pub async fn transcribe_wav(
     app: AppHandle,
@@ -376,6 +572,170 @@ pub async fn transcribe_wav(
         .map_err(|error| format!("识别任务异常结束：{error}"))?
         .map_err(describe)?;
     Ok(Some(text))
+}
+
+/// 为音乐库曲目生成字幕：格式归一化 → 分片 ASR → SRT / LRC。
+/// 过程进度通过 `subtitle-progress` 推送，失败也会推送带原因的 error 事件。
+#[tauri::command]
+pub async fn generate_subtitles(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+) -> CommandResult<subtitles::SubtitleResult> {
+    let song = state
+        .song(&key)
+        .ok_or_else(|| format!("曲目不存在：{key}"))?;
+    let runtime = state.model_runtime();
+    let task_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        subtitles::generate(&task_app, &runtime, &song)
+    })
+    .await
+    .map_err(|error| format!("字幕生成任务异常结束：{error}"))?;
+    if let Err(error) = &result {
+        subtitles::emit_failure(&app, error);
+    }
+    result.map_err(describe)
+}
+
+/// 导出 SRT / LRC；默认文件名使用曲目名，内容取已生成的字幕结果。
+#[tauri::command]
+pub async fn export_subtitle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+    format: String,
+) -> CommandResult<Option<subtitles::SubtitleExportResult>> {
+    let ext = match format.as_str() {
+        "srt" => "srt",
+        "lrc" => "lrc",
+        other => return Err(format!("不支持的字幕格式：{other}（仅支持 srt / lrc）")),
+    };
+    let stored = subtitles::load_stored(&app, &key)
+        .ok_or_else(|| "该曲目尚未生成字幕，请先生成字幕".to_owned())?;
+    let title = state
+        .song(&key)
+        .map(|song| song.title)
+        .unwrap_or_else(|| stored.title.clone());
+    // `load_stored` 已按统一规则格式化，预览与导出共用同一份文本。
+    let content = if ext == "srt" { stored.srt } else { stored.lrc };
+
+    let file_name = format!("{}.{ext}", safe_file_name(&title));
+    let filter_label = format!("{} 字幕", ext.to_ascii_uppercase());
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("导出字幕")
+        .set_file_name(file_name)
+        .add_filter(&filter_label, &[ext]);
+    if let Ok(download_dir) = app.path().download_dir() {
+        dialog = dialog.set_directory(download_dir);
+    }
+    let Some(target) = dialog.blocking_save_file() else {
+        return Ok(None);
+    };
+    let target = target
+        .into_path()
+        .map_err(|error| format!("保存路径无效：{error}"))?;
+    let bytes = subtitles::write_subtitle(&target, &content).map_err(describe)?;
+    Ok(Some(subtitles::SubtitleExportResult {
+        path: target.to_string_lossy().into_owned(),
+        bytes,
+        format: ext.to_owned(),
+    }))
+}
+
+/// 读取某曲目已生成的字幕；「桌面歌词」与字幕页据此显示歌词行。
+#[tauri::command]
+pub fn subtitle_for_track(app: AppHandle, key: String) -> Option<subtitles::StoredSubtitle> {
+    subtitles::load_stored(&app, &key)
+}
+
+/// 列出所有已生成的字幕记录；字幕页启动 / 刷新时据此恢复记录列表。
+#[tauri::command]
+pub fn list_subtitles(app: AppHandle) -> Vec<subtitles::StoredSubtitle> {
+    subtitles::list_stored(&app)
+}
+
+/// 删除某曲目的字幕记录（含 JSON 与残留临时文件）；返回是否确实删除了文件。
+#[tauri::command]
+pub fn delete_subtitle(app: AppHandle, key: String) -> CommandResult<bool> {
+    subtitles::delete_stored(&app, &key).map_err(describe)
+}
+
+/// 开启 / 关闭桌面歌词窗口；返回生效后的开关状态。
+///
+/// 必须是异步命令：`WebviewWindowBuilder::build` 会向主线程事件循环派发创建消息并
+/// 阻塞等待结果。若在同步命令（运行于主线程）里调用，会把主线程连同事件循环一起锁死，
+/// 窗口停在 about:blank —— 透明置顶窗口只剩一片看不见的点击拦截层，所有 IPC 也会卡住。
+#[tauri::command]
+pub async fn set_desktop_lyrics_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CommandResult<LyricsControl> {
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let lyrics = task_app.state::<LyricsState>();
+        lyrics::set_enabled(&task_app, &lyrics, enabled)
+    })
+    .await
+    .map_err(|error| format!("桌面歌词窗口任务异常结束：{error}"))?
+    .map_err(describe)?;
+    // 开关随偏好持久化，模型下次可用时（启动自动恢复）由前端恢复开启状态。
+    state.set_desktop_lyrics_enabled(enabled);
+    Ok(LyricsControl { enabled })
+}
+
+/// 主窗口把当前曲目 / 播放进度 / 歌词行推给后端，由后端广播给歌词窗口。
+#[tauri::command]
+pub fn sync_desktop_lyrics(
+    app: AppHandle,
+    lyrics: State<'_, LyricsState>,
+    snapshot: LyricsSnapshot,
+) -> CommandResult<()> {
+    lyrics::sync_snapshot(&app, &lyrics, snapshot).map_err(describe)
+}
+
+/// 歌词窗口启动时拉取初始快照，避免错过创建窗口前的最后一次广播。
+#[tauri::command]
+pub fn desktop_lyrics_snapshot(lyrics: State<'_, LyricsState>) -> LyricsBootstrap {
+    LyricsBootstrap {
+        enabled: lyrics.enabled(),
+        snapshot: lyrics.snapshot(),
+    }
+}
+
+/// 设置桌面歌词锁定态：锁定后默认鼠标穿透，并把歌词热区交给后端轮询解锁悬停。
+#[tauri::command]
+pub fn set_desktop_lyrics_lock(
+    app: AppHandle,
+    lyrics: State<'_, LyricsState>,
+    locked: bool,
+    hot_zone: Option<lyrics::LyricsHotZone>,
+) -> CommandResult<()> {
+    lyrics::set_lock(&app, &lyrics, locked, hot_zone).map_err(describe)
+}
+
+/// 重新声明歌词窗口置顶；返回是否仍成功置顶。
+///
+/// 由歌词窗口定时巡检调用（全屏应用 / 虚拟桌面切换可能把 topmost 降级），
+/// 也可供设置面板的「重新置顶」按钮手动触发。仅调整 Z 序，不影响焦点。
+#[tauri::command]
+pub fn keep_desktop_lyrics_on_top(app: AppHandle) -> bool {
+    lyrics::enforce_top_most(&app)
+}
+
+/// 自定义桌面歌词窗口大小（逻辑像素）；Rust 侧负责范围钳制。
+#[tauri::command]
+pub fn resize_desktop_lyrics(app: AppHandle, width: f64, height: f64) -> CommandResult<()> {
+    lyrics::resize(&app, width, height).map_err(describe)
+}
+
+/// 把桌面歌词窗口放到屏幕底部居中（默认位置）。
+#[tauri::command]
+pub fn place_desktop_lyrics(app: AppHandle, width: f64, height: f64) -> CommandResult<()> {
+    lyrics::place_at_bottom(&app, width, height).map_err(describe)
 }
 
 #[derive(Serialize)]

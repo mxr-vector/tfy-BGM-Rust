@@ -1557,8 +1557,20 @@ select:focus-visible,
   padding-left: 44px;
 }
 
+.th-duration {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.th-favorite {
+  width: 36px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
 .th-actions {
-  width: 80px;
+  width: 36px;
   flex-shrink: 0;
   text-align: right;
 }
@@ -1834,8 +1846,31 @@ input[type="checkbox"]:indeterminate::after {
   color: #465a4f;
 }
 
+.row-duration {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.row-favorite {
+  width: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 「喜欢」属于要求中必须可见的列，不跟随 hover 才出现。 */
+.row-favorite .action-icon-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .row-actions {
-  width: 80px;
+  width: 36px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2539,7 +2574,8 @@ input[type="checkbox"]:indeterminate::after {
   display: inline-flex;
 }
 
-.action-btn.is-open {
+.action-btn.is-open,
+.action-btn.is-active {
   color: var(--accent-bright);
   background: rgba(25, 217, 139, 0.13);
 }
@@ -4052,11 +4088,11 @@ input[type="checkbox"]:indeterminate::after {
   }
 
   .th-actions {
-    width: 64px;
+    width: 36px;
   }
 
   .row-actions {
-    width: 64px;
+    width: 36px;
   }
 }
 

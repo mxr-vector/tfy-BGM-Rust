@@ -12,7 +12,7 @@ import type {
   SortBy,
 } from '@/lib/types';
 
-export type AppView = 'library' | 'schedule';
+export type AppView = 'library' | 'schedule' | 'subtitles';
 
 export interface AppState {
   library: LibrarySnapshot;

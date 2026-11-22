@@ -6,11 +6,14 @@ import { normalizeError } from '@/lib/format';
 import { invoke, isTauri, getCurrentWindow, listen } from '@/lib/tauri';
 import type { Bootstrap, LibraryChange } from '@/lib/types';
 import { installApiBridge } from '@/stores/api';
+import { installDesktopLyrics } from '@/stores/desktop-lyrics';
+import { installSubtitles } from '@/stores/subtitles';
 import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
 import { installScheduler } from '@/composables/useScheduler';
 import { autoplayOnStartIfEnabled, installSystemIntegration } from '@/composables/useSystemIntegration';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
 import { applyBootstrap, applyExternalChange } from '@/stores/library';
+import { refreshModels } from '@/stores/models';
 import { installOutputs } from '@/stores/outputs';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 import ClosePrompt from '@/components/ClosePrompt.vue';
@@ -60,6 +63,9 @@ async function bootstrap(): Promise<void> {
   try {
     const boot = await invoke<Bootstrap>(COMMANDS.bootstrap);
     applyBootstrap(boot);
+    // 播放器「桌面歌词」开关以模型加载状态为准，启动时先取一次模型快照，
+    // 同时订阅 model-load-status，保证下载后自动加载的状态能实时反映到播放器。
+    void refreshModels();
     uninstallHotkeys ??= installGlobalHotkeys();
     autoplayOnStartIfEnabled();
   } catch (error) {
@@ -79,6 +85,8 @@ void installApiBridge();
 
 onMounted(async () => {
   void bootstrap();
+  void installDesktopLyrics();
+  void installSubtitles();
 
   // 文件监听推送的增量变化；`applyExternalChange` 会丢弃比现有快照更旧的事件，
   // 因此与应用内写操作的返回值并发也不会让界面回退。

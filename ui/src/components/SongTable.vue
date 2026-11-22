@@ -114,7 +114,9 @@ function resetAll(): void {
         />
       </span>
       <span class="th-index">#</span>
-      <span class="th-title">曲目</span>
+      <span class="th-title">标题</span>
+      <span class="th-duration">时长</span>
+      <span class="th-favorite">喜欢</span>
       <span class="th-actions">操作</span>
     </div>
     <div class="table-body" id="song-list">

@@ -8,6 +8,7 @@ import type {
   LibrarySnapshot,
   LoopPoint,
 } from '@/lib/types';
+import { applySubtitleKeyChanges } from './subtitles';
 import { state } from './state';
 
 export function applyBootstrap(boot: Bootstrap): void {
@@ -76,6 +77,8 @@ export function applyMutation(result: LibraryMutation): void {
   }
 
   replaceLibrary(result.library);
+  // 后端已在写操作中迁移字幕文件；这里同步字幕记录与桌面歌词缓存。
+  applySubtitleKeyChanges(remap);
 }
 
 /** 文件监听推送的外部变化：迁移 key、同步收藏/循环点并提示增删。 */
@@ -104,6 +107,8 @@ export function applyExternalChange(change: LibraryChange): void {
   }
 
   replaceLibrary(change.library);
+  // 外部重命名 / 移动同样会让后端迁移字幕文件，前端缓存跟着 key 走。
+  applySubtitleKeyChanges(remap);
 
   const parts: string[] = [];
   if (change.added.length > 0) parts.push(`新增 ${change.added.length} 首`);

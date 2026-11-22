@@ -436,9 +436,7 @@ export function closeDrawer(): void {
   drawerOpen.value = false;
 }
 
-export function openDrawer(): void {
-  drawerOpen.value = true;
-}
+
 
 export function modeMeta(mode: PlayMode): { icon: string; title: string } {
   switch (mode) {

@@ -12,7 +12,6 @@
 
 import { computed, reactive, watch } from 'vue';
 import { clamp } from '@/lib/format';
-import { toast } from '@/lib/toast';
 import type { OutputDevice, OutputRoute, Prefs } from '@/lib/types';
 import {
   getAudioContext,
@@ -390,9 +389,4 @@ export function describeOutputIssue(): string {
     return '当前运行环境不支持多输出设备，仅能使用系统默认输出';
   }
   return outputsState.routeError || outputsState.deviceError;
-}
-
-export function notifyOutputIssue(): void {
-  const message = describeOutputIssue();
-  if (message) toast(message, 'error');
 }

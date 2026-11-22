@@ -69,6 +69,17 @@ function isBusy(): boolean {
         <span class="nav-label">节目单</span>
         <span class="nav-count" id="count-schedule">{{ state.schedule.length }}</span>
       </button>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ 'is-active': state.view === 'subtitles' }"
+        id="nav-subtitles"
+        title="为音乐库曲目生成 SRT / LRC 字幕"
+        @click="setView('subtitles')"
+      >
+        <Icon name="captions" class="nav-icon" />
+        <span class="nav-label">字幕生成</span>
+      </button>
 
       <div class="nav-section">
         <span class="nav-section-label">曲库管理</span>

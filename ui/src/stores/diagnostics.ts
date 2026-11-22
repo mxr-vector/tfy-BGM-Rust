@@ -11,8 +11,3 @@ export function openDiagnostics(): void {
 export function closeDiagnostics(): void {
   diagnosticsOpen.value = false;
 }
-
-export function toggleDiagnostics(): void {
-  if (diagnosticsOpen.value) closeDiagnostics();
-  else openDiagnostics();
-}

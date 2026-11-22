@@ -31,12 +31,30 @@ pub const DEFAULT_MODEL_NAME: &str = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
 pub const DEFAULT_DOWNLOAD_URL: &str = bgm_core::prefs::DEFAULT_ASR_DOWNLOAD_URL;
 /// 下载进度事件名；前端据此刷新进度条。
 pub const DOWNLOAD_EVENT: &str = "model-download-progress";
+/// 模型加载状态事件名；`idle / loading / success / failed` 四态均会推送，
+/// 下载完成后的自动加载与手动加载共用同一通道，前端据此显示状态与重试入口。
+pub const LOAD_STATUS_EVENT: &str = "model-load-status";
 /// 推理引擎标识，界面上原样展示。
 const ENGINE: &str = "sherpa-onnx";
 /// 扫描目录的最大深度，避免异常目录结构拖慢界面。
 const MAX_SCAN_DEPTH: usize = 4;
 /// 进度事件的最小间隔，避免大文件下载时刷爆事件通道。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(240);
+/// sherpa-onnx 特征提取固定为 16 kHz（`OfflineRecognizerConfig` 的 feat 默认值）。
+/// ffmpeg 归一化已按此输出；识别层再做一次兜底重采样，让「ffmpeg 缺失时直用源 WAV」
+/// 与「设置 → 模型 → 选择 WAV 识别」这两条入口也统一到同一采样率，避免按源采样率
+/// 接收 PCM 造成的特征错位与识别为空。
+pub const ASR_SAMPLE_RATE: i32 = 16_000;
+/// 重采样插值核半宽（源样本数）；越大阻带衰减越好、CPU 开销越高。
+const RESAMPLE_TAPS: usize = 8;
+/// 字幕分片目标时长（秒）；实际切点会吸附到附近能量最低处，避免切在词中间。
+pub const SEGMENT_TARGET_SECS: f64 = 10.0;
+/// 切点搜索半径（秒）：在目标点前后各找一段能量最低的位置。
+const SEGMENT_SEARCH_SECS: f64 = 2.5;
+/// 单个分片的最短时长（秒），避免切出碎片。
+const SEGMENT_MIN_SECS: f64 = 3.0;
+/// 计算能量包络的帧长（秒）。
+const ENERGY_FRAME_SECS: f64 = 0.02;
 
 /// Qwen3 ASR 必需的四个构件；顺序即界面上的提示顺序。
 const COMPONENTS: [&str; 4] = [
@@ -146,6 +164,31 @@ pub struct LoadedModel {
     pub threads: u32,
 }
 
+/// 模型加载阶段；自动加载与手动加载共用。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadPhase {
+    #[default]
+    Idle,
+    Loading,
+    Success,
+    Failed,
+}
+
+/// 最近一次（或正在进行的）模型加载状态快照。
+///
+/// 同时通过 `ModelsInfo` 拉取与 `model-load-status` 事件推送：前者保证刷新界面后
+/// 仍能恢复状态，后者保证下载完成后的自动加载能实时反馈「加载中」。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelLoadStatus {
+    pub phase: LoadPhase,
+    /// 本次加载 / 尝试加载的模型目录。
+    pub path: Option<String>,
+    /// `failed` 时的具体原因，直接来自 sherpa-onnx 或路径校验的错误链。
+    pub error: Option<String>,
+}
+
 /// 「模型」分组的完整快照，前端一次读取即可渲染。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +202,8 @@ pub struct ModelsInfo {
     pub default_model: DefaultModel,
     pub models: Vec<AsrModel>,
     pub loaded: Option<LoadedModel>,
+    /// 最近一次模型加载状态（含失败原因）；桌面歌词开关据此判断是否可用。
+    pub load_status: ModelLoadStatus,
     pub downloading: bool,
     pub warnings: Vec<String>,
 }
@@ -310,11 +355,24 @@ pub struct ModelRuntime {
     loaded: Arc<Mutex<Option<Arc<Loaded>>>>,
     downloading: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    /// 同一时刻只允许一个加载任务，防止下载完成后的自动加载与手动加载重复触发。
+    loading: Arc<AtomicBool>,
+    /// 最近一次加载状态，供 `ModelsInfo` 与状态事件读取。
+    status: Arc<Mutex<ModelLoadStatus>>,
 }
 
 struct Loaded {
     model: LoadedModel,
     recognizer: OfflineRecognizer,
+}
+
+/// `Drop` 时复位加载标志；即使 `load_inner` panic，后续加载也不会被永久拒绝。
+struct LoadFlag<'a>(&'a AtomicBool);
+
+impl Drop for LoadFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl ModelRuntime {
@@ -325,12 +383,42 @@ impl ModelRuntime {
             .map(|loaded| loaded.model.clone())
     }
 
+    pub fn load_status(&self) -> ModelLoadStatus {
+        self.status.lock().clone()
+    }
+
+    /// 供命令层在任务异常终止（阻塞线程 panic）时修正状态；正常流程由 `load` 自己维护。
+    pub fn set_load_status(&self, status: ModelLoadStatus) {
+        *self.status.lock() = status;
+    }
+
+    /// 目标模型是否已经成功加载；自动加载据此跳过重复加载。
+    pub fn is_loaded_path(&self, dir: &Path) -> bool {
+        if self.load_status().phase != LoadPhase::Success {
+            return false;
+        }
+        let path = dir.to_string_lossy();
+        self.loaded
+            .lock()
+            .as_ref()
+            .is_some_and(|loaded| loaded.model.path == path)
+    }
+
     pub fn is_downloading(&self) -> bool {
         self.downloading.load(Ordering::SeqCst)
     }
 
+    /// 是否有加载任务在运行；命令层据此避免重复触发并保护正在进行的加载状态。
+    pub fn is_loading(&self) -> bool {
+        self.loading.load(Ordering::SeqCst)
+    }
+
     pub fn unload(&self) -> bool {
-        self.loaded.lock().take().is_some()
+        let removed = self.loaded.lock().take().is_some();
+        if removed {
+            self.set_load_status(ModelLoadStatus::default());
+        }
+        removed
     }
 
     /// 请求中断正在进行的下载；返回是否有下载任务在运行。
@@ -344,7 +432,43 @@ impl ModelRuntime {
     }
 
     /// 用 sherpa-onnx 的 Rust API 加载 Qwen3 ASR；耗时较长，调用方应放到阻塞线程。
+    ///
+    /// 全程维护 `loading` 原子标志与 `status` 状态：并发的第二个加载请求直接被拒绝，
+    /// 成功 / 失败都会写入可展示的状态（失败保留完整错误链），供界面重试。
     pub fn load(&self, root: &Path, dir: &Path) -> Result<LoadedModel> {
+        if self
+            .loading
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            bail!("已有模型加载任务正在进行");
+        }
+        // 抢占成功后由 guard 负责复位，正常返回与 panic 展开都会释放标志。
+        let _flag = LoadFlag(&self.loading);
+        let target = dir.to_string_lossy().into_owned();
+        self.set_load_status(ModelLoadStatus {
+            phase: LoadPhase::Loading,
+            path: Some(target.clone()),
+            error: None,
+        });
+
+        let result = self.load_inner(root, dir);
+        match &result {
+            Ok(model) => self.set_load_status(ModelLoadStatus {
+                phase: LoadPhase::Success,
+                path: Some(model.path.clone()),
+                error: None,
+            }),
+            Err(error) => self.set_load_status(ModelLoadStatus {
+                phase: LoadPhase::Failed,
+                path: Some(target),
+                error: Some(format!("{error:#}")),
+            }),
+        }
+        result
+    }
+
+    fn load_inner(&self, root: &Path, dir: &Path) -> Result<LoadedModel> {
         // canonical 只用于越界校验；Windows 上它会带 `\\?\` 前缀，
         // 因此仍用调用方传入的路径（来自扫描结果）作为模型标识，保证前端逐字匹配。
         let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -391,13 +515,80 @@ impl ModelRuntime {
         let wave = Wave::read(&filename)
             .ok_or_else(|| anyhow!("无法读取音频文件（仅支持 WAV）：{}", wav.display()))?;
 
+        // ffmpeg 归一化路径已输出 16 kHz；这里再做一次兜底重采样，覆盖
+        // 「设置 → 模型 → 选择 WAV 识别」与「ffmpeg 缺失时直用源 WAV」两条入口，
+        // 保证送入引擎的 PCM 恒为 16 kHz。
+        let pcm = resample_to_asr(wave.samples(), wave.sample_rate())?;
         let stream = loaded.recognizer.create_stream();
-        stream.accept_waveform(wave.sample_rate(), wave.samples());
+        stream.accept_waveform(ASR_SAMPLE_RATE, &pcm);
         loaded.recognizer.decode(&stream);
         stream
             .get_result()
-            .map(|result| result.text)
+            .map(|result| clean_asr_text(&result.text))
             .ok_or_else(|| anyhow!("识别失败：sherpa-onnx 未返回结果"))
+    }
+
+    /// 按时间窗把单声道 WAV 切片逐段识别，生成带时间轴的字幕分段。
+    ///
+    /// Qwen3-ASR 的 Rust 结果虽然可能带 token 时间戳，但是否可用取决于模型版本；
+    /// 这里改用「音频切片 + 逐片解码」这一与引擎版本无关的方式，保证 SRT / LRC
+    /// 一定能得到起止时间。切点不按固定节拍硬切，而是在目标时长附近搜索能量最低的
+    /// 20ms 帧（通常是换气 / 停顿处），减少把词切成两半。`progress(current, total)`
+    /// 在每片完成后回调，供上层推送进度。
+    pub fn transcribe_segments(
+        &self,
+        wav: &Path,
+        window_secs: f64,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Vec<crate::subtitles::SubtitleSegment>> {
+        use crate::subtitles::SubtitleSegment;
+
+        let loaded = {
+            let guard = self.loaded.lock();
+            guard.as_ref().cloned()
+        }
+        .ok_or_else(|| anyhow!("尚未加载 ASR 模型，请先在「设置 → 模型」中完成加载"))?;
+        let filename = wav.to_string_lossy();
+        let wave = Wave::read(&filename)
+            .ok_or_else(|| anyhow!("无法读取归一化音频（需为单声道 WAV）：{}", wav.display()))?;
+        // ffmpeg 缺失时源 WAV 可能不是 16 kHz；先重采样再切片，
+        // 样本区间与时间轴才严格对齐（16 kHz 输入为恒等路径，零额外开销）。
+        let src_rate = wave.sample_rate();
+        let pcm = resample_to_asr(wave.samples(), src_rate)?;
+        let rate = ASR_SAMPLE_RATE;
+        let samples = pcm.as_slice();
+        let total_secs = samples.len() as f64 / rate as f64;
+        if total_secs <= 0.0 {
+            bail!("归一化后的音频为空，无法生成字幕");
+        }
+
+        let window = window_secs.clamp(2.0, 60.0);
+        let ranges = plan_segments(samples, rate as usize, total_secs, window);
+        if ranges.is_empty() {
+            bail!("归一化后的音频为空，无法生成字幕");
+        }
+        let mut segments = Vec::with_capacity(ranges.len());
+        for (index, (start, end)) in ranges.iter().copied().enumerate() {
+            let from = ((start * rate as f64).round() as usize).min(samples.len());
+            let to = ((end * rate as f64).round() as usize).min(samples.len());
+            if to > from {
+                let stream = loaded.recognizer.create_stream();
+                stream.accept_waveform(rate, &samples[from..to]);
+                loaded.recognizer.decode(&stream);
+                if let Some(result) = stream.get_result() {
+                    let text = clean_asr_text(&result.text);
+                    if !text.is_empty() {
+                        segments.push(SubtitleSegment { start, end, text });
+                    }
+                }
+            }
+            progress(index + 1, ranges.len());
+        }
+
+        if segments.is_empty() {
+            bail!("ASR 未识别出任何文本，请确认音频包含人声且模型已正确加载");
+        }
+        Ok(segments)
     }
 
     /// 下载默认模型（0.6B-int8）；同一时间只允许一个下载任务。
@@ -709,6 +900,168 @@ fn emit_progress(app: &AppHandle, progress: DownloadProgress) {
     let _ = app.emit(DOWNLOAD_EVENT, progress);
 }
 
+/// 去掉 Qwen3-ASR 输出里可能夹带的 `<|...|>` 控制标记，并压平空白。
+fn clean_asr_text(raw: &str) -> String {
+    let mut cleaned = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("<|") {
+        cleaned.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("|>") {
+            Some(end) => rest = &after[end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    cleaned.push_str(rest);
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 规划字幕分片区间：按目标时长切分，并把每个切点吸附到附近能量最低的帧。
+///
+/// 返回首尾相接、覆盖整段音频的 `[start, end)` 秒区间；音频很短时只返回一段。
+fn plan_segments(samples: &[f32], rate: usize, total_secs: f64, window: f64) -> Vec<(f64, f64)> {
+    if rate == 0 || samples.is_empty() || total_secs <= 0.0 {
+        return Vec::new();
+    }
+    let window = if window.is_finite() && window > 0.0 {
+        window
+    } else {
+        SEGMENT_TARGET_SECS
+    };
+    let min_len = SEGMENT_MIN_SECS.min(window / 2.0).max(ENERGY_FRAME_SECS);
+    let energies = frame_energies(samples, rate);
+    let mut ranges = Vec::new();
+    let mut start = 0.0;
+    // 剩余时长不足 1.5 个窗口时直接作为最后一段，避免切出过短的尾巴。
+    while total_secs - start > window * 1.5 {
+        let target = start + window;
+        let lo = (start + min_len).max(target - SEGMENT_SEARCH_SECS);
+        let hi = (total_secs - min_len).min(target + SEGMENT_SEARCH_SECS);
+        let end = quietest_point(&energies, lo, hi, target).unwrap_or(target);
+        if end > start + min_len {
+            ranges.push((start, end));
+            start = end;
+            continue;
+        }
+        // 搜索区间不可用（接近结尾 / 全部越界）时退回固定切点。
+        let fallback = (start + window).min(total_secs);
+        if fallback <= start + min_len {
+            break;
+        }
+        ranges.push((start, fallback));
+        start = fallback;
+    }
+    if total_secs > start {
+        ranges.push((start, total_secs));
+    }
+    ranges
+}
+
+/// 每 [`ENERGY_FRAME_SECS`] 一帧的 RMS 能量包络。
+fn frame_energies(samples: &[f32], rate: usize) -> Vec<f64> {
+    let frame_len = ((rate as f64 * ENERGY_FRAME_SECS).round() as usize).max(1);
+    samples
+        .chunks(frame_len)
+        .map(|frame| {
+            let sum: f64 = frame
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum();
+            (sum / frame.len() as f64).sqrt()
+        })
+        .collect()
+}
+
+/// 在 `[lo, hi]` 秒内找能量最低的帧中心；能量相同时取离 `target` 最近的一个。
+fn quietest_point(energies: &[f64], lo: f64, hi: f64, target: f64) -> Option<f64> {
+    if energies.is_empty() || !(hi > lo) {
+        return None;
+    }
+    let first = (lo / ENERGY_FRAME_SECS).ceil().max(0.0) as usize;
+    let last = ((hi / ENERGY_FRAME_SECS).floor() as usize).min(energies.len() - 1);
+    if first > last {
+        return None;
+    }
+    let mut best: Option<(f64, f64, f64)> = None;
+    for index in first..=last {
+        let time = (index as f64 + 0.5) * ENERGY_FRAME_SECS;
+        let distance = (time - target).abs();
+        let energy = energies[index];
+        let better = match best {
+            None => true,
+            Some((best_energy, best_distance, _)) => {
+                energy < best_energy - 1e-9
+                    || ((energy - best_energy).abs() <= 1e-9 && distance < best_distance)
+            }
+        };
+        if better {
+            best = Some((energy, distance, time));
+        }
+    }
+    best.map(|(_, _, time)| time)
+}
+
+/// 归一化 sinc：`sin(πx)/(πx)`，`x→0` 时取 1。
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-12 {
+        1.0
+    } else {
+        (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+    }
+}
+
+/// 把 sherpa-onnx 读出的单声道 PCM 重采样到 [`ASR_SAMPLE_RATE`]。
+///
+/// 采用带限 Lanczos 插值，核为 `sinc(cutoff·x) · sinc(x/A)`，其中
+/// `cutoff = min(1, 16000/src_rate)`：
+/// - 下采样时把截止频率收窄到目标 Nyquist（8 kHz），抑制会混叠进 fbank 的高频；
+/// - 上采样时 `cutoff = 1`，仅做平滑插值，保留原带内容。
+///
+/// 逐输出点按核权重归一化，保证直流增益为 1，信号首尾不会因核被截断而衰减。
+/// 已是 16 kHz 时直接返回副本（恒等路径），不改变音质也不增加耗时。
+fn resample_to_asr(samples: &[f32], src_rate: i32) -> Result<Vec<f32>> {
+    if src_rate <= 0 {
+        bail!("音频采样率无效：{src_rate}");
+    }
+    if samples.is_empty() || src_rate == ASR_SAMPLE_RATE {
+        return Ok(samples.to_vec());
+    }
+
+    let ratio = ASR_SAMPLE_RATE as f64 / src_rate as f64;
+    let cutoff = ratio.min(1.0);
+    let a = RESAMPLE_TAPS as f64;
+    let out_len = ((samples.len() as f64 * ratio).floor() as usize).max(1);
+    let mut out = Vec::with_capacity(out_len);
+
+    for n in 0..out_len {
+        // n 为输出域样本序号，pos 为对应的源域浮点位置。
+        let pos = n as f64 / ratio;
+        let center = pos.floor();
+        let mut acc = 0.0;
+        let mut norm = 0.0;
+        let from = (center - a).floor() as isize;
+        let to = (center + a).ceil() as isize;
+        for i in from..=to {
+            if i < 0 || i as usize >= samples.len() {
+                continue;
+            }
+            let x = pos - i as f64;
+            let weight = sinc(x * cutoff) * sinc(x / a);
+            acc += weight * samples[i as usize] as f64;
+            norm += weight;
+        }
+        out.push(if norm.abs() > 1e-12 {
+            (acc / norm) as f32
+        } else {
+            0.0
+        });
+    }
+    Ok(out)
+}
+
 fn total_bytes() -> u64 {
     QWEN3_FILES.iter().map(|file| file.bytes).sum()
 }
@@ -717,6 +1070,11 @@ fn is_complete(path: &Path, file: &RemoteFile) -> bool {
     fs::metadata(path)
         .map(|meta| meta.is_file() && meta.len() == file.bytes)
         .unwrap_or(false)
+}
+
+/// 目录是否为构件齐全、可直接加载的 Qwen3 模型。
+pub fn is_loadable(dir: &Path) -> bool {
+    dir.is_dir() && missing_components(dir).is_empty()
 }
 
 /// Qwen3 ASR 四件套中缺失的项；`tokenizer` 单独按目录判断。
@@ -907,5 +1265,184 @@ mod tests {
         let url = source.file_url(&QWEN3_FILES[2]);
         assert!(url.contains("FilePath=model_0.6B/decoder.int8.onnx"));
         assert!(QWEN3_FILES.iter().all(|file| !file.local.contains("1.7B")));
+    }
+
+    #[test]
+    fn load_status_starts_idle_and_keeps_failure_reason() {
+        let runtime = ModelRuntime::default();
+        assert_eq!(runtime.load_status().phase, LoadPhase::Idle);
+        runtime.set_load_status(ModelLoadStatus {
+            phase: LoadPhase::Failed,
+            path: Some("D:/models/demo".to_owned()),
+            error: Some("sherpa-onnx 无法加载模型".to_owned()),
+        });
+        let status = runtime.load_status();
+        assert_eq!(status.phase, LoadPhase::Failed);
+        assert_eq!(status.error.as_deref(), Some("sherpa-onnx 无法加载模型"));
+        // 失败状态下不得被误判为「已加载」，自动加载仍可重试。
+        assert!(!runtime.is_loaded_path(Path::new("D:/models/demo")));
+    }
+
+    #[test]
+    fn clean_asr_text_strips_control_tokens() {
+        assert_eq!(
+            clean_asr_text("<|im_start|>你好  世界\n第二行<|im_end|>"),
+            "你好 世界 第二行"
+        );
+        assert_eq!(clean_asr_text("  纯文本  "), "纯文本");
+    }
+
+    #[test]
+    fn resample_16k_is_identity() {
+        let pcm: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin()).collect();
+        assert_eq!(resample_to_asr(&pcm, ASR_SAMPLE_RATE).unwrap(), pcm);
+    }
+
+    #[test]
+    fn resample_lengths_follow_ratio() {
+        let pcm = vec![0.0f32; 48_000];
+        assert_eq!(resample_to_asr(&pcm, 48_000).unwrap().len(), 16_000);
+        assert_eq!(resample_to_asr(&pcm, 8_000).unwrap().len(), 96_000);
+        // 44.1 kHz 的 1 秒音频重采样后时长仍为 1 秒，时间轴不会漂移。
+        let one_second = vec![0.0f32; 44_100];
+        let out = resample_to_asr(&one_second, 44_100).unwrap();
+        assert!((out.len() as f64 / ASR_SAMPLE_RATE as f64 - 1.0).abs() < 1e-3);
+        assert!(resample_to_asr(&[], 44_100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resample_preserves_dc_gain() {
+        for rate in [8_000, 44_100, 48_000] {
+            let pcm = vec![0.25f32; rate as usize];
+            let out = resample_to_asr(&pcm, rate).unwrap();
+            let max_err = out
+                .iter()
+                .map(|value| (value - 0.25).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_err < 1e-4, "rate={rate} 直流增益偏差过大：{max_err}");
+        }
+    }
+
+    #[test]
+    fn resample_suppresses_out_of_band_on_downsample() {
+        fn rms(signal: &[f32]) -> f64 {
+            let sum: f64 = signal.iter().map(|v| (*v as f64).powi(2)).sum();
+            (sum / signal.len().max(1) as f64).sqrt()
+        }
+        let rate = 48_000usize;
+        let tone = |freq: f64| -> Vec<f32> {
+            (0..rate)
+                .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / rate as f64).sin() as f32)
+                .collect()
+        };
+        // 1 kHz 在目标 16 kHz 的带内，应基本无损；12 kHz 高于目标 Nyquist(8 kHz)，
+        // 若不做带限会混叠成 4 kHz 的假信号，必须被明显衰减。
+        let in_band = rms(&resample_to_asr(&tone(1_000.0), rate as i32).unwrap());
+        let out_band = rms(&resample_to_asr(&tone(12_000.0), rate as i32).unwrap());
+        assert!(in_band > 0.5, "带内 1 kHz 应基本无损，实测 {in_band}");
+        assert!(
+            out_band < in_band * 0.25,
+            "带外 12 kHz 未被抑制：{out_band} vs {in_band}"
+        );
+    }
+
+    #[test]
+    fn resample_rejects_invalid_rate() {
+        assert!(resample_to_asr(&[0.1, 0.2], 0).is_err());
+        assert!(resample_to_asr(&[0.1, 0.2], -1).is_err());
+    }
+
+    /// 走一遍真实的 WAV 读写链路：44.1 kHz WAV → `Wave::read` → 兜底重采样。
+    #[test]
+    fn resample_real_wav_44100_to_16k() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let pcm: Vec<f32> = (0..44_100)
+            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 44_100.0).sin() as f32)
+            .collect();
+        assert!(sherpa_onnx::write(path.to_str().unwrap(), &pcm, 44_100));
+
+        let wave = Wave::read(path.to_str().unwrap()).expect("应能读回 44.1 kHz 单声道 WAV");
+        assert_eq!(wave.sample_rate(), 44_100);
+        let out = resample_to_asr(wave.samples(), wave.sample_rate()).unwrap();
+        assert_eq!(out.len(), 16_000, "重采样后应为 1 秒 16 kHz 音频");
+
+        // 440 Hz 处于目标带内，重采样后能量应基本保留（正弦 RMS ≈ 1/√2）。
+        let rms = (out.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / out.len() as f64).sqrt();
+        assert!(
+            (rms - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.05,
+            "带内 440 Hz 能量损失过大：rms={rms}"
+        );
+    }
+
+    fn tone_with_gaps(seconds: f64, gaps: &[(f64, f64)]) -> Vec<f32> {
+        let rate = ASR_SAMPLE_RATE as usize;
+        (0..(rate as f64 * seconds) as usize)
+            .map(|index| {
+                let time = index as f64 / rate as f64;
+                if gaps.iter().any(|(from, to)| (*from..*to).contains(&time)) {
+                    0.0
+                } else {
+                    (2.0 * std::f64::consts::PI * 440.0 * time).sin() as f32 * 0.2
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_segments_snaps_to_quiet_point() {
+        let rate = ASR_SAMPLE_RATE as usize;
+        let total = 20.0;
+        let pcm = tone_with_gaps(total, &[(9.0, 9.8)]);
+        let ranges = plan_segments(&pcm, rate, total, SEGMENT_TARGET_SECS);
+        assert_eq!(ranges.len(), 2, "20 秒音频应切成两段：{ranges:?}");
+        assert!((ranges[0].0).abs() < 1e-9);
+        assert!(
+            (9.0..=9.8).contains(&ranges[0].1),
+            "切点应落在静音段内，实测 {}",
+            ranges[0].1
+        );
+        assert!((ranges[1].0 - ranges[0].1).abs() < 1e-9);
+        assert!((ranges[1].1 - total).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plan_segments_cover_audio_without_gaps() {
+        let rate = ASR_SAMPLE_RATE as usize;
+        let total = 31.0;
+        let pcm = tone_with_gaps(total, &[]);
+        let ranges = plan_segments(&pcm, rate, total, SEGMENT_TARGET_SECS);
+        assert!(ranges.len() >= 3, "31 秒音频至少切成三段：{ranges:?}");
+        assert!((ranges[0].0).abs() < 1e-9);
+        for pair in ranges.windows(2) {
+            assert!(
+                (pair[0].1 - pair[1].0).abs() < 1e-9,
+                "分片必须首尾相接：{ranges:?}"
+            );
+        }
+        let last = ranges.last().unwrap();
+        assert!((last.1 - total).abs() < 1e-9, "最后一片应覆盖到音频结尾");
+        for (start, end) in &ranges {
+            assert!(
+                *end - *start >= SEGMENT_MIN_SECS - 1e-9,
+                "分片过短：{start}..{end}"
+            );
+            assert!(
+                *end - *start <= SEGMENT_TARGET_SECS * 1.5 + 1e-9,
+                "分片过长：{start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_segments_short_audio_is_single_range() {
+        let rate = ASR_SAMPLE_RATE as usize;
+        let total = 4.0;
+        let pcm = tone_with_gaps(total, &[]);
+        let ranges = plan_segments(&pcm, rate, total, SEGMENT_TARGET_SECS);
+        assert_eq!(ranges.len(), 1);
+        assert!((ranges[0].0).abs() < 1e-9);
+        assert!((ranges[0].1 - total).abs() < 1e-9);
+        assert!(plan_segments(&[], rate, 0.0, SEGMENT_TARGET_SECS).is_empty());
     }
 }

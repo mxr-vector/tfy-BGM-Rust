@@ -206,44 +206,7 @@ export async function openImport(): Promise<void> {
   });
 }
 
-export async function openEditSong(song: Song): Promise<void> {
-  const values = await showModal({
-    title: '编辑曲目',
-    description: '修改曲名会重命名音频文件，修改分类会移动文件；收藏会自动跟随。',
-    fields: [
-      {
-        name: 'title',
-        label: '曲名',
-        type: 'text',
-        value: song.title,
-        placeholder: '输入新的曲名',
-      },
-      {
-        name: 'category',
-        label: '风格分类',
-        type: 'select',
-        value: song.category,
-        options: categoryOptions(),
-      },
-    ],
-    confirmText: '保存',
-    validate: (input) => (input.title?.trim() ? null : '曲名不能为空'),
-  });
-  if (!values) return;
-  if (values.title?.trim() === song.title && values.category === song.category) return;
 
-  try {
-    const result = await invoke<LibraryMutation>(COMMANDS.updateTrack, {
-      key: song.key,
-      title: values.title,
-      category: values.category,
-    });
-    applyMutation(result);
-    reportToast(result.report, '曲目已更新');
-  } catch (error) {
-    toast(normalizeError(error), 'error');
-  }
-}
 
 export async function openMove(
   keys: string[],

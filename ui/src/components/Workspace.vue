@@ -9,6 +9,7 @@ import CategoryFilter from './CategoryFilter.vue';
 import HeroBanner from './HeroBanner.vue';
 import SchedulePage from './SchedulePage.vue';
 import SongTable from './SongTable.vue';
+import SubtitlePage from './SubtitlePage.vue';
 import WarningBanner from './WarningBanner.vue';
 
 const resultsTitle = computed(() => {
@@ -31,6 +32,7 @@ const query = computed(() => state.search.trim());
   <main class="workspace">
     <WarningBanner />
     <SchedulePage v-if="state.view === 'schedule'" />
+    <SubtitlePage v-else-if="state.view === 'subtitles'" />
     <template v-else>
       <HeroBanner />
       <CategoryFilter />

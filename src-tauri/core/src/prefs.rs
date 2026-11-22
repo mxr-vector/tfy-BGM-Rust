@@ -202,6 +202,15 @@ pub struct Prefs {
     pub models_dir: Option<String>,
     /// ASR 模型下载地址；空字符串表示使用 `DEFAULT_ASR_DOWNLOAD_URL`（0.6B-int8）。
     pub asr_download_url: String,
+    /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
+    /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
+    pub last_asr_model: Option<String>,
+
+    // ---- 桌面歌词 / 字幕 ----
+    /// 桌面歌词开关；模型可用时随启动恢复。由歌词命令维护，整包保存不会覆盖。
+    pub desktop_lyrics_enabled: bool,
+    /// 字幕预览偏好格式：`srt` 或 `lrc`。
+    pub subtitle_format: String,
 
     // ---- 平台特有（仅对应平台读取）----
     /// Windows：系统媒体传输控制（SMTC）。
@@ -243,6 +252,9 @@ impl Default for Prefs {
             close_action: CloseAction::Ask,
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
+            last_asr_model: None,
+            desktop_lyrics_enabled: false,
+            subtitle_format: "srt".to_owned(),
             smtc: false,
             spatial_audio: false,
             audio_enhancement: true,
@@ -388,6 +400,26 @@ impl Prefs {
             download_url.to_owned()
         } else {
             DEFAULT_ASR_DOWNLOAD_URL.to_owned()
+        };
+
+        // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，
+        // 避免手改配置后启动时去加载模型目录以外的文件。
+        self.last_asr_model = self
+            .last_asr_model
+            .map(|id| id.trim().to_owned())
+            .filter(|id| {
+                !id.is_empty()
+                    && id.chars().count() <= MAX_MODELS_DIR_LEN
+                    && !id.starts_with('/')
+                    && !id.starts_with('\\')
+                    // Windows 盘符路径会在 join 时替换掉模型根目录。
+                    && !id.contains(':')
+                    && !id.split(['/', '\\']).any(|part| part == "..")
+            });
+
+        self.subtitle_format = match self.subtitle_format.trim().to_ascii_lowercase().as_str() {
+            "lrc" => "lrc".to_owned(),
+            _ => "srt".to_owned(),
         };
         self
     }
@@ -857,6 +889,62 @@ mod tests {
         }
         .normalize();
         assert_eq!(unc.models_dir.as_deref(), Some(r"\\nas\models"));
+    }
+
+    #[test]
+    fn last_asr_model_accepts_relative_ids_only() {
+        let relative = Prefs {
+            last_asr_model: Some("  sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25  ".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(
+            relative.last_asr_model.as_deref(),
+            Some("sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25")
+        );
+
+        // 绝对路径与越界路径不能成为启动自动加载目标。
+        for unsafe_id in ["/models/x", r"D:\models\x", "a/../b", "  "] {
+            let prefs = Prefs {
+                last_asr_model: Some(unsafe_id.into()),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert!(prefs.last_asr_model.is_none(), "{unsafe_id} 不应保留");
+        }
+    }
+
+    #[test]
+    fn lyrics_and_subtitle_defaults_normalize() {
+        let prefs = Prefs::default();
+        assert!(!prefs.desktop_lyrics_enabled);
+        assert_eq!(prefs.subtitle_format, "srt");
+
+        // 偏好格式只保留 srt / lrc，其它值回退 srt。
+        for (input, expected) in [(" LRC ", "lrc"), ("srt", "srt"), ("vtt", "srt")] {
+            let normalized = Prefs {
+                subtitle_format: input.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(normalized.subtitle_format, expected);
+        }
+    }
+
+    #[test]
+    fn lyrics_and_subtitle_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        let prefs = Prefs {
+            desktop_lyrics_enabled: true,
+            subtitle_format: "lrc".into(),
+            ..Prefs::default()
+        };
+        prefs.save(&path).unwrap();
+        let (loaded, warning) = Prefs::load(&path);
+        assert!(warning.is_none());
+        assert!(loaded.desktop_lyrics_enabled);
+        assert_eq!(loaded.subtitle_format, "lrc");
     }
 
     #[test]

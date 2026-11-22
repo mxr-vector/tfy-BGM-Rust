@@ -197,9 +197,12 @@ impl AppState {
         let rates = self.config.read().player.rates.clone();
         let mut current = self.prefs.write();
         let mut next = incoming.normalize_with_rates(&rates);
-        // 曲库目录与模型目录只允许通过专用命令修改，避免偏好保存把目录改坏。
+        // 曲库目录与模型目录只允许通过专用命令修改，避免偏好保存把目录改坏；
+        // 后两项由模型 / 歌词命令维护，前端整包保存时不得覆盖。
         next.library_dir = current.library_dir.clone();
         next.models_dir = current.models_dir.clone();
+        next.last_asr_model = current.last_asr_model.clone();
+        next.desktop_lyrics_enabled = current.desktop_lyrics_enabled;
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
         Ok(next)
@@ -352,6 +355,36 @@ impl AppState {
         models::root_for(&self.prefs.read())
     }
 
+    /// 上次加载成功的模型 id（相对模型目录）；启动时据此自动恢复。
+    pub fn last_asr_model(&self) -> Option<String> {
+        self.prefs.read().last_asr_model.clone()
+    }
+
+    /// 记录 / 清除启动自动恢复目标；落盘失败只记录日志，不影响本次加载结果。
+    pub fn remember_loaded_model(&self, id: Option<String>) {
+        self.update_prefs(|prefs| prefs.last_asr_model = id);
+    }
+
+    /// 桌面歌词开关；启动时由前端在模型可用后恢复。
+    pub fn set_desktop_lyrics_enabled(&self, enabled: bool) {
+        self.update_prefs(|prefs| prefs.desktop_lyrics_enabled = enabled);
+    }
+
+    /// 修改后端维护的偏好字段并立即落盘；失败只记录日志，不阻断调用方流程。
+    fn update_prefs(&self, update: impl FnOnce(&mut Prefs)) {
+        let mut current = self.prefs.write();
+        let mut next = current.clone();
+        update(&mut next);
+        if *current == next {
+            return;
+        }
+        if let Err(error) = next.save(&self.prefs_path) {
+            eprintln!("[prefs] 保存偏好设置失败：{error:#}");
+            return;
+        }
+        *current = next;
+    }
+
     /// 当前生效的下载地址；自定义为空时使用内置的 0.6B-int8 地址。
     pub fn asr_download_url(&self) -> String {
         let prefs = self.prefs.read();
@@ -392,6 +425,7 @@ impl AppState {
             default_model: models::default_model(&root),
             models: list,
             loaded: self.models.loaded(),
+            load_status: self.models.load_status(),
             downloading: self.models.is_downloading(),
             warnings,
         }
@@ -503,7 +537,7 @@ impl AppState {
     }
 
     /// watch 事件或定期兜底触发：重新扫描并计算增删/移动，内容未变时返回 `None`。
-    pub fn handle_watch_event(&self) -> Option<LibraryChange> {
+    pub fn handle_watch_event(&self, app: &AppHandle) -> Option<LibraryChange> {
         let _guard = self.ops_lock.try_lock()?;
         let (root, source, previous) = {
             let runtime = self.runtime.read();
@@ -522,6 +556,12 @@ impl AppState {
         let diff = diff_songs(&previous.songs, &next.songs);
         next.warnings
             .extend(self.sync_track_metadata(&diff.moved, &diff.removed));
+        // 外部重命名 / 移动音频文件时，字幕记录跟着 key 一起迁移。
+        let migrations = key_migrations(&diff.moved);
+        if !migrations.is_empty() {
+            let warnings = crate::subtitles::migrate_keys(app, &migrations, &next.songs);
+            next.warnings.extend(warnings);
+        }
 
         *self.runtime.write() = Runtime {
             root,
@@ -688,7 +728,16 @@ impl AppState {
         report: BatchReport,
     ) -> Result<LibraryMutation> {
         let mut warnings = self.sync_track_metadata(&changes, &removed);
+        let migrations = key_migrations(&changes);
         let mut library = self.refresh_library(app)?;
+        if !migrations.is_empty() {
+            // 刷新曲库后再迁移：需要新曲目的标题 / 文件名 / 时长写入字幕记录。
+            warnings.extend(crate::subtitles::migrate_keys(
+                app,
+                &migrations,
+                &library.songs,
+            ));
+        }
         library.warnings.append(&mut warnings);
         Ok(LibraryMutation {
             library,
@@ -821,6 +870,15 @@ struct SongDiff {
     added: Vec<String>,
     removed: Vec<String>,
     moved: Vec<KeyChange>,
+}
+
+/// 只保留真正发生变化的 `from → to` 对，供字幕等按 key 持久化的数据迁移。
+fn key_migrations(changes: &[KeyChange]) -> Vec<(String, String)> {
+    changes
+        .iter()
+        .filter(|change| change.from != change.to)
+        .map(|change| (change.from.clone(), change.to.clone()))
+        .collect()
 }
 
 fn same_content(previous: &LibrarySnapshot, next: &LibrarySnapshot) -> bool {

@@ -24,6 +24,8 @@ const AUTOSTART_KEY: &str = "tfy-bgm";
 /// 桌面集成的运行时开关，由偏好写入，窗口事件与托盘回调读取。
 pub struct DesktopState {
     minimize_to_tray: AtomicBool,
+    /// 应用正在退出：退出过程会关闭所有窗口，此时关闭事件不代表用户意图。
+    quitting: AtomicBool,
     tray: Mutex<Option<TrayIcon>>,
 }
 
@@ -31,12 +33,22 @@ impl DesktopState {
     pub fn new(minimize_to_tray: bool) -> Self {
         Self {
             minimize_to_tray: AtomicBool::new(minimize_to_tray),
+            quitting: AtomicBool::new(false),
             tray: Mutex::new(None),
         }
     }
 
     pub fn minimize_to_tray(&self) -> bool {
         self.minimize_to_tray.load(Ordering::Relaxed)
+    }
+
+    /// 标记进入退出流程；之后的窗口关闭事件不应再回写界面偏好。
+    pub fn begin_quit(&self) {
+        self.quitting.store(true, Ordering::Relaxed);
+    }
+
+    pub fn quitting(&self) -> bool {
+        self.quitting.load(Ordering::Relaxed)
     }
 }
 
@@ -127,7 +139,10 @@ fn build_tray(app: &AppHandle) -> Result<TrayIcon> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                app.state::<DesktopState>().begin_quit();
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -157,6 +172,21 @@ fn attach_window_events(app: &AppHandle) {
             if handle.state::<DesktopState>().minimize_to_tray() {
                 api.prevent_close();
                 let _ = target.hide();
+            }
+        }
+        // 主窗口真正销毁（未隐藏到托盘）意味着应用要退出：Tauri 只在所有窗口
+        // 都销毁时才退出，桌面上遗留的歌词浮窗会让进程继续存活，且默认无托盘
+        // 图标可恢复主界面。这里把歌词浮窗一并关闭，让退出流程正常收尾。
+        WindowEvent::Destroyed => {
+            let Some(state) = handle.try_state::<DesktopState>() else {
+                return;
+            };
+            if state.quitting() {
+                return;
+            }
+            state.begin_quit();
+            if let Some(lyrics) = handle.get_webview_window(crate::lyrics::LYRICS_WINDOW_LABEL) {
+                let _ = lyrics.close();
             }
         }
         WindowEvent::Resized(_) => {

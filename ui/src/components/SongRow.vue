@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { DEFAULT_ACCENT, SORT_KEYS } from '@/lib/constants';
-import { withAlpha } from '@/lib/format';
+import { formatTime, withAlpha } from '@/lib/format';
 import type { Song } from '@/lib/types';
 import { openCategoryMenu, openSongMenu } from '@/composables/menus';
 import { guardLibraryPlayback } from '@/composables/useScheduler';
@@ -33,6 +33,10 @@ const isPlaying = computed(() => isCurrent.value && state.playing);
 const isFavorite = computed(() => state.favorites.has(props.song.key));
 const canDrag = computed(() => state.sortBy === SORT_KEYS.recommended);
 const indexLabel = computed(() => String(props.index + 1).padStart(2, '0'));
+/** 时长列；缺少元数据时显示占位符，避免布局跳动。 */
+const durationLabel = computed(() =>
+  props.song.durationMs ? formatTime(props.song.durationMs / 1000) : '--:--',
+);
 const styleLabel = computed(() =>
   (category.value?.labelEn || category.value?.nameEn || '').split('/')[0]?.trim() ?? '',
 );
@@ -142,7 +146,8 @@ function onCategoryContextMenu(event: MouseEvent): void {
         </div>
       </div>
     </div>
-    <div class="row-actions">
+    <span class="row-duration" :title="`时长 ${durationLabel}`">{{ durationLabel }}</span>
+    <div class="row-favorite">
       <button
         type="button"
         class="action-icon-btn fav-btn"
@@ -154,6 +159,8 @@ function onCategoryContextMenu(event: MouseEvent): void {
       >
         <Icon name="heart" />
       </button>
+    </div>
+    <div class="row-actions">
       <button
         type="button"
         class="action-icon-btn is-more"

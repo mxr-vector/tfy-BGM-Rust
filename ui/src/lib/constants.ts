@@ -43,13 +43,31 @@ export const COMMANDS = {
   unloadAsrModel: 'unload_asr_model',
   cancelAsrDownload: 'cancel_asr_download',
   transcribeWav: 'transcribe_wav',
+  generateSubtitles: 'generate_subtitles',
+  exportSubtitle: 'export_subtitle',
+  subtitleForTrack: 'subtitle_for_track',
+  listSubtitles: 'list_subtitles',
+  deleteSubtitle: 'delete_subtitle',
+  setDesktopLyricsEnabled: 'set_desktop_lyrics_enabled',
+  syncDesktopLyrics: 'sync_desktop_lyrics',
+  desktopLyricsSnapshot: 'desktop_lyrics_snapshot',
+  keepDesktopLyricsOnTop: 'keep_desktop_lyrics_on_top',
+  resizeDesktopLyrics: 'resize_desktop_lyrics',
+  placeDesktopLyrics: 'place_desktop_lyrics',
+  setDesktopLyricsLock: 'set_desktop_lyrics_lock',
 } as const;
 
-/** Rust 推给前端的事件名；与 `src-tauri/src/api.rs`、`models.rs` 保持一致。 */
+/** Rust 推给前端的事件名；与 `src-tauri/src/api.rs`、`models.rs`、`subtitles.rs`、`lyrics.rs` 保持一致。 */
 export const EVENTS = {
   libraryChanged: 'library-changed',
   apiCommand: 'api-command',
   modelDownload: 'model-download-progress',
+  modelLoadStatus: 'model-load-status',
+  subtitleProgress: 'subtitle-progress',
+  desktopLyricsControl: 'desktop-lyrics-control',
+  desktopLyricsData: 'desktop-lyrics-data',
+  desktopLyricsSize: 'desktop-lyrics-size',
+  desktopLyricsHover: 'desktop-lyrics-hover',
 } as const;
 
 export const PLAY_MODES = {
@@ -90,6 +108,16 @@ export const DEFAULT_WALLPAPER = 'default';
 export const DEFAULT_WALLPAPER_OPACITY = 0.35;
 export const DEFAULT_WALLPAPER_BLUR = 0;
 export const DEFAULT_WALLPAPER_FIT = 'cover' as const;
+
+/**
+ * 桌面歌词窗口与文字的可自定义尺寸（逻辑像素）。
+ * 与 `src-tauri/src/lyrics.rs` 的 `LYRICS_*` 常量保持一致，Rust 侧还会再做一次钳制。
+ */
+export const LYRICS_SIZE_LIMITS = {
+  width: { min: 420, max: 1600, default: 760 },
+  height: { min: 120, max: 900, default: 120 },
+  fontSize: { min: 12, max: 64, default: 24 },
+} as const;
 
 /** 内置字体栈，与 main.css 的 `--font-sans` 保持一致；字体选择为「系统默认」时使用。 */
 export const DEFAULT_FONT_STACK =
