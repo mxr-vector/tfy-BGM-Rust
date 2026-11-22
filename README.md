@@ -7,8 +7,8 @@
 切歌可交叉淡入淡出，同一路音乐可同时送到多个输出设备并独立调音量。
 
 字幕工作流先分离人声与伴奏，再仅对分离后的人声轨调用 ASR，产出可编辑的 **SRT / LRC**，
-并以透明置顶窗口逐词显示桌面歌词。另提供本机 HTTP 接口（`127.0.0.1:8737`，17 个接口），
-供 OBS、Stream Deck、直播脚本等外部项目接入控制。
+并以透明置顶窗口逐词显示桌面歌词。另提供本机 HTTP 接口（`127.0.0.1:8737`，9 类 33 个接口，
+含长任务 SSE），供 OBS、Stream Deck、直播脚本等外部项目接入控制。
 
 > 音频素材始终外置在 `bgm/`，不进入可执行文件；人声分离模型随安装包分发（绿色版需自行放置 `models/`）。
 
@@ -49,7 +49,7 @@
 
 ### 基本系统配置
 
-![基本系统配置 · 第三方接入：token、17 个开放接口清单与跨域策略](assets/system.png)
+![基本系统配置 · 第三方接入：token、开放接口清单与跨域策略](assets/system.png)
 
 | 分组 | 配置项 |
 | :--- | :--- |
@@ -90,7 +90,7 @@
 | **实时监听** | `notify` 递归监听 + 700ms 防抖 + 30 秒兜底；标签与时长按「路径 + 大小 + 修改时间」缓存 |
 | **系统集成** | 系统字体扫描、开机自启、托盘、Windows SMTC / 空间音效 / 音频增强、Linux MPRIS2、GPU 加速 |
 | **界面壁纸** | 内置渐变、静态图与 MP4 动态壁纸；支持本地 jpg / png / webp / mp4 |
-| **本机接口** | 17 个 HTTP 接口 + SSE 事件流；Bearer token；CORS 三档策略 |
+| **本机接口** | 9 类共 33 个 HTTP 接口（播放 / 曲库 / 字幕 / 人声分离 / 模型 / 长任务等）+ 标准 SSE 事件流；Bearer token；CORS 三档策略 |
 
 ### 字幕生成流程
 
@@ -278,8 +278,10 @@ Spleeter 的首次解压产物放在应用**数据**目录的 `separation-models
 { "ok": false, "error": "说明" }
 ```
 
-失败按语义返回状态码：`400` 参数错误、`401` token 缺失或错误、`403` 来源不被允许、`404` 曲目或命令不存在、
-`409` 与节目单冲突或输出路数已满、`503` 界面未就绪、`504` 界面执行超时。
+失败按语义返回状态码：`400` 参数错误、`401` token 缺失或错误、`403` 来源不被允许、
+`404` 曲目 / 模型 / 任务不存在、`409` 与节目单冲突、输出路数已满、同任务重复提交或该曲目正在生成 /
+分离、`500` 存储或内部错误、`503` 界面未就绪、`504` 界面执行超时。
+长任务提交成功返回 `202 Accepted`（`Location: /v1/tasks/{id}`），`data.task` 是任务快照。
 
 `api.token` 非空时，除 `/v1/health` 外的请求都需带 `Authorization: Bearer <token>`（SSE 也可用 `?token=`）。
 浏览器来源默认只信任本机（`tauri://localhost` 与 `localhost` / `127.0.0.1` / `[::1]`），非本机网页默认收到 `403`；
@@ -287,24 +289,79 @@ Spleeter 的首次解压产物放在应用**数据**目录的 `separation-models
 
 ### 接口一览
 
-按方法计共 17 个；下表按动作归并。
+按业务分为 **9 类、共 33 个方法 / 路径组合**；「第三方接入」界面按同一份清单分组展示。
+
+**系统与状态**
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/v1/health` | 服务状态、版本、是否就绪（无需鉴权） |
 | GET | `/v1/state` | 播放状态快照（曲目、进度、音量、淡入淡出、输出路由、队列） |
-| GET | `/v1/library` | 曲库根目录、分类与曲目列表，曲目额外带 `format` |
-| POST | `/v1/library/rescan` | 重新扫描曲库 |
+| GET | `/v1/events` | 全局 SSE 事件流：`state` / `task` / `resync`，标准 `id` / `event` / `data`；`?legacy=1` 退回无 `event` 的旧帧 |
+
+**播放控制**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
 | POST | `/v1/play` | 播放指定曲目，body `{ "key": "cheerful/xxx", "queue": [...] }`，`queue` 可省略 |
 | POST | `/v1/pause` / `/v1/resume` / `/v1/toggle` | 暂停 / 继续 / 切换播放 |
 | POST | `/v1/next` / `/v1/previous` | 下一首 / 上一首 |
 | POST | `/v1/seek` | 跳转，body `{ "seconds": 42.5 }` |
 | POST | `/v1/volume` | 主音量，body `{ "volume": 0.8 }`（0–1） |
 | POST | `/v1/crossfade` | 淡入淡出时长，body `{ "seconds": 2 }`（0–12，0 为硬切） |
+
+**曲库 / 音频输出**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/library` | 曲库根目录、分类与曲目列表，曲目额外带 `format` |
+| POST | `/v1/library/rescan` | 重新扫描曲库 |
 | GET | `/v1/outputs` | 输出设备、已启用路由与每路音量 / 静音 |
 | POST | `/v1/outputs` | 更新一路输出：`{ "deviceId": "...", "enabled": true, "volume": 0.5 }` |
-| GET | `/v1/events` | SSE 事件流，每秒推送 `state`，播放 / 切歌时立即推送 |
-| POST | `/v1/command/{action}` | 通用入口，body `{ "params": {} }`；`action` 为上表去掉 `/v1/` 的名称 |
+
+**字幕**
+
+字幕记录以曲目 key（`分类/曲名`）索引。key 含 `/` 与中文，统一放在查询参数 `?key=` 里，避免路径转义。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/subtitles` | 记录列表：`?q=` 检索、`limit` / `offset` 分页；默认仅元信息，`include=content` 才带 SRT / LRC / 分段 |
+| GET | `/v1/subtitles/track` | `?key=` 读取单条记录（分段、SRT、LRC 与交付路径） |
+| PUT | `/v1/subtitles/track` | `?key=`，body `{ "segments": [{ "start": 1.2, "end": 3.4, "text": "…" }] }` |
+| PUT | `/v1/subtitles/text` | `?key=&format=srt\|lrc`，body `{ "text": "…" }`，按原文解析后写回 |
+| DELETE | `/v1/subtitles/track` | `?key=` 删除记录，并清理人声 / 伴奏与临时文件 |
+| GET | `/v1/subtitles/export` | `?key=&format=srt\|lrc`，以附件形式返回文件内容 |
+| POST | `/v1/subtitles/generate` | 提交生成任务，body `{ "key": …, "separationModel": …, "separationTarget": "vocals\|instrumental" }` |
+
+**人声分离**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/separation/models` | 可选人声模型与固定伴奏模型（UVR-MDX-NET-Inst_HQ_3）的可用性 |
+| GET | `/v1/separation/result` | `?key=` 读取 `separation.json`，附人声 / 伴奏文件的存在性与大小 |
+| POST | `/v1/separation` | 提交分离任务，body `{ "key": …, "model": …, "target": "vocals\|instrumental" }` |
+
+**模型**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/models` | 扫描模型目录，返回可加载模型、已加载模型与最近一次加载状态 |
+| POST | `/v1/models/load` | 提交加载任务，body `{ "id": "模型 id" }` |
+| POST | `/v1/models/unload` | 释放已加载的 ASR 模型 |
+
+**长任务**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/v1/tasks` | `?kind=subtitles\|separation\|asrLoad&status=queued\|running\|succeeded\|failed&limit=50` |
+| GET | `/v1/tasks/{id}` | 任务状态、阶段、进度与结果（完成后 `result` 含完整交付物） |
+| GET | `/v1/tasks/{id}/events` | 逐任务 SSE 进度流，见下节 |
+
+**通用**
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/v1/command/{action}` | body `{ "params": {} }`；`action` 为上表路径去掉 `/v1/` 的名称 |
 
 ### 示例
 
@@ -316,7 +373,7 @@ curl -s $BASE/library | jq '.data.songs[0]'
 curl -s -X POST $BASE/play -H 'Content-Type: application/json' \
   -d '{"key":"cheerful/buttercup"}'
 curl -s -X POST $BASE/volume -H 'Content-Type: application/json' -d '{"volume":0.6}'
-curl -s -N $BASE/events        # 持续接收状态事件
+curl -s -N $BASE/events        # 持续接收 state / task 事件
 ```
 
 ```js
@@ -329,11 +386,66 @@ await fetch(`${base}/play`, {
   body: JSON.stringify({ key: data.songs[0].key }),
 });
 
-new EventSource(`${base}/events`).onmessage = (event) => {
-  const { type, state } = JSON.parse(event.data);
-  if (type === 'state') console.log(state.track?.title, state.position);
-};
+// 具名事件要用 addEventListener；onmessage 只接收没有 event 字段的消息
+const source = new EventSource(`${base}/events`);
+source.addEventListener('state', (event) => {
+  const { state } = JSON.parse(event.data);
+  console.log(state.track?.title, state.position, `#${event.lastEventId}`);
+});
 ```
+
+### 长任务与 SSE
+
+字幕生成、人声分离与 ASR 模型加载都进入**串行队列**：同一时刻只跑一个，避免 ASR 推理与分离子进程
+争抢 CPU / 内存。提交立即返回 `202`（`Location: /v1/tasks/{id}`）与任务快照；
+同一类型 + 同一曲目未完成时重复提交返回 `409`。队列不落盘，重启后任务列表清空，
+字幕 / 分离的交付物已写入配置目录，模型加载结果只在内存中。
+
+同一曲目在进程内**按 key 互斥**：字幕生成（分离 → 归一化 → ASR → 写盘）与独立人声分离共用交付目录，
+UI 命令与 HTTP 任务抢同一把锁；已被占用时提交直接返回 `409`。
+
+所有 SSE 帧都使用标准字段 `id` / `event` / `data`：
+
+```
+id: 128
+event: progress
+data: {"task":{…},"type":"task"}
+```
+
+- `id`：进程内单调递增。断线重连带 `Last-Event-ID` 请求头（非浏览器客户端可用 `?lastEventId=`），
+  服务端先补发缺口内的事件；历史保留最近 256 条，超出窗口先发 `event: resync`，客户端应重新拉取 `/v1/state`。
+- `event`：全局流为 `state` / `task` / `resync`；逐任务流为 `snapshot` / `progress` / `done` / `failed`。
+  旧脚本可加 `?legacy=1` 恢复无 `event:` 的帧（只推 `state`、忽略 `Last-Event-ID`），继续用 `onmessage`。
+- `data`：JSON 文本。`done` / `failed` 之后逐任务流关闭，客户端应主动 `close()`，避免 EventSource 自动重连。
+
+```bash
+# 1. 提交任务：返回 202，data.task.id 即任务 id
+curl -s -X POST $BASE/subtitles/generate -H 'Content-Type: application/json' \
+  -d '{"key":"cheerful/上春山","separationModel":"spleeter-2stems-int8"}'
+
+# 2. 订阅该任务的进度（收到 done / failed 后服务端关闭连接）
+curl -N $BASE/tasks/task-1795358888573-0002/events
+```
+
+```js
+// 逐任务进度：snapshot 是首帧快照，随后是 progress，终态为 done / failed
+const source = new EventSource(`${base}/tasks/${taskId}/events`);
+for (const name of ['snapshot', 'progress']) {
+  source.addEventListener(name, (event) => {
+    const { task } = JSON.parse(event.data);
+    console.log(name, task.stage, `${task.current}/${task.total}`, task.message);
+  });
+}
+source.addEventListener('done', (event) => {
+  console.log('结果', JSON.parse(event.data).task.result);
+  source.close();
+});
+source.addEventListener('failed', (event) => {
+  console.error('失败', JSON.parse(event.data).task.error);
+  source.close();
+});
+```
+
 
 多设备：先 `POST /v1/command/outputs.unlock` 解锁完整设备列表（等价于面板「读取设备列表」，不录音），
 再 `GET /v1/outputs` 取 `deviceId`，用 `POST /v1/outputs` 打开某一路并单独设音量。
@@ -554,7 +666,8 @@ cargo check --workspace                # 需要 WebKitGTK 等系统依赖
 - **分类校验**：新增 / 编辑分类时名称与目录名必须是单个普通路径分量，主题色必须为 `#RRGGBB`；同名分类与重复目录名会被拒绝。
 - **最小权限**：`capabilities/default.json` 仅启用 `core:default` 与无边框窗口所需的拖拽 / 最小化 / 最大化 / 关闭；原生对话框与「打开目录」全部在 Rust 侧调用插件，不向 WebView 暴露插件权限。
 - **资源授权**：Asset Protocol 仅授权当前曲库根目录（递归），可播放路径限定在扫描结果内。
-- **开放接口**：只绑定 `127.0.0.1`；token 非空时除健康检查外的请求（含 SSE）都需 Bearer token；可执行动作由前端白名单限定，接口不能读写任意文件或修改曲库目录。
+- **开放接口**：只绑定 `127.0.0.1`；token 非空时除健康检查外的请求（含 SSE）都需 Bearer token；可执行动作由前端白名单限定，
+  字幕 / 分离 / 模型类接口只访问固定路径（曲库快照、字幕记录、分离交付物与模型目录），不能读写任意文件或修改曲库目录。
 - **导出与删除**：导出目标由系统保存对话框确定，复制后校验字节数，ffmpeg 以参数数组启动、不经过 shell；删除为软删除，移至 `<曲库根>/.tfy-trash/<批次>/`，扫描器忽略该隐藏目录。
 - **CSP**：默认仅允许本地脚本 / 样式，`media-src` 允许 `asset:` 与 `http://asset.localhost`，不加载远程脚本、字体或图片。
 

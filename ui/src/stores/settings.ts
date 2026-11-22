@@ -14,7 +14,14 @@ import { fontStack } from '@/lib/fonts';
 import { normalizeError } from '@/lib/format';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
-import type { ApiEndpoint, ApiStatus, CorsConfig, Prefs } from '@/lib/types';
+import type {
+  ApiCatalog,
+  ApiCategory,
+  ApiEndpoint,
+  ApiStatus,
+  CorsConfig,
+  Prefs,
+} from '@/lib/types';
 import { apiStatus } from './api';
 import { persistPrefs } from './prefs';
 import { state } from './state';
@@ -24,9 +31,38 @@ export type SettingsTab = 'general' | 'playback' | 'models' | 'integrations';
 export const settingsOpen = ref(false);
 export const settingsTab = ref<SettingsTab>('general');
 
-/** 接口清单由 Rust 提供，读取一次后缓存。 */
-export const apiEndpoints = ref<ApiEndpoint[]>([]);
+/** 接口目录由 Rust 提供，读取一次后缓存。 */
+export const apiCatalog = ref<ApiCatalog>({ categories: [], endpoints: [] });
 let endpointsLoading = false;
+
+/** 全部接口（扁平列表），供计数与兼容旧引用。 */
+export const apiEndpoints = computed<ApiEndpoint[]>(() => apiCatalog.value.endpoints);
+
+/** 按业务分类分组后的接口列表；空分类不展示。 */
+export interface ApiEndpointGroup extends ApiCategory {
+  endpoints: ApiEndpoint[];
+}
+
+export const apiEndpointGroups = computed<ApiEndpointGroup[]>(() => {
+  const groups: ApiEndpointGroup[] = apiCatalog.value.categories.map((category) => ({
+    ...category,
+    endpoints: apiCatalog.value.endpoints.filter((endpoint) => endpoint.category === category.id),
+  }));
+  // 未声明的分类归入「其它」，避免后端新增接口时界面漏显示。
+  const known = new Set(groups.map((group) => group.id));
+  const orphans = apiCatalog.value.endpoints.filter(
+    (endpoint) => !known.has(endpoint.category),
+  );
+  if (orphans.length > 0) {
+    groups.push({
+      id: 'other',
+      label: '其它',
+      description: '未归类的接口',
+      endpoints: orphans,
+    });
+  }
+  return groups.filter((group) => group.endpoints.length > 0);
+});
 
 export const isWindows = computed(() => state.platform === 'windows');
 export const isLinux = computed(() => state.platform === 'linux');
@@ -174,10 +210,15 @@ export function setPreventSleep(enabled: boolean): void {
 // ---------------- 第三方接入 ----------------
 
 export async function loadApiEndpoints(): Promise<void> {
-  if (apiEndpoints.value.length > 0 || endpointsLoading) return;
+  if (apiCatalog.value.endpoints.length > 0 || endpointsLoading) return;
   endpointsLoading = true;
   try {
-    apiEndpoints.value = await invoke<ApiEndpoint[]>(COMMANDS.apiEndpoints);
+    const catalog = await invoke<ApiCatalog>(COMMANDS.apiEndpoints);
+    // 前后端版本错位（旧后端返回数组）时降级为空清单，避免设置面板整体报错。
+    apiCatalog.value = {
+      categories: Array.isArray(catalog?.categories) ? catalog.categories : [],
+      endpoints: Array.isArray(catalog?.endpoints) ? catalog.endpoints : [],
+    };
   } catch (error) {
     toast(`读取开放接口清单失败：${normalizeError(error)}`, 'error');
   } finally {

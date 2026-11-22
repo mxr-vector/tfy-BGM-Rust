@@ -7017,7 +7017,49 @@ input[type="checkbox"]:indeterminate::after {
 .settings-endpoints {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
+}
+
+.settings-endpoint-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settings-endpoint-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+.settings-endpoint-group-head h5 {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+}
+
+.settings-endpoint-group-count {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  line-height: 15px;
+  color: var(--text-3);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.settings-endpoint-group-head p {
+  margin: 0 0 0 auto;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-endpoint {
@@ -7048,6 +7090,16 @@ input[type="checkbox"]:indeterminate::after {
 .settings-method.is-post {
   color: #8fc6ff;
   background: rgba(96, 165, 250, 0.16);
+}
+
+.settings-method.is-put {
+  color: #f7d488;
+  background: rgba(245, 197, 66, 0.16);
+}
+
+.settings-method.is-delete {
+  color: #ff9c9c;
+  background: rgba(248, 113, 113, 0.16);
 }
 
 .settings-endpoint-path {

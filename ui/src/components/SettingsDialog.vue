@@ -54,6 +54,7 @@ import {
   toggleOutputMute,
 } from '@/stores/outputs';
 import {
+  apiEndpointGroups,
   apiEndpoints,
   closeSettings,
   crossfadeEnabled,
@@ -944,23 +945,39 @@ watch(settingsOpen, async (open) => {
               <div class="settings-subgroup">
                 <div class="settings-subgroup-head">
                   <h4>当前开放接口</h4>
-                  <span class="settings-muted">共 {{ apiEndpoints.length }} 个</span>
+                  <span class="settings-muted">
+                    共 {{ apiEndpoints.length }} 个 · {{ apiEndpointGroups.length }} 类
+                  </span>
                 </div>
                 <div class="settings-endpoints">
-                  <article
-                    v-for="endpoint in apiEndpoints"
-                    :key="`${endpoint.method} ${endpoint.path}`"
-                    class="settings-endpoint"
+                  <section
+                    v-for="group in apiEndpointGroups"
+                    :key="group.id"
+                    class="settings-endpoint-group"
                   >
-                    <div class="settings-endpoint-head">
-                      <span class="settings-method" :class="`is-${endpoint.method.toLowerCase()}`">
-                        {{ endpoint.method }}
-                      </span>
-                      <code class="settings-endpoint-path">{{ endpoint.path }}</code>
-                      <span class="settings-endpoint-summary">{{ endpoint.summary }}</span>
+                    <div class="settings-endpoint-group-head">
+                      <h5>{{ group.label }}</h5>
+                      <span class="settings-endpoint-group-count">{{ group.endpoints.length }}</span>
+                      <p>{{ group.description }}</p>
                     </div>
-                    <p class="settings-endpoint-desc">{{ endpoint.description }}</p>
-                  </article>
+                    <article
+                      v-for="endpoint in group.endpoints"
+                      :key="`${endpoint.method} ${endpoint.path}`"
+                      class="settings-endpoint"
+                    >
+                      <div class="settings-endpoint-head">
+                        <span
+                          class="settings-method"
+                          :class="`is-${endpoint.method.toLowerCase()}`"
+                        >
+                          {{ endpoint.method }}
+                        </span>
+                        <code class="settings-endpoint-path">{{ endpoint.path }}</code>
+                        <span class="settings-endpoint-summary">{{ endpoint.summary }}</span>
+                      </div>
+                      <p class="settings-endpoint-desc">{{ endpoint.description }}</p>
+                    </article>
+                  </section>
                   <p v-if="apiEndpoints.length === 0" class="settings-hint">正在读取接口清单…</p>
                 </div>
               </div>

@@ -2,7 +2,8 @@
 //!
 //! 数据流（顺序固定，不允许跳过或合并）：
 //! 1. 用户在生成前确认人声分离模型；未确认时直接拒绝；
-//! 2. `separation::separate` 把原始音频分离为本地 `vocals.wav` 与伴奏文件，
+//! 2. 先占用曲目 key 锁（与 UI / HTTP 的其他生成链路互斥），再由
+//!    `separation::separate_locked` 把原始音频分离为本地 `vocals.wav` 与伴奏文件，
 //!    并在返回前校验两个文件存在且非空；失败即终止；
 //! 3. 只对人声 WAV 用 ffmpeg 归一化为 16 kHz 单声道 PCM（sherpa-onnx 的
 //!    `Wave::read` 只接受单声道 WAV）；绝不读取原始混合音频或伴奏轨做识别；
@@ -137,24 +138,25 @@ pub struct SubtitleExportResult {
     pub format: String,
 }
 
+/// 推送一次进度给调用方；是否同时发界面事件由调用方决定。
+///
+/// `generate`（界面发起）在回调里发 `subtitle-progress`；HTTP 任务队列只更新任务快照，
+/// 不向界面广播，避免字幕页把后台任务的进度显示在当前曲目下。
 fn emit_progress(
-    app: &AppHandle,
+    sink: &mut dyn FnMut(&SubtitleProgress),
     stage: SubtitleStage,
     message: impl Into<String>,
     current: usize,
     total: usize,
     error: Option<String>,
 ) {
-    let _ = app.emit(
-        SUBTITLE_PROGRESS_EVENT,
-        SubtitleProgress {
-            stage,
-            message: message.into(),
-            current,
-            total,
-            error,
-        },
-    );
+    sink(&SubtitleProgress {
+        stage,
+        message: message.into(),
+        current,
+        total,
+        error,
+    });
 }
 
 fn subtitle_dir(app: &AppHandle) -> Result<PathBuf> {
@@ -239,6 +241,9 @@ pub fn list_stored(app: &AppHandle) -> Vec<StoredSubtitle> {
 /// 删除某曲目的字幕记录，同时清理可能残留的临时文件与归一化 WAV。
 /// 返回是否真的删除了字幕 JSON；文件本来就不存在时返回 `false`。
 pub fn delete_stored(app: &AppHandle, key: &str) -> Result<bool> {
+    // 生成中删除会把正在写入的交付目录一起清掉，先抢 key 锁。
+    let _guard = crate::key_lock::try_claim(key)
+        .ok_or_else(|| anyhow!("{}", crate::key_lock::BUSY_MESSAGE))?;
     let path = stored_path(app, key)?;
     let mut removed = false;
     match fs::remove_file(&path) {
@@ -508,6 +513,39 @@ pub fn generate(
     separation_target: Option<&str>,
     models_root: &Path,
 ) -> Result<SubtitleResult> {
+    generate_with_progress(
+        app,
+        runtime,
+        song,
+        separation_model,
+        separation_target,
+        models_root,
+        |progress| {
+            let _ = app.emit(SUBTITLE_PROGRESS_EVENT, progress);
+        },
+    )
+}
+
+/// 同 [`generate`]，但把每次进度交给 `on_progress`，不直接发界面事件。
+///
+/// 界面事件由 [`generate`] 在回调里发送；HTTP 任务队列（[`crate::tasks`]）只更新任务快照，
+/// 避免字幕页把后台任务的进度显示成当前曲目。
+pub fn generate_with_progress<F>(
+    app: &AppHandle,
+    runtime: &ModelRuntime,
+    song: &Song,
+    separation_model: &str,
+    separation_target: Option<&str>,
+    models_root: &Path,
+    mut on_progress: F,
+) -> Result<SubtitleResult>
+where
+    F: FnMut(&SubtitleProgress),
+{
+    // 整条链路（分离 → 归一化 → ASR → 写 SRT / LRC）都写同一个交付目录，
+    // 因此 key 锁要覆盖全程；与 HTTP 任务、UI 命令共用同一把锁。
+    let _key_guard = crate::key_lock::claim(&song.key)?;
+    let mut sink = |progress: &SubtitleProgress| on_progress(progress);
     let source = PathBuf::from(&song.path);
     if !source.is_file() {
         bail!("音频文件不存在：{}", source.display());
@@ -527,15 +565,20 @@ pub fn generate(
     }
 
     emit_progress(
-        app,
+        &mut sink,
         SubtitleStage::Separating,
         "正在分离人声与伴奏（模型并行运行）…",
         0,
         0,
         None,
     );
-    let separation =
-        crate::separation::separate(app, song, separation_model, models_root, separation_target)?;
+    let separation = crate::separation::separate_locked(
+        app,
+        song,
+        separation_model,
+        models_root,
+        separation_target,
+    )?;
     // 交付物必须真实落盘；这里再次校验，避免任何降级路径进入识别阶段。
     for path in [&separation.vocals_path, &separation.accompaniment_path] {
         let path = Path::new(path);
@@ -546,7 +589,7 @@ pub fn generate(
     }
 
     emit_progress(
-        app,
+        &mut sink,
         SubtitleStage::Normalizing,
         "正在归一化分离后的人声轨…",
         0,
@@ -556,20 +599,19 @@ pub fn generate(
     let normalized = normalize_to_wav(app, Path::new(&separation.vocals_path), &song.key)?;
 
     emit_progress(
-        app,
+        &mut sink,
         SubtitleStage::Transcribing,
         "正在识别分离后的人声轨…",
         0,
         0,
         None,
     );
-    let progress_app = app.clone();
     let transcribed = runtime.transcribe_segments(
         &normalized,
         crate::models::SEGMENT_TARGET_SECS,
         &mut |current, total| {
             emit_progress(
-                &progress_app,
+                &mut sink,
                 SubtitleStage::Transcribing,
                 format!("正在识别第 {current}/{total} 段…"),
                 current,
@@ -606,7 +648,7 @@ pub fn generate(
     let duration = segments.last().map(|segment| segment.end).unwrap_or(0.0);
 
     emit_progress(
-        app,
+        &mut sink,
         SubtitleStage::Done,
         format!("字幕生成完成，共 {} 条", segments.len()),
         segments.len(),
@@ -632,13 +674,16 @@ pub fn generate(
 
 /// 生成失败时把原因推给前端，便于进度区直接展示。
 pub fn emit_failure(app: &AppHandle, error: &anyhow::Error) {
-    emit_progress(
-        app,
-        SubtitleStage::Error,
-        "字幕生成失败",
-        0,
-        0,
-        Some(format!("{error:#}")),
+    // 失败事件只服务界面；HTTP 任务队列的失败由 `generate_with_progress` 的返回值处理。
+    let _ = app.emit(
+        SUBTITLE_PROGRESS_EVENT,
+        SubtitleProgress {
+            stage: SubtitleStage::Error,
+            message: "字幕生成失败".to_owned(),
+            current: 0,
+            total: 0,
+            error: Some(format!("{error:#}")),
+        },
     );
 }
 
@@ -749,6 +794,9 @@ pub fn update_stored(
     key: &str,
     segments: Vec<SubtitleSegment>,
 ) -> Result<StoredSubtitle> {
+    // 与生成链路共用 key 锁：后台任务写入期间不接受编辑，避免互相覆盖。
+    let _guard = crate::key_lock::try_claim(key)
+        .ok_or_else(|| anyhow!("{}", crate::key_lock::BUSY_MESSAGE))?;
     let segments = normalize_segments(segments)?;
     let path = stored_path(app, key)?;
     let text = fs::read_to_string(&path).map_err(|error| {

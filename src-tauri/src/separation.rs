@@ -1084,6 +1084,23 @@ pub fn dir_for(app: &AppHandle, key: &str) -> Result<PathBuf> {
         .join(subtitle_stem(key)))
 }
 
+/// 读取某曲目的分离记录（`separation.json`）；未执行过分离时返回 `None`。
+///
+/// 只读交付目录下的固定文件，不创建任何目录，供开放接口查询已有结果。
+pub fn load_record(app: &AppHandle, key: &str) -> Result<Option<serde_json::Value>> {
+    let path = dir_for(app, key)?.join("separation.json");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("无法读取分离记录：{}", path.display()));
+        }
+    };
+    let value =
+        serde_json::from_str(&text).with_context(|| format!("分离记录损坏：{}", path.display()))?;
+    Ok(Some(value))
+}
+
 /// 曲目 key 变化时迁移分离目录；返回是否真的移动了目录。
 pub fn migrate(app: &AppHandle, from: &str, to: &str) -> Result<bool> {
     if from == to {
@@ -1192,10 +1209,28 @@ fn write_wav16_slices(path: &Path, channels: &[&[f32]], sample_rate: u32) -> Res
 
 /// 对当前曲目执行完整分离并保存人声 / 伴奏文件。
 ///
+/// 同一曲目同时只允许一条生成 / 分离链路：UI 的「生成字幕」与 HTTP 任务队列
+/// 都会写同一个交付目录，并发会互相覆盖 `.part` 与正式文件，因此这里按 key 互斥。
+pub fn separate(
+    app: &AppHandle,
+    song: &Song,
+    model_id: &str,
+    models_root: &Path,
+    target_override: Option<&str>,
+) -> Result<SeparationInfo> {
+    let _guard = crate::key_lock::claim(&song.key)?;
+    separate_locked(app, song, model_id, models_root, target_override)
+}
+
+/// [`separate`] 的实际实现；调用方必须已持有该曲目的 key 锁。
+///
+/// 字幕链路会先占用 key（覆盖分离后的归一化、ASR 与字幕写盘），再调用这里，
+/// 避免嵌套占用同一个 key。
+///
 /// 引擎调用在独立子进程中执行：sherpa-onnx 对不兼容模型会直接 `_Exit(-1)`，
 /// 隔离后最坏情况只是 worker 退出，主进程仍能给出可读错误。
 /// 返回前会校验两个文件确实存在且非空；任一环节失败都返回错误。
-pub fn separate(
+pub(crate) fn separate_locked(
     app: &AppHandle,
     song: &Song,
     model_id: &str,

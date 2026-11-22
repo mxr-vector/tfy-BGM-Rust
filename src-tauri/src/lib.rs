@@ -1,7 +1,9 @@
 mod api;
 mod commands;
 mod desktop;
+mod event_bus;
 mod fonts;
+mod key_lock;
 mod library_root;
 mod library_watch;
 mod lyrics;
@@ -10,6 +12,7 @@ mod separation;
 mod settings;
 mod state;
 mod subtitles;
+mod tasks;
 mod wallpapers;
 
 use api::ApiBridge;

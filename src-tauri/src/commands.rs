@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::api::{ApiBridge, ApiEndpoint, ApiStatus, CommandFailure};
+use crate::api::{ApiBridge, ApiCatalog, ApiStatus, CommandFailure};
 use crate::desktop::{self, DesktopState};
 use crate::fonts;
 use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, LyricsState};
@@ -68,10 +68,10 @@ pub fn api_info(bridge: State<'_, ApiBridge>) -> ApiStatus {
     bridge.status()
 }
 
-/// 「第三方接入」展示的开放接口清单。
+/// 「第三方接入」展示的开放接口清单：分类顺序 + 全部接口。
 #[tauri::command]
-pub fn api_endpoints() -> Vec<ApiEndpoint> {
-    crate::api::endpoints()
+pub fn api_endpoints() -> ApiCatalog {
+    crate::api::catalog()
 }
 
 /// 保存 token 与跨域策略；立即作用于正在运行的接口服务，并写回 `config.json`。

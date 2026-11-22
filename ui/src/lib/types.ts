@@ -304,12 +304,27 @@ export interface ApiStatus {
   error: string | null;
 }
 
-/** 开放接口清单条目，与 Rust `api::endpoints()` 对应。 */
+/** 开放接口清单条目，与 Rust `api::ApiEndpoint` 对应。 */
 export interface ApiEndpoint {
+  /** 所属业务分类 id，见 `ApiCategory.id`。 */
+  category: string;
   method: string;
   path: string;
   summary: string;
   description: string;
+}
+
+/** 接口的业务分类；顺序即界面展示顺序。 */
+export interface ApiCategory {
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** 接口目录：分类 + 全部接口，与 Rust `api::ApiCatalog` 对应。 */
+export interface ApiCatalog {
+  categories: ApiCategory[];
+  endpoints: ApiEndpoint[];
 }
 
 /** 扫描到的一个 ASR 模型；同一目录内的 `.onnx` 归为一条。 */

@@ -3,7 +3,7 @@
 > **用途**：作为 `bgm-gpui`（纯 Rust + GPUI）分支逐项对齐功能的**唯一功能事实来源**。**基准是当前分支 `bgm-tauri2`：gpui 只做对齐，不缩减功能、不改数据契约、不改对外接口**（详见 §0.0）。
 > **代码基线**：`bgm-tauri2` @ `e59ee18`（2026-11-22，`feat(separation): 双引擎并行分离，伴奏固定使用 UVR 乐器模型`）。
 > **对照分支**：`origin/bgm-gpui` @ `59175f0`（2026-11-20，`feat: 以 GPUI 实现重建 bgm-gpui 分支`）。
-> **核对方式**：逐文件阅读 `src-tauri/core/src`（14 个模块）、`src-tauri/src`（13 个业务模块 / 15 个 .rs）、`ui/src`（17 个 store、6 个 composable、14 个 lib、31 个组件），并结合 `cargo` 单元测试与 `origin/bgm-gpui` 的文件清单与源码比对。本文所有「规则」均来自**代码**，不是从界面反推；无法从代码确认的内容明确标注【待确认】。
+> **核对方式**：逐文件阅读 `src-tauri/core/src`（14 个模块）、`src-tauri/src`（15 个业务模块 / 17 个 .rs）、`ui/src`（17 个 store、6 个 composable、14 个 lib、31 个组件），并结合 `cargo` 单元测试与 `origin/bgm-gpui` 的文件清单与源码比对。本文所有「规则」均来自**代码**，不是从界面反推；无法从代码确认的内容明确标注【待确认】。
 > **本版性质**：**重构版**，替换旧版同名文档。旧版中与代码不一致的表述已在 §9 逐条列出并修正，请勿再引用旧版数字。
 
 ---
@@ -18,7 +18,7 @@
 | :--- | :--- | :--- |
 | 1 | **功能范围不缩减** | 本文 §1 的 18 个功能域，gpui 需全部具备；不得以「平台限制」为由长期缺失，只能有「能力缺失时降级 + 界面明示」这一种处理方式，且降级分支必须与主线一致 |
 | 2 | **数据契约不改写** | 5 个配置文件的字段名、类型、默认值、收敛规则、稳定 key 语义、`KeyChange` 迁移契约，一律以 §4 / §5.2 为准；gpui 不得新增/删减字段或改变序列化形态 |
-| 3 | **对外契约不变** | 58 个命令的参数与返回、10 个后端事件的名称与载荷（另有 2 个歌词窗口内部事件）、17 个 HTTP 方法+路径、状态码语义、快照字段，一律以附录 A/B/C 为准，外部脚本在两个分支间必须可直接复用 |
+| 3 | **对外契约不变** | 58 个命令的参数与返回、10 个后端事件的名称与载荷（另有 2 个歌词窗口内部事件）、33 个 HTTP 方法+路径、标准 SSE（id/event/data）、状态码语义、快照字段，一律以附录 A/B/C 为准，外部脚本在两个分支间必须可直接复用 |
 | 4 | **历史差异必须消除** | gpui 当前「仅 mp3」「`Prefs` 8 字段」「`LibrarySource` 缺 `External`」「均匀随机」等属于**待消除的落后状态**，不是可保留的分支特性。判定标准见 §6.1 |
 | 5 | **听感与交互结果对齐** | 交叉淡入淡出、A/B 循环、智能随机权重、响度归一化目标、字幕切分与时间轴、歌词逐词推进，均以主线实测行为为准；实现手段可不同，用户可感知**结果**需一致 |
 | 6 | **UI 布局与视觉样式不作要求** | 面板划分、栅格、间距、配色、圆角、阴影、动效、组件形态、图标风格均可自由设计；只要求**功能可达**（每个能力有入口）、**状态可辨**（播放/加载/禁用/错误可区分）、**反馈语义一致**（提示含义、拦截原因、失败原因不弱化）。不得以「样式不同」为由判定未对齐，也不得以「样式对齐」代替功能实现 |
@@ -1516,7 +1516,7 @@ state.ts（单一 reactive 根）
 | F11 | `Prefs` 34 字段、v4 迁移、后端 4 字段权威、280ms 防抖 + 退出前 flush | 整体替换 `core/prefs.rs`；补齐所有 `save` 调用点 | §8.2 F11 |
 | F12 | 7 个合法 id、透明度/模糊/填充、内置缺失隐藏、视频失焦暂停 | 先静态图 + 首帧降级；字段与 id 集合保持一致 | §8.2 F12 |
 | F13 | 字体扫描、自启三平台、托盘联动、关闭行为、GPU/防休眠/媒体控件 | 复用 `fonts.rs`/`desktop.rs` 逻辑；媒体控件与防休眠按平台实现或明示不支持 | §8.2 F13 |
-| F14 | 17 个方法+路径、14 action、401/403/404/409/503/504、快照字段 | 复用 `api.rs`；去掉命令桥，直接调引擎；快照结构提到 `bgm-core` 共用 | §8.2 F14 |
+| F14 | 33 个方法+路径（9 类）、14 action、长任务 SSE、401/403/404/409/503/504、快照字段 | 复用 `api.rs`；去掉命令桥，直接调引擎；快照结构提到 `bgm-core` 共用 | §8.2 F14 |
 | F15 | 9 文件下载、取消清理、四件套校验、加载状态机、启动恢复、分片识别 | 复用 `models.rs`，`AppHandle` 换回调 | §8.2 F15 |
 | F16 | 双引擎分离、worker 子进程、10 分钟串行、`.part` 保护、`separation.json` | 复用 `separation.rs`；随包模型进 gpui 打包 | §8.2 F16 |
 | F17 | 强制分离前置、只识别人声、SRT/LRC 解析与编辑校验、key 迁移、哈希路径 | 复用 `subtitles.rs`；`subtitle_stem` 必须逐字一致 | §8.2 F17 |
@@ -1722,7 +1722,7 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 | 6 | core 缺失行数 | 「缺 246 / 185 / 203 / 124 行」 | 差额应为 **784 / 129 / 147 / 245 行**（旧数字是 gpui 文件自身行数） | 两分支 `git show \| wc -l` |
 | 7 | 功能域数量 | 13 个（+ 附录 D 字幕） | **18 个**（新增 ASR、人声分离、字幕、桌面歌词为正式功能域） | §1 |
 | 8 | 持久化文件 | 5 个 | **5 个配置文件 + 2 个派生目录 + 曲库回收站** | §4 |
-| 9 | HTTP 路由 | 「17 条路由」 | **16 条声明 / 17 个方法+路径组合** | `api.rs::router` |
+| 9 | HTTP 路由 | 「17 条路由」 | **33 个方法+路径组合 / 9 个业务分类**；含字幕、人声分离、模型与长任务队列 | `api.rs::catalog` |
 | 10 | F01 检索范围 | 「曲名、分类目录名、中文名、英文名与英文标签」 | 同上，但**不匹配艺人/专辑**；字幕页检索才匹配艺人/专辑 | `state.ts:104-114`、`subtitles.ts:129-141` |
 | 11 | GPU 加速 | 只写 Windows/Linux 行为 | 补充：**macOS 为空实现** | `desktop.rs:349-353` |
 | 12 | 命令分组表 | 缺少模型 / 字幕 / 歌词三组 | 附录 A 给出 58 个命令的完整分组、参数与返回 | `commands.rs` 全量 |
@@ -1796,7 +1796,7 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 | 47 | `move_tracks` | 曲目 | `keys, category` | `LibraryMutation` | 批量移动 + 迁移 |
 | 48 | `delete_tracks` | 曲目 | `keys` | `LibraryMutation \| null` | 系统确认 + 软删除 + 迁移 |
 | 49 | `api_info` | 开放接口 | — | `ApiStatus` | 纯读 |
-| 50 | `api_endpoints` | 开放接口 | — | `ApiEndpoint[]` | 纯读 |
+| 50 | `api_endpoints` | 开放接口 | — | `ApiCatalog`（`categories[]` + `endpoints[]`） | 纯读 |
 | 51 | `update_api_config` | 开放接口 | `token, cors` | `ApiStatus` | 写 config + 立即生效 |
 | 52 | `api_publish_state` | 开放接口 | `snapshot: Value` | `()` | 缓存 + SSE 广播 |
 | 53 | `api_reply` | 开放接口 | `id, ok, data?, error?, code?` | `()` | 唤醒等待中的 HTTP 请求 |
@@ -1825,27 +1825,66 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 
 ## 附录 C：HTTP 接口
 
-**路由**（16 声明 / 17 组合）
+**路由**（9 个业务分类 / 33 个方法+路径组合；`api::catalog()` 是唯一真源，界面「第三方接入」按 `categories()` 分组展示）
 
 ```
-GET    /v1/health            健康检查（不校验 token）
-GET    /v1/state             播放状态快照
-GET    /v1/library           曲库内容（含 format）
-POST   /v1/library/rescan    重新扫描
-GET    /v1/events            SSE 状态流（支持 ?token=）
-POST   /v1/play              播放（body.key / body.queue）
+系统与状态
+GET    /v1/health                  健康检查（不校验 token）
+GET    /v1/state                   播放状态快照
+GET    /v1/events                  全局 SSE（event = state / task / resync；?legacy=1 无名帧）
+
+播放控制
+POST   /v1/play                    播放（body.key / body.queue）
 POST   /v1/pause
 POST   /v1/resume
 POST   /v1/toggle
 POST   /v1/next
 POST   /v1/previous
-POST   /v1/seek              body.seconds
-POST   /v1/volume            body.volume 0~1
-POST   /v1/crossfade         body.seconds 0~12
-GET    /v1/outputs           设备 + 路由
-POST   /v1/outputs           body.deviceId + enabled/volume/muted
-POST   /v1/command/{action}  body 即 params（或 body.params）
+POST   /v1/seek                    body.seconds
+POST   /v1/volume                  body.volume 0~1
+POST   /v1/crossfade               body.seconds 0~12
+
+曲库 / 音频输出
+GET    /v1/library                 曲库内容（含 format）
+POST   /v1/library/rescan          重新扫描
+GET    /v1/outputs                 设备 + 路由
+POST   /v1/outputs                 body.deviceId + enabled/volume/muted
+
+字幕（key 一律走查询参数 ?key=，避免 分类/曲名 的路径转义）
+GET    /v1/subtitles               记录列表（?q= / limit / offset；默认仅元信息，include=content 带正文）
+GET    /v1/subtitles/track         ?key= 单条记录
+PUT    /v1/subtitles/track         ?key= + body.segments[] 分段更新
+PUT    /v1/subtitles/text          ?key=&format=srt|lrc + body.text 原文更新
+DELETE /v1/subtitles/track         ?key= 删除记录并清理交付物
+GET    /v1/subtitles/export        ?key=&format=srt|lrc，附件下载
+POST   /v1/subtitles/generate      body.key + body.separationModel[+separationTarget]，202 + task
+
+人声分离
+GET    /v1/separation/models       人声模型列表 + 固定伴奏模型可用性
+GET    /v1/separation/result       ?key= 读取 separation.json + 文件存在性/大小
+POST   /v1/separation              body.key + body.model[+target]，202 + task
+
+模型
+GET    /v1/models                  模型清单 + 已加载模型 + 加载状态
+POST   /v1/models/load             body.id，202 + task
+POST   /v1/models/unload           释放模型
+
+长任务
+GET    /v1/tasks                   ?kind=&status=&limit=
+GET    /v1/tasks/{id}              任务详情
+GET    /v1/tasks/{id}/events       逐任务 SSE（snapshot / progress / done / failed）
+
+通用
+POST   /v1/command/{action}        body 即 params（或 body.params）
 ```
+
+**长任务队列**（`tasks.rs`）：字幕生成 / 人声分离 / ASR 加载共用**串行**队列；字幕与分离另按曲目 key 进程内互斥（UI 与 HTTP 共用，避免并发写同一交付目录）；提交返回 `202` 与 `data.task`；
+同 `kind + key` 未完成时重复提交返回 `409`；任务只存内存（最近 50 条），重启清空；暂不支持取消。
+
+**SSE 帧**（`event_bus.rs` + `api.rs`）：所有帧都是标准 `id:` / `event:` / `data:` 三段。
+`id` 进程内单调递增；客户端带 `Last-Event-ID`（或 `?lastEventId=`）时先补发缺口内事件，历史保留 256 条，
+超出窗口先发 `event: resync`（`reason = window | reset`）；`?legacy=1` 退回无 `event:` 的旧帧（只推 `state`）；全局流 `event` 为 `state` / `task` / `resync`，
+逐任务流为 `snapshot` / `progress` / `done` / `failed`，终态后服务端关闭连接。
 
 **通用 action（14）**：`state`、`play`、`pause`、`resume`、`toggle`、`next`、`previous`、`seek`、`volume`、`crossfade`、`outputs.list`、`outputs.refresh`、`outputs.unlock`、`outputs.set`。
 
