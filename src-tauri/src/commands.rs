@@ -663,6 +663,45 @@ pub fn delete_subtitle(app: AppHandle, key: String) -> CommandResult<bool> {
     subtitles::delete_stored(&app, &key).map_err(describe)
 }
 
+/// 保存「分段编辑」结果：校验 / 规范化分段后写回字幕文件，返回最新快照。
+///
+/// 保留原生成时间与曲目元信息，只更新分段、SRT / LRC 文本与 `updated_at_ms`。
+#[tauri::command]
+pub fn update_subtitle(
+    app: AppHandle,
+    key: String,
+    segments: Vec<subtitles::SubtitleSegment>,
+) -> CommandResult<subtitles::StoredSubtitle> {
+    subtitles::update_stored(&app, &key, segments).map_err(describe)
+}
+
+/// 保存「原文编辑」结果：把 SRT / LRC 文本解析为分段后复用 `update_stored`。
+///
+/// LRC 缺少结束时间，末句用时长推导：优先字幕记录里的 `duration_ms`，其次曲库时长
+/// （与前端校验取同一来源），都缺失时才回退到起点后 5 秒。
+#[tauri::command]
+pub fn update_subtitle_text(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+    format: String,
+    text: String,
+) -> CommandResult<subtitles::StoredSubtitle> {
+    let segments = match format.as_str() {
+        "srt" => subtitles::parse_srt(&text),
+        "lrc" => {
+            let duration_ms = subtitles::load_stored(&app, &key)
+                .and_then(|stored| stored.duration_ms)
+                .or_else(|| state.song(&key).and_then(|song| song.duration_ms));
+            let duration_secs = duration_ms.map(|ms| f64::from(ms) / 1000.0);
+            subtitles::parse_lrc(&text, duration_secs)
+        }
+        other => return Err(format!("不支持的字幕格式：{other}（仅支持 srt / lrc）")),
+    }
+    .map_err(describe)?;
+    subtitles::update_stored(&app, &key, segments).map_err(describe)
+}
+
 /// 开启 / 关闭桌面歌词窗口；返回生效后的开关状态。
 ///
 /// 必须是异步命令：`WebviewWindowBuilder::build` 会向主线程事件循环派发创建消息并

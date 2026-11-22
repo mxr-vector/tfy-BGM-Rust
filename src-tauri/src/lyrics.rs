@@ -37,7 +37,8 @@ pub const LYRICS_SETTINGS_LABEL: &str = "desktop-lyrics-settings";
 pub const LYRICS_SETTINGS_EVENT: &str = "desktop-lyrics-settings-state";
 /// 设置悬浮窗的逻辑像素尺寸（内容完整显示，不滚动）；高度需容纳全部控件。
 const LYRICS_SETTINGS_WIDTH: f64 = 380.0;
-const LYRICS_SETTINGS_HEIGHT: f64 = 420.0;
+/// 高度需容纳全部控件（含「已唱标记提前」档位），避免设置窗内出现滚动条。
+const LYRICS_SETTINGS_HEIGHT: f64 = 460.0;
 /// 设置悬浮窗与歌词条之间的间距。
 const LYRICS_SETTINGS_GAP: f64 = 8.0;
 

@@ -9,10 +9,19 @@ import { LYRICS_SIZE_LIMITS } from './constants';
 import type { LyricsStyle } from './types';
 
 export const LYRICS_STYLE_STORAGE_KEY = 'tfy-bgm:desktop-lyrics-style';
-/** 存储结构版本：布局 / 默认配色调整时 +1，旧存储会做一次兼容迁移。 */
+/**
+ * 存储结构版本：布局 / 默认配色调整时 +1，旧存储会做一次兼容迁移。
+ * 新增「带默认值兜底」的字段（如 leadSeconds）不提升版本：sanitize 会自动补齐，
+ * 否则旧存储会走迁移分支，把用户已保存的窗口高度与自定义高亮色一并重置。
+ */
 export const LYRICS_STYLE_VERSION = 4;
 /** 字体下拉里「系统默认」的选项值；样式里用空串表示。 */
 export const LYRICS_FONT_DEFAULT = '__default__';
+
+/** 已唱标记提前量的上限（秒）；sanitize 与设置窗共用，避免两处各写一份范围。 */
+export const LYRICS_LEAD_MAX = 2;
+/** 已唱标记提前量的可选档位（秒）：0 表示严格按原始时间轴渲染。 */
+export const LYRICS_LEAD_OPTIONS = [0, 1, LYRICS_LEAD_MAX] as const;
 
 export const DEFAULT_LYRICS_STYLE: LyricsStyle = {
   fontFamily: '',
@@ -22,6 +31,7 @@ export const DEFAULT_LYRICS_STYLE: LyricsStyle = {
   width: LYRICS_SIZE_LIMITS.width.default,
   height: LYRICS_SIZE_LIMITS.height.default,
   locked: false,
+  leadSeconds: 1,
 };
 
 export const LYRICS_COLOR_PRESETS: readonly { label: string; value: string }[] = [
@@ -75,6 +85,11 @@ export function sanitizeLyricsStyle(input: Partial<LyricsStyle> | null | undefin
       LYRICS_SIZE_LIMITS.height.max,
     ),
     locked: source.locked === true,
+    leadSeconds: clamp(
+      Math.round(finite(source.leadSeconds, DEFAULT_LYRICS_STYLE.leadSeconds)),
+      0,
+      LYRICS_LEAD_MAX,
+    ),
   };
 }
 

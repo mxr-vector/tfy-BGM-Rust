@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
- * 左侧「字幕生成」页面：搜索曲目 → 加入记录列表 → 试听 / 归一化 → ASR → 预览 → 导出。
+ * 左侧「字幕生成」页面：搜索曲目 → 加入记录列表 → 试听 / 归一化 → ASR → 预览 → 编辑 → 导出。
  *
  * 音乐选择区域不加载完整曲库：搜索框仅在输入关键词时给出结果；
- * 真正进入生成流程的曲目都来自「字幕生成记录列表」。
+ * 真正进入生成流程的曲目都来自「字幕生成记录列表」，该列表支持关键词检索
+ * （含字幕正文）与状态筛选。生成结果可分段编辑或直接改 SRT / LRC 原文。
  */
 import { computed } from 'vue';
 import { guardLibraryPlayback } from '@/composables/useScheduler';
@@ -14,31 +15,51 @@ import { loadStatus, modelsInfo } from '@/stores/models';
 import { playSong, togglePlay } from '@/stores/player';
 import { openSettings } from '@/stores/settings';
 import { state } from '@/stores/state';
+import type { SubtitleRecordFilter } from '@/stores/subtitles';
 import {
   addSubtitleRecord,
+  cancelEditing,
+  changePreviewFormat,
   clearSubtitleResult,
   deleteSubtitleRecord,
   deletingSubtitle,
+  draftSegments,
+  draftText,
+  editError,
+  editMode,
+  editValidation,
+  editing,
   error,
   exportSubtitle,
   exportingFormat,
+  filteredRecords,
   generateSubtitles,
   generating,
+  hasEditable,
   hasExportable,
+  insertSegment,
   modelReady,
   previewFormat,
   previewText,
   progress,
+  recordFilter,
+  recordQuery,
+  removeSegment,
   removeSubtitleRecord,
+  restoreDraft,
   result,
   savedSubtitles,
+  saveSubtitleEdit,
+  savingSubtitle,
   searchResults,
   selectSong,
   selectedKey,
   selectedSong,
-  setPreviewFormat,
+  setEditMode,
+  startEditing,
   subtitleQuery,
   subtitleRecords,
+  updateDraftText,
 } from '@/stores/subtitles';
 import Icon from './Icon.vue';
 
@@ -132,6 +153,28 @@ async function removeRecord(song: Song): Promise<void> {
   if (confirmed === null) return;
   await deleteSubtitleRecord(song.key);
 }
+
+/** 记录列表是否处于检索 / 筛选状态，决定计数文案与空状态提示。 */
+const hasRecordFilter = computed(
+  () => recordQuery.value.trim().length > 0 || recordFilter.value !== 'all',
+);
+
+/** `<select>` 的 v-model 产出普通字符串，这里收敛回联合类型。 */
+const recordFilterModel = computed<string>({
+  get: () => recordFilter.value,
+  set: (value) => {
+    recordFilter.value = value as SubtitleRecordFilter;
+  },
+});
+
+/** 编辑器提示：即时校验优先，其次展示后端保存错误 / 模式切换提示。 */
+const editorMessage = computed(() => editValidation.value ?? editError.value);
+const draftCount = computed(() => draftSegments.value.length);
+
+/** 原文编辑输入：交给 store 解析回分段草稿，避免模板里做类型转换。 */
+function onDraftTextInput(event: Event): void {
+  updateDraftText((event.target as HTMLTextAreaElement).value);
+}
 </script>
 
 <template>
@@ -140,7 +183,7 @@ async function removeRecord(song: Song): Promise<void> {
       <div>
         <h2>字幕生成</h2>
         <p>
-          选择音乐库曲目，自动归一化为 WAV 后调用 ASR 生成字幕，可预览并导出 SRT / LRC。
+          选择音乐库曲目，自动归一化为 WAV 后调用 ASR 生成字幕；记录可检索，结果可分段编辑或直接修改 SRT / LRC 原文，再预览与导出。
         </p>
       </div>
       <span class="subtitle-header-badge">
@@ -191,7 +234,7 @@ async function removeRecord(song: Song): Promise<void> {
               :key="song.key"
               type="button"
               class="subtitle-song"
-              :disabled="generating"
+              :disabled="generating || editing"
               :title="`加入字幕生成记录：${song.title}`"
               @click="addSubtitleRecord(song)"
             >
@@ -206,18 +249,58 @@ async function removeRecord(song: Song): Promise<void> {
           </div>
         </div>
 
-        <!-- 字幕生成记录列表 -->
+        <!-- 字幕生成记录列表（支持关键词检索与状态筛选） -->
         <div class="subtitle-panel subtitle-records">
           <div class="subtitle-panel-head">
             <h3>字幕生成记录列表</h3>
-            <span class="subtitle-muted">{{ subtitleRecords.length }} 首</span>
+            <span class="subtitle-muted">
+              {{ hasRecordFilter
+                ? `命中 ${filteredRecords.length} / ${subtitleRecords.length} 首`
+                : `${subtitleRecords.length} 首` }}
+            </span>
           </div>
+
+          <div class="subtitle-record-tools">
+            <label class="subtitle-search is-compact">
+              <Icon name="search" />
+              <input
+                v-model="recordQuery"
+                type="search"
+                placeholder="检索记录：曲名 / 文件名 / 分类 / 字幕内容…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="检索字幕生成记录"
+              />
+              <button
+                v-if="recordQuery"
+                type="button"
+                class="subtitle-search-clear"
+                title="清空检索"
+                @click="recordQuery = ''"
+              >
+                <Icon name="x" />
+              </button>
+            </label>
+            <select
+              v-model="recordFilterModel"
+              class="subtitle-record-filter"
+              aria-label="记录状态筛选"
+            >
+              <option value="all">全部状态</option>
+              <option value="generated">已生成</option>
+              <option value="pending">待生成</option>
+            </select>
+          </div>
+
           <p v-if="subtitleRecords.length === 0" class="subtitle-empty">
             已生成的字幕会自动出现在这里；也可在音乐库中右键曲目或点击「更多」→「字幕生成」加入待生成曲目。
           </p>
+          <p v-else-if="filteredRecords.length === 0" class="subtitle-empty">
+            没有匹配的记录，试试其它关键词或切换状态筛选。可检索曲名、文件名、分类与字幕正文。
+          </p>
           <div v-else class="subtitle-record-list">
             <div
-              v-for="song in subtitleRecords"
+              v-for="song in filteredRecords"
               :key="song.key"
               class="subtitle-record"
               :class="{ 'is-selected': song.key === selectedKey }"
@@ -225,14 +308,17 @@ async function removeRecord(song: Song): Promise<void> {
               <button
                 type="button"
                 class="subtitle-record-main"
-                :disabled="generating"
+                :disabled="generating || editing"
                 :title="`选择 ${song.title}`"
                 @click="selectSong(song.key)"
               >
                 <span class="subtitle-record-title">{{ song.title }}</span>
                 <span class="subtitle-record-meta">
                   <template v-if="storedFor(song.key)">
-                    已有字幕 · {{ storedFor(song.key)!.segments.length }} 句
+                    已有字幕 · {{ storedFor(song.key)!.segments.length }} 句<span
+                      v-if="storedFor(song.key)!.updatedAtMs"
+                      class="subtitle-record-edited"
+                    > · 已编辑</span>
                   </template>
                   <template v-else>
                     {{ extensionOf(song.fileName) }} · {{ durationOf(song) }}
@@ -254,7 +340,7 @@ async function removeRecord(song: Song): Promise<void> {
                 v-if="storedFor(song.key)"
                 type="button"
                 class="subtitle-audition-btn subtitle-record-remove"
-                :disabled="generating || deletingSubtitle === song.key"
+                :disabled="generating || deletingSubtitle === song.key || editing"
                 :title="`删除字幕记录：${song.title}`"
                 :aria-label="`删除 ${song.title} 的字幕记录`"
                 @click="removeRecord(song)"
@@ -265,7 +351,7 @@ async function removeRecord(song: Song): Promise<void> {
                 v-else
                 type="button"
                 class="subtitle-audition-btn subtitle-record-remove"
-                :disabled="generating"
+                :disabled="generating || editing"
                 :title="`从列表移除：${song.title}`"
                 :aria-label="`从字幕生成记录列表移除 ${song.title}`"
                 @click="removeRecord(song)"
@@ -340,7 +426,7 @@ async function removeRecord(song: Song): Promise<void> {
           <button
             type="button"
             class="subtitle-btn is-primary"
-            :disabled="!selectedSong || !selectedInLibrary || !modelReady || generating"
+            :disabled="!selectedSong || !selectedInLibrary || !modelReady || generating || editing"
             @click="generateSubtitles"
           >
             <Icon :name="generating ? 'refresh' : 'sparkles'" />
@@ -349,7 +435,7 @@ async function removeRecord(song: Song): Promise<void> {
           <button
             type="button"
             class="subtitle-btn"
-            :disabled="generating || (!result && !error && !progress)"
+            :disabled="generating || editing || (!result && !error && !progress)"
             @click="clearSubtitleResult"
           >
             清空结果
@@ -396,32 +482,202 @@ async function removeRecord(song: Song): Promise<void> {
           <p v-if="result.note" class="subtitle-result-note">{{ result.note }}</p>
         </div>
 
-        <!-- 预览 -->
-        <div v-if="previewText" class="subtitle-preview">
+        <!-- 结果预览 / 编辑 -->
+        <div v-if="previewText || editing" class="subtitle-preview">
           <div class="subtitle-preview-head">
-            <h4>结果预览</h4>
-            <div class="subtitle-tabs" role="tablist" aria-label="字幕格式">
+            <h4>{{ editing ? '编辑字幕' : '结果预览' }}</h4>
+            <div class="subtitle-preview-tools">
+              <div class="subtitle-tabs" role="tablist" aria-label="字幕格式">
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="previewFormat === 'srt'"
+                  :class="{ 'is-active': previewFormat === 'srt' }"
+                  :disabled="savingSubtitle"
+                  @click="changePreviewFormat('srt')"
+                >
+                  SRT
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="previewFormat === 'lrc'"
+                  :class="{ 'is-active': previewFormat === 'lrc' }"
+                  :disabled="savingSubtitle"
+                  @click="changePreviewFormat('lrc')"
+                >
+                  LRC
+                </button>
+              </div>
               <button
+                v-if="hasEditable && !editing"
                 type="button"
-                role="tab"
-                :aria-selected="previewFormat === 'srt'"
-                :class="{ 'is-active': previewFormat === 'srt' }"
-                @click="setPreviewFormat('srt')"
+                class="subtitle-btn is-ghost is-compact"
+                :disabled="generating || savingSubtitle"
+                title="编辑字幕结果"
+                @click="startEditing"
               >
-                SRT
-              </button>
-              <button
-                type="button"
-                role="tab"
-                :aria-selected="previewFormat === 'lrc'"
-                :class="{ 'is-active': previewFormat === 'lrc' }"
-                @click="setPreviewFormat('lrc')"
-              >
-                LRC
+                <Icon name="edit" /> 编辑
               </button>
             </div>
           </div>
-          <pre class="subtitle-preview-text">{{ previewText }}</pre>
+
+          <!-- 只读预览 -->
+          <pre v-if="!editing" class="subtitle-preview-text">{{ previewText }}</pre>
+
+          <!-- 编辑态：分段编辑 / 原文编辑 -->
+          <div v-else class="subtitle-editor">
+            <div class="subtitle-editor-bar">
+              <div class="subtitle-tabs" role="tablist" aria-label="编辑模式">
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="editMode === 'segments'"
+                  :class="{ 'is-active': editMode === 'segments' }"
+                  :disabled="savingSubtitle"
+                  @click="setEditMode('segments')"
+                >
+                  分段编辑
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  :aria-selected="editMode === 'text'"
+                  :class="{ 'is-active': editMode === 'text' }"
+                  :disabled="savingSubtitle"
+                  @click="setEditMode('text')"
+                >
+                  原文编辑
+                </button>
+              </div>
+              <span class="subtitle-muted">
+                {{ editMode === 'segments'
+                  ? `${draftCount} 条 · 时间单位：秒`
+                  : `${previewFormat.toUpperCase()} 原文` }}
+              </span>
+            </div>
+
+            <p class="subtitle-editor-hint">
+              <template v-if="editMode === 'segments'">
+                直接修改每句文字与起止时间（秒），可插入或删除分段；保存后预览、导出与桌面歌词同步更新。
+              </template>
+              <template v-else>
+                按 {{ previewFormat.toUpperCase() }} 语法直接修改原文，保存时重新解析为分段。LRC 无结束时间，
+                结束时间按下一句起点（末句按音频时长）推导。
+              </template>
+            </p>
+
+            <!-- 分段编辑 -->
+            <div v-if="editMode === 'segments'" class="subtitle-segment-list">
+              <div class="subtitle-segment-head">
+                <span>#</span>
+                <span>开始（秒）</span>
+                <span>结束（秒）</span>
+                <span>字幕文本</span>
+                <span></span>
+              </div>
+              <div
+                v-for="(segment, index) in draftSegments"
+                :key="index"
+                class="subtitle-segment-row"
+              >
+                <span class="subtitle-segment-index">{{ index + 1 }}</span>
+                <input
+                  v-model.number="segment.start"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  :aria-label="`第 ${index + 1} 条开始时间（秒）`"
+                />
+                <input
+                  v-model.number="segment.end"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  :aria-label="`第 ${index + 1} 条结束时间（秒）`"
+                />
+                <textarea
+                  v-model="segment.text"
+                  rows="1"
+                  spellcheck="false"
+                  :aria-label="`第 ${index + 1} 条字幕文本`"
+                ></textarea>
+                <span class="subtitle-segment-actions">
+                  <button
+                    type="button"
+                    :disabled="savingSubtitle"
+                    :title="`在第 ${index + 1} 条后插入`"
+                    :aria-label="`在第 ${index + 1} 条后插入一条`"
+                    @click="insertSegment(index)"
+                  >
+                    <Icon name="plus" />
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="savingSubtitle"
+                    :title="`删除第 ${index + 1} 条`"
+                    :aria-label="`删除第 ${index + 1} 条字幕`"
+                    @click="removeSegment(index)"
+                  >
+                    <Icon name="trash" />
+                  </button>
+                </span>
+              </div>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost is-compact subtitle-segment-add"
+                :disabled="savingSubtitle"
+                @click="insertSegment(draftCount - 1)"
+              >
+                <Icon name="plus" /> 新增一条
+              </button>
+            </div>
+
+            <!-- 原文编辑 -->
+            <textarea
+              v-else
+              class="subtitle-editor-text"
+              :value="draftText"
+              spellcheck="false"
+              :aria-label="`${previewFormat.toUpperCase()} 字幕原文编辑`"
+              @input="onDraftTextInput"
+            ></textarea>
+
+            <p v-if="editorMessage" class="subtitle-editor-error">
+              <Icon name="alert" /> {{ editorMessage }}
+            </p>
+
+            <div class="subtitle-editor-actions">
+              <button
+                type="button"
+                class="subtitle-btn is-primary"
+                :disabled="editValidation !== null || savingSubtitle"
+                @click="saveSubtitleEdit"
+              >
+                <Icon :name="savingSubtitle ? 'refresh' : 'check'" />
+                {{ savingSubtitle ? '保存中…' : '保存修改' }}
+              </button>
+              <button
+                type="button"
+                class="subtitle-btn"
+                :disabled="savingSubtitle"
+                @click="cancelEditing"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost"
+                :disabled="savingSubtitle"
+                @click="restoreDraft"
+              >
+                恢复原内容
+              </button>
+            </div>
+            <p class="subtitle-editor-footnote">
+              编辑期间暂不能切换曲目、生成或导出字幕；保存或取消后恢复。
+            </p>
+          </div>
         </div>
 
         <!-- 导出 -->
@@ -434,7 +690,7 @@ async function removeRecord(song: Song): Promise<void> {
             <button
               type="button"
               class="subtitle-btn"
-              :disabled="!hasExportable || exportingFormat !== null"
+              :disabled="!hasExportable || exportingFormat !== null || editing"
               @click="exportSubtitle('srt')"
             >
               <Icon name="download" />
@@ -443,7 +699,7 @@ async function removeRecord(song: Song): Promise<void> {
             <button
               type="button"
               class="subtitle-btn"
-              :disabled="!hasExportable || exportingFormat !== null"
+              :disabled="!hasExportable || exportingFormat !== null || editing"
               @click="exportSubtitle('lrc')"
             >
               <Icon name="download" />
@@ -875,4 +1131,133 @@ async function removeRecord(song: Song): Promise<void> {
   margin-top: 10px;
 }
 .subtitle-audition-status { font-size: 11px; color: var(--text-3); }
+
+/* 记录列表检索 */
+.subtitle-record-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.subtitle-search.is-compact {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+  padding: 6px 9px;
+}
+.subtitle-record-filter {
+  flex: none;
+  max-width: 108px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--text-2);
+  font-size: 12px;
+  outline: 0;
+  cursor: pointer;
+}
+.subtitle-record-filter option { background: #10201a; color: var(--text); }
+.subtitle-record-edited { color: var(--accent-bright); }
+
+/* 预览头部与编辑入口 */
+.subtitle-preview-tools { display: flex; align-items: center; gap: 8px; }
+.subtitle-tabs button:disabled { opacity: 0.5; cursor: not-allowed; }
+.subtitle-btn.is-compact { padding: 4px 10px; font-size: 11px; }
+
+/* 字幕编辑器 */
+.subtitle-editor { display: flex; flex-direction: column; gap: 9px; }
+.subtitle-editor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.subtitle-editor-hint,
+.subtitle-editor-footnote {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.subtitle-segment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 330px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.subtitle-segment-head,
+.subtitle-segment-row {
+  display: grid;
+  grid-template-columns: 24px 78px 78px minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 6px;
+}
+.subtitle-segment-head { font-size: 10px; color: var(--text-3); padding: 0 2px; }
+.subtitle-segment-row { padding: 3px 2px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+.subtitle-segment-index { font-size: 11px; color: var(--text-3); text-align: center; }
+.subtitle-segment-row input,
+.subtitle-segment-row textarea,
+.subtitle-editor-text {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 7px;
+  outline: 0;
+  font-family: inherit;
+}
+.subtitle-segment-row input:focus,
+.subtitle-segment-row textarea:focus,
+.subtitle-editor-text:focus { border-color: rgba(25, 217, 139, 0.5); }
+.subtitle-segment-row textarea { resize: vertical; min-height: 30px; line-height: 1.5; }
+.subtitle-segment-actions { display: flex; gap: 3px; justify-content: flex-end; }
+.subtitle-segment-actions button {
+  width: 23px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.subtitle-segment-actions button:hover:not(:disabled) {
+  color: var(--accent-bright);
+  border-color: rgba(25, 217, 139, 0.45);
+}
+.subtitle-segment-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.subtitle-segment-actions :deep(svg) { width: 12px; height: 12px; }
+.subtitle-segment-add { align-self: flex-start; margin-top: 3px; }
+.subtitle-editor-text {
+  min-height: 220px;
+  resize: vertical;
+  line-height: 1.65;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  overflow: auto;
+}
+.subtitle-editor-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 7px;
+  background: rgba(248, 113, 113, 0.08);
+  color: #fca5a5;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.subtitle-editor-error :deep(svg) { width: 13px; height: 13px; flex: none; }
+.subtitle-editor-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 </style>

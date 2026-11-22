@@ -433,6 +433,8 @@ export interface StoredSubtitle {
   title: string;
   segments: SubtitleSegment[];
   createdAtMs: number;
+  /** 最近一次手动编辑的时间（毫秒）；未编辑过的旧记录没有该字段。 */
+  updatedAtMs?: number;
   /** 源音频文件名；旧字幕文件缺失，展示时用曲目 key 末段兜底。 */
   fileName?: string;
   /** 源音频时长（毫秒）；旧字幕文件缺失。 */
@@ -483,6 +485,14 @@ export interface LyricsStyle {
   height: number;
   /** 锁定：只显示歌词、隐藏边框/控件并默认鼠标穿透。 */
   locked: boolean;
+  /**
+   * 已唱标记提前量（秒，可选 0 / 1 / 2）。
+   *
+   * 渲染时间轴整体前移这么多秒，使逐词「已唱」标记与歌词行切换同步提前，
+   * 抵消 ASR 字幕起点偏晚、句间空白被计入行时长以及跨窗口同步带来的视觉滞后。
+   * 0 表示严格按原始时间轴渲染。
+   */
+  leadSeconds: number;
 }
 
 /** `desktop-lyrics-hover` 事件负载：锁定态下鼠标是否进入歌词热区。 */

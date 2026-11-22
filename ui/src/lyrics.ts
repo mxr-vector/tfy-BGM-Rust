@@ -4,6 +4,8 @@
  * 数据来源：Rust 广播的 `desktop-lyrics-data` 快照；窗口启动时主动拉取一次，
  * 避免错过创建前的最后一次广播。播放进度在本地按 100ms 平滑推进，
  * 后端每 1 秒校准一次 position，暂停 / 切歌 / 停止由快照状态直接驱动。
+ * 渲染时可使用「已唱标记提前量」把时间轴整体前移 0 / 1 / 2 秒，
+ * 让逐词上色与行切换同步提前，抵消字幕时间戳偏晚与句间空白带来的视觉滞后。
  *
  * 另外负责：定时巡检置顶状态；Aa 打开的独立设置窗负责字体 / 字号 / 颜色 / 背景，
  * 这里应用其修改并持久化用户拖拽边缘后的尺寸；以及拦截拖动区域的双击，避免误触发窗口最大化。
@@ -232,7 +234,9 @@ function render(force = false): void {
   }
 
   const lines = snapshot.lines;
-  const position = positionNow();
+  // 渲染时间轴整体前移「已唱标记提前量」：逐词上色与当前行判定共用同一个位置。
+  // 只提前上色进度而不提前行切换，会让新行一出现就处于半高亮状态，故两者必须同步。
+  const position = positionNow() + style.leadSeconds;
   const index = activeIndex(position);
   setText(prevEl, index > 0 ? lines[index - 1]!.text : '');
   setText(nextEl, index >= 0 && index + 1 < lines.length ? lines[index + 1]!.text : '');
@@ -279,7 +283,8 @@ function sameStyle(left: LyricsStyle, right: LyricsStyle): boolean {
     left.background === right.background &&
     left.width === right.width &&
     left.height === right.height &&
-    left.locked === right.locked
+    left.locked === right.locked &&
+    left.leadSeconds === right.leadSeconds
   );
 }
 

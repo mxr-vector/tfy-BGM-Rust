@@ -10,6 +10,7 @@ import { COMMANDS, EVENTS } from '@/lib/constants';
 import {
   LYRICS_COLOR_PRESETS,
   LYRICS_FONT_DEFAULT,
+  LYRICS_LEAD_OPTIONS,
   sanitizeLyricsStyle,
   readLyricsStyle,
   writeLyricsStyle,
@@ -38,6 +39,8 @@ const widthValue = element('width-value');
 const heightInput = element<HTMLInputElement>('height');
 const heightValue = element('height-value');
 const colorsEl = element('colors');
+const leadEl = element('lead');
+const leadValue = element('lead-value');
 const lockBtn = element<HTMLButtonElement>('lock');
 const topState = element('top-state');
 const repinBtn = element<HTMLButtonElement>('repin');
@@ -60,6 +63,11 @@ function applyControls(): void {
   for (const swatch of Array.from(colorsEl.children)) {
     const color = (swatch as HTMLElement).dataset.color ?? '';
     swatch.classList.toggle('is-active', color.toLowerCase() === style.highlight.toLowerCase());
+  }
+  leadValue.textContent = leadLabel(style.leadSeconds);
+  for (const button of Array.from(leadEl.children)) {
+    const node = button as HTMLElement;
+    node.classList.toggle('is-active', Number(node.dataset.seconds) === style.leadSeconds);
   }
 }
 
@@ -87,6 +95,28 @@ function renderSwatches(): void {
     swatch.setAttribute('aria-label', preset.label);
     swatch.addEventListener('click', () => patchStyle({ highlight: preset.value }));
     colorsEl.append(swatch);
+  }
+}
+
+function leadLabel(seconds: number): string {
+  return seconds === 0 ? '不提前' : `${seconds} 秒`;
+}
+
+/** 已唱标记提前量档位；点击后写入共享样式并广播，歌词窗口立即按新时间轴渲染。 */
+function renderLeadSegments(): void {
+  leadEl.replaceChildren();
+  for (const seconds of LYRICS_LEAD_OPTIONS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'segment';
+    button.dataset.seconds = String(seconds);
+    button.textContent = leadLabel(seconds);
+    button.title =
+      seconds === 0
+        ? '严格按原始时间轴渲染，不做提前'
+        : `已唱标记与歌词行切换整体提前 ${seconds} 秒`;
+    button.addEventListener('click', () => patchStyle({ leadSeconds: seconds }));
+    leadEl.append(button);
   }
 }
 
@@ -207,6 +237,7 @@ function installControls(): void {
 
 function init(): void {
   renderSwatches();
+  renderLeadSegments();
   applyControls();
   installControls();
   void loadFonts();

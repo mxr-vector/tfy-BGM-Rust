@@ -48,6 +48,9 @@ export const COMMANDS = {
   subtitleForTrack: 'subtitle_for_track',
   listSubtitles: 'list_subtitles',
   deleteSubtitle: 'delete_subtitle',
+  /** 保存分段编辑 / 原文编辑结果，均返回更新后的 StoredSubtitle。 */
+  updateSubtitle: 'update_subtitle',
+  updateSubtitleText: 'update_subtitle_text',
   setDesktopLyricsEnabled: 'set_desktop_lyrics_enabled',
   syncDesktopLyrics: 'sync_desktop_lyrics',
   desktopLyricsSnapshot: 'desktop_lyrics_snapshot',

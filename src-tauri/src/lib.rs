@@ -107,6 +107,8 @@ pub fn run() {
             commands::subtitle_for_track,
             commands::list_subtitles,
             commands::delete_subtitle,
+            commands::update_subtitle,
+            commands::update_subtitle_text,
             commands::set_desktop_lyrics_enabled,
             commands::sync_desktop_lyrics,
             commands::desktop_lyrics_snapshot,

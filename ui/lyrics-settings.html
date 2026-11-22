@@ -153,6 +153,31 @@
         cursor: pointer;
       }
       .btn:hover { background: rgba(25, 217, 139, 0.24); color: #fff; }
+      .lead-label {
+        color: rgba(230, 255, 244, 0.62);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .lead-label b { color: #6ff3bc; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .segments { display: flex; gap: 4px; flex: none; }
+      .segment {
+        min-width: 36px;
+        padding: 3px 7px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        color: rgba(230, 255, 244, 0.78);
+        font-family: inherit;
+        font-size: 10.5px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .segment:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
+      .segment.is-active {
+        border-color: rgba(25, 217, 139, 0.62);
+        background: rgba(25, 217, 139, 0.2);
+        color: #c9fbe4;
+      }
       .row.end { margin-top: auto; }
     </style>
   </head>
@@ -193,6 +218,11 @@
       <div class="field">
         <span>高亮颜色</span>
         <div id="colors" class="colors"></div>
+      </div>
+
+      <div class="row" title="提前标记已唱歌词，抵消字幕时间戳偏晚与句间空白造成的滞后；不提前为原始时间轴">
+        <span class="lead-label">已唱标记提前 <b id="lead-value">1 秒</b></span>
+        <div id="lead" class="segments" role="group" aria-label="已唱标记提前量"></div>
       </div>
 
       <div class="row">

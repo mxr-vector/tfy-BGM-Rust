@@ -11,6 +11,7 @@
 import { computed, ref, watch } from 'vue';
 import { COMMANDS, EVENTS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
+import { formatSegments, parseSubtitleText, validateSegments } from '@/lib/subtitle-edit';
 import { invoke, listen } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import type {
@@ -20,6 +21,7 @@ import type {
   SubtitleFormat,
   SubtitleProgress,
   SubtitleResult,
+  SubtitleSegment,
 } from '@/lib/types';
 import { invalidateDesktopLyrics } from './desktop-lyrics';
 import { modelsInfo } from './models';
@@ -105,6 +107,55 @@ function songFromStored(stored: StoredSubtitle): Song {
     durationMs: stored.durationMs,
   };
 }
+
+// ---------------- 字幕生成记录检索 ----------------
+
+/** 记录列表的检索关键词；与「搜索曲目」的输入框互不干扰。 */
+export const recordQuery = ref('');
+/** 记录状态筛选：全部 / 已生成字幕 / 待生成。 */
+export type SubtitleRecordFilter = 'all' | 'generated' | 'pending';
+export const recordFilter = ref<SubtitleRecordFilter>('all');
+
+/**
+ * 检索用的下界文本：仅在记录列表或已保存字幕变化时重建，
+ * 避免每次按键都为每条记录重新拼接并小写化全文。
+ */
+const recordHaystack = computed<Record<string, string>>(() => {
+  const index: Record<string, string> = {};
+  for (const song of subtitleRecords.value) {
+    const stored = savedSubtitles.value[song.key] ?? null;
+    index[song.key] = [
+      song.title,
+      song.fileName,
+      song.category,
+      song.artist ?? '',
+      song.album ?? '',
+      stored ? stored.segments.map((item) => item.text).join(' ') : '',
+      stored ? `已有字幕 ${stored.segments.length} 句` : '待生成',
+      stored?.updatedAtMs ? '已编辑' : '',
+    ]
+      .join(' ')
+      .toLowerCase();
+  }
+  return index;
+});
+
+/**
+ * 记录列表检索结果。检索范围包含曲名、文件名、分类、标签、已生成字幕的正文，
+ * 以及「待生成 / 已编辑」等状态词；多个空格分隔的关键词按「全部命中」过滤。
+ * 孤立记录（曲目已不在曲库）同样可被字幕内容检索到。
+ */
+export const filteredRecords = computed<Song[]>(() => {
+  const terms = recordQuery.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return subtitleRecords.value.filter((song) => {
+    const stored = savedSubtitles.value[song.key] ?? null;
+    if (recordFilter.value === 'generated' && !stored) return false;
+    if (recordFilter.value === 'pending' && stored) return false;
+    if (terms.length === 0) return true;
+    const haystack = recordHaystack.value[song.key] ?? '';
+    return terms.every((term) => haystack.includes(term));
+  });
+});
 
 let loaded = false;
 
@@ -200,6 +251,12 @@ export async function loadSavedSubtitle(key: string): Promise<void> {
  * 保证同一曲目不会重复出现在记录列表里。
  */
 export function addSubtitleRecord(song: Song): void {
+  if (generating.value) return;
+  if (editing.value) {
+    // 音乐库右键菜单等入口不经过字幕页的禁用按钮，这里给出明确原因而不是静默失效。
+    toast('请先保存或取消字幕编辑，再加入曲目', 'info');
+    return;
+  }
   if (!subtitleRecords.value.some((item) => item.key === song.key)) {
     manualRecords.value = [song, ...manualRecords.value];
   }
@@ -208,7 +265,8 @@ export function addSubtitleRecord(song: Song): void {
 }
 
 export function selectSong(key: string): void {
-  if (generating.value) return;
+  // 编辑态禁止切换记录：草稿尚未落盘，切换会丢失未保存的修改。
+  if (generating.value || editing.value) return;
   selectedKey.value = key;
   result.value = null;
   error.value = null;
@@ -225,7 +283,7 @@ function resetWork(): void {
 
 /** 从记录列表移除尚未生成的曲目；已生成字幕的记录请使用 `deleteSubtitleRecord`。 */
 export function removeSubtitleRecord(key: string): void {
-  if (generating.value) return;
+  if (generating.value || editing.value) return;
   manualRecords.value = manualRecords.value.filter((song) => song.key !== key);
   if (selectedKey.value === key && !savedSubtitles.value[key]) resetWork();
 }
@@ -236,6 +294,13 @@ export function removeSubtitleRecord(key: string): void {
  */
 export function applySubtitleKeyChanges(remap: Map<string, string>): void {
   if (remap.size === 0) return;
+  // 曲目 key 变化会让编辑草稿指向旧记录，直接结束编辑避免写回错位置。
+  if (editing.value) {
+    cancelEditing();
+    if (!editing.value) {
+      toast('曲目已变更，已退出字幕编辑，未保存的修改已丢弃', 'info');
+    }
+  }
   manualRecords.value = manualRecords.value.map((song) => {
     const key = remap.get(song.key);
     return key ? { ...song, key } : song;
@@ -274,7 +339,7 @@ export const deletingSubtitle = ref<string | null>(null);
  * 删除失败时重新拉取列表，保证界面与磁盘状态一致。
  */
 export async function deleteSubtitleRecord(key: string): Promise<void> {
-  if (generating.value || deletingSubtitle.value) return;
+  if (generating.value || deletingSubtitle.value || editing.value) return;
   deletingSubtitle.value = key;
   try {
     await invoke<boolean>(COMMANDS.deleteSubtitle, { key });
@@ -297,7 +362,7 @@ export async function deleteSubtitleRecord(key: string): Promise<void> {
 /** 为选中曲目生成字幕。 */
 export async function generateSubtitles(): Promise<void> {
   const key = selectedKey.value;
-  if (!key || generating.value) return;
+  if (!key || generating.value || editing.value) return;
   if (!modelReady.value) {
     toast('请先完成 ASR 模型加载，再生成字幕', 'error');
     return;
@@ -349,7 +414,7 @@ export async function generateSubtitles(): Promise<void> {
 /** 导出 SRT / LRC；默认文件名由后端按曲目名生成。 */
 export async function exportSubtitle(format: 'srt' | 'lrc'): Promise<void> {
   const key = selectedKey.value;
-  if (!key || exportingFormat.value) return;
+  if (!key || exportingFormat.value || editing.value) return;
   exportingFormat.value = format;
   try {
     const outcome = await invoke<SubtitleExportResult | null>(COMMANDS.exportSubtitle, {
@@ -366,7 +431,234 @@ export async function exportSubtitle(format: 'srt' | 'lrc'): Promise<void> {
 }
 
 export function clearSubtitleResult(): void {
+  if (editing.value) return;
   result.value = null;
   error.value = null;
   progress.value = null;
+}
+
+// ---------------- 字幕结果编辑 ----------------
+
+export type SubtitleEditMode = 'segments' | 'text';
+
+/** 是否处于编辑态；编辑期间禁止切换记录、生成、导出与删除，避免草稿丢失。 */
+export const editing = ref(false);
+export const editMode = ref<SubtitleEditMode>('segments');
+export const savingSubtitle = ref(false);
+/** 后端保存失败 / 模式切换被拒绝时的提示。 */
+export const editError = ref<string | null>(null);
+/** 分段草稿：编辑器的权威数据，文本模式的输入会实时解析回这里。 */
+export const draftSegments = ref<SubtitleSegment[]>([]);
+/** 原文草稿；文本模式由用户输入，分段模式由草稿派生。 */
+export const draftText = ref('');
+
+interface EditableSource {
+  key: string;
+  title: string;
+  segments: SubtitleSegment[];
+}
+
+/** 当前选中记录可作为编辑数据源的字幕（本次生成结果优先，其次历史保存）。 */
+function editableSource(): EditableSource | null {
+  const key = selectedKey.value;
+  if (!key) return null;
+  const current = result.value;
+  if (current && current.key === key) {
+    return { key, title: current.title, segments: current.segments };
+  }
+  const stored = savedSubtitles.value[key];
+  return stored ? { key, title: stored.title, segments: stored.segments } : null;
+}
+
+export const hasEditable = computed(() => Boolean(editableSource()));
+
+function draftTitle(): string {
+  return editableSource()?.title ?? selectedSong.value?.title ?? '';
+}
+
+/** LRC 末句结束时间的推导依据：优先取字幕记录时长，其次曲库时长。 */
+function draftDurationSecs(): number | undefined {
+  const stored = selectedKey.value ? savedSubtitles.value[selectedKey.value] : null;
+  const ms = stored?.durationMs ?? selectedSong.value?.durationMs;
+  return ms ? ms / 1000 : undefined;
+}
+
+/** 即时校验：分段模式校验时间，文本模式解析原文；返回第一条错误或 `null`。 */
+export const editValidation = computed<string | null>(() => {
+  if (!editing.value) return null;
+  if (editMode.value === 'text') {
+    const parsed = parseSubtitleText(draftText.value, previewFormat.value, draftDurationSecs());
+    return parsed.ok ? null : parsed.error;
+  }
+  return validateSegments(draftSegments.value);
+});
+
+// 草稿一旦变化就清掉上一次的保存错误 / 模式切换提示，避免旧提示一直挂在编辑器里。
+watch([draftText, draftSegments, editMode], () => {
+  if (editError.value) editError.value = null;
+}, { deep: true });
+
+/** 进入编辑：以当前字幕内容为草稿，默认使用分段编辑。 */
+export function startEditing(): void {
+  if (editing.value || generating.value || savingSubtitle.value) return;
+  const source = editableSource();
+  if (!source) return;
+  draftSegments.value = source.segments.map((item) => ({ ...item }));
+  draftText.value = formatSegments(previewFormat.value, source.title, draftSegments.value);
+  editError.value = null;
+  editMode.value = 'segments';
+  editing.value = true;
+}
+
+export function cancelEditing(): void {
+  if (savingSubtitle.value) return;
+  editing.value = false;
+  editError.value = null;
+  draftSegments.value = [];
+  draftText.value = '';
+}
+
+/** 丢弃草稿，恢复为最近一次保存（或本次生成）的内容。 */
+export function restoreDraft(): void {
+  if (!editing.value || savingSubtitle.value) return;
+  const source = editableSource();
+  if (!source) return;
+  draftSegments.value = source.segments.map((item) => ({ ...item }));
+  draftText.value = formatSegments(previewFormat.value, source.title, draftSegments.value);
+  editError.value = null;
+  toast('已恢复为上次保存的字幕内容', 'info');
+}
+
+/** 切换编辑模式；切回分段时先把原文解析成草稿，解析失败则拒绝切换。 */
+export function setEditMode(mode: SubtitleEditMode): void {
+  if (!editing.value || savingSubtitle.value || editMode.value === mode) return;
+  if (mode === 'text') {
+    draftText.value = formatSegments(previewFormat.value, draftTitle(), draftSegments.value);
+  } else {
+    const parsed = parseSubtitleText(draftText.value, previewFormat.value, draftDurationSecs());
+    if (!parsed.ok) {
+      editError.value = `请先修正原文后再切换：${parsed.error}`;
+      return;
+    }
+    draftSegments.value = parsed.segments;
+  }
+  editError.value = null;
+  editMode.value = mode;
+}
+
+/** 切换预览 / 编辑格式；编辑态下同步草稿文本，避免两种格式互相覆盖。 */
+export function changePreviewFormat(format: SubtitleFormat): void {
+  if (format === previewFormat.value) return;
+  if (editing.value && editMode.value === 'text') {
+    const parsed = parseSubtitleText(draftText.value, previewFormat.value, draftDurationSecs());
+    if (!parsed.ok) {
+      editError.value = `请先修正当前 ${previewFormat.value.toUpperCase()} 原文后再切换：${parsed.error}`;
+      return;
+    }
+    draftSegments.value = parsed.segments;
+    setPreviewFormat(format);
+    draftText.value = formatSegments(format, draftTitle(), draftSegments.value);
+    editError.value = null;
+    return;
+  }
+  setPreviewFormat(format);
+  if (editing.value) {
+    draftText.value = formatSegments(format, draftTitle(), draftSegments.value);
+  }
+}
+
+/** 文本模式输入：实时把原文解析回分段草稿，保存仍以后端解析结果为准。 */
+export function updateDraftText(text: string): void {
+  draftText.value = text;
+  if (!editing.value || editMode.value !== 'text') return;
+  const parsed = parseSubtitleText(text, previewFormat.value, draftDurationSecs());
+  if (parsed.ok) draftSegments.value = parsed.segments;
+}
+
+/** 在指定行之后插入一条空白分段。 */
+export function insertSegment(index: number): void {
+  if (!editing.value || savingSubtitle.value) return;
+  const next = [...draftSegments.value];
+  const previous = next[index];
+  const following = next[index + 1];
+  const start = previous ? previous.end : 0;
+  const proposed = start + 5;
+  const end =
+    following && following.start > start + 0.1
+      ? Math.min(proposed, following.start)
+      : proposed;
+  next.splice(index + 1, 0, {
+    start,
+    end: Math.max(end, start + 0.1),
+    text: '',
+  });
+  draftSegments.value = next;
+  draftText.value = formatSegments(previewFormat.value, draftTitle(), next);
+}
+
+export function removeSegment(index: number): void {
+  if (!editing.value || savingSubtitle.value) return;
+  const next = draftSegments.value.filter((_, position) => position !== index);
+  draftSegments.value = next;
+  draftText.value = formatSegments(previewFormat.value, draftTitle(), next);
+}
+
+/** 编辑保存成功：用后端快照刷新缓存、结果预览与桌面歌词。 */
+function applyUpdatedSubtitle(updated: StoredSubtitle): void {
+  const key = updated.key;
+  savedSubtitles.value = { ...savedSubtitles.value, [key]: updated };
+  generatedSubtitles.value = generatedSubtitles.value.map((item) =>
+    item.key === key ? updated : item,
+  );
+  if (result.value?.key === key) {
+    const last = updated.segments[updated.segments.length - 1];
+    result.value = {
+      ...result.value,
+      segments: updated.segments,
+      srt: updated.srt,
+      lrc: updated.lrc,
+      duration: last ? last.end : 0,
+    };
+  }
+  // 主窗口的桌面歌词按 key 缓存了分段，失效后下一次同步会读取修改后的字幕。
+  invalidateDesktopLyrics(key);
+}
+
+/** 保存编辑：分段模式提交 segments，文本模式提交 SRT / LRC 原文。 */
+export async function saveSubtitleEdit(): Promise<void> {
+  const key = selectedKey.value;
+  if (!key || !editing.value || savingSubtitle.value) return;
+  if (editValidation.value) {
+    editError.value = editValidation.value;
+    return;
+  }
+  savingSubtitle.value = true;
+  editError.value = null;
+  try {
+    const updated =
+      editMode.value === 'segments'
+        ? await invoke<StoredSubtitle>(COMMANDS.updateSubtitle, {
+            key,
+            segments: draftSegments.value.map((item) => ({
+              start: item.start,
+              end: item.end,
+              text: item.text,
+            })),
+          })
+        : await invoke<StoredSubtitle>(COMMANDS.updateSubtitleText, {
+            key,
+            format: previewFormat.value,
+            text: draftText.value,
+          });
+    applyUpdatedSubtitle(updated);
+    editing.value = false;
+    draftSegments.value = [];
+    draftText.value = '';
+    toast(`字幕修改已保存，共 ${updated.segments.length} 条`, 'success');
+  } catch (cause) {
+    editError.value = normalizeError(cause);
+    toast(`保存字幕修改失败：${editError.value}`, 'error');
+  } finally {
+    savingSubtitle.value = false;
+  }
 }
