@@ -16,7 +16,23 @@ pub const LOOPS_FILE: &str = "loops.json";
 
 /// 外置曲库目录名（默认位于 exe 同级）。
 pub const LIBRARY_DIR_NAME: &str = "bgm";
+/// ASR 模型目录名（默认位于系统「下载」目录下，带 `bgm-` 前缀以免与其它模型目录混淆）。
+pub const MODELS_DIR_NAME: &str = "bgm-models";
 /// 指定曲库目录的环境变量。
 pub const LIBRARY_ENV_VAR: &str = "TFY_BGM_DIR";
 /// 软删除回收站目录名。
 pub const TRASH_DIR_NAME: &str = ".tfy-trash";
+
+/// 去掉 Windows 扩展长度路径前缀（`\\?\` / `\\?\UNC\`），用于持久化与界面展示。
+///
+/// `fs::canonicalize` 在 Windows 上返回 verbatim 路径；直接写进配置或展示会出现
+/// `\\?\D:\...`，并且与扫描得到的普通路径做字符串比较时永远不相等。
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        path.to_owned()
+    }
+}

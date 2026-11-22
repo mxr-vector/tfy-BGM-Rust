@@ -13,7 +13,9 @@ members = ["core"]
 
 [lib]
 name = "tfy_bgm_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面端只按 rlib 链接；staticlib / cdylib 只有移动端才需要，
+# 开着会让每次编译多出数 GB 的 .lib / .dll 和静态库临时对象文件。
+crate-type = ["lib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -22,8 +24,14 @@ tauri-build = { version = "2", features = [] }
 anyhow = "1"
 axum = "0.8"
 bgm-core = { path = "core" }
+# 解析系统「下载」目录（Windows FOLDERID_Downloads / Linux XDG_DOWNLOAD_DIR）作为模型默认位置。
+dirs = "7"
 notify = "8.2"
 parking_lot = "0.12"
+# 下载 ASR 模型：阻塞式客户端 + rustls，避免依赖系统 OpenSSL。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "webpki-roots"] }
+# ASR 推理引擎：sherpa-onnx 的 Rust API（构建时自动下载对应平台的预编译库）。
+sherpa-onnx = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
@@ -38,6 +46,10 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 # 开机自动启动：写入 HKCU 的 Run 项，不需要额外安装器。
 windows-registry = "0.6"
 
+[dev-dependencies]
+# 模型扫描的临时目录测试。
+tempfile = "3"
+
 [features]
 # 绿色版脚本用 cargo 直接构建时需要显式开启，否则 Tauri 会按开发模式去连接 devUrl。
 custom-protocol = ["tauri/custom-protocol"]
@@ -48,3 +60,11 @@ lto = true
 opt-level = "s"
 strip = true
 panic = "abort"
+
+# 开发构建只保留行号信息：PDB / rlib 明显变小，backtrace 仍有文件与行号。
+[profile.dev]
+debug = "line-tables-only"
+
+# 体积大头是三方差依赖的调试信息，这里关掉，只保留本项目代码可单步调试。
+[profile.dev.package."*"]
+debug = false

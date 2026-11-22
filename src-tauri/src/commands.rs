@@ -20,6 +20,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::api::{ApiBridge, ApiEndpoint, ApiStatus, CommandFailure};
 use crate::desktop::{self, DesktopState};
 use crate::fonts;
+use crate::models::ModelsInfo;
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
@@ -261,6 +262,120 @@ pub fn open_library_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRe
     app.opener()
         .open_path(root, None::<&str>)
         .map_err(|error| format!("打开曲库目录失败：{error}"))
+}
+
+/// 「模型」分组：重新扫描模型目录，返回默认模型状态、模型列表与已加载模型。
+/// 扫描可能遍历大目录，放在异步任务里执行，避免阻塞界面线程。
+#[tauri::command]
+pub async fn models_info(state: State<'_, AppState>) -> CommandResult<ModelsInfo> {
+    Ok(state.models_info())
+}
+
+/// 选择自定义模型目录；取消时返回 `null`，保持现有目录不变。
+#[tauri::command]
+pub async fn choose_models_dir(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<ModelsInfo>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("选择 ASR 模型目录")
+        .blocking_pick_folder();
+    let dir = match picked {
+        Some(file_path) => Some(
+            file_path
+                .into_path()
+                .map_err(|error| format!("所选目录无效：{error}"))?,
+        ),
+        None => None,
+    };
+    state.choose_models_dir(dir).map_err(describe)
+}
+
+/// 恢复默认模型目录（系统「下载」目录下的 `bgm-models`）。
+#[tauri::command]
+pub async fn reset_models_dir(state: State<'_, AppState>) -> CommandResult<ModelsInfo> {
+    state.reset_models_dir().map_err(describe)
+}
+
+#[tauri::command]
+pub fn open_models_dir(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
+    let root = state.models_root();
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("无法创建模型目录 {}：{error}", root.display()))?;
+    app.opener()
+        .open_path(root.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| format!("打开模型目录失败：{error}"))
+}
+
+/// 下载默认 ASR 模型（固定 0.6B-int8 清单）；进度通过 `model-download-progress` 推送。
+#[tauri::command]
+pub async fn download_asr_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<ModelsInfo> {
+    let runtime = state.model_runtime();
+    let root = state.models_root();
+    let url = state.asr_download_url();
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.download(&task_app, &root, &url))
+        .await
+        .map_err(|error| format!("下载任务异常结束：{error}"))?
+        .map_err(describe)?;
+    Ok(state.models_info())
+}
+
+/// 用 sherpa-onnx 加载指定模型目录；加载 1GB 左右的模型会占用数秒。
+#[tauri::command]
+pub async fn load_asr_model(state: State<'_, AppState>, path: String) -> CommandResult<ModelsInfo> {
+    let runtime = state.model_runtime();
+    let root = state.models_root();
+    let dir = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || runtime.load(&root, &dir))
+        .await
+        .map_err(|error| format!("加载任务异常结束：{error}"))?
+        .map_err(describe)?;
+    Ok(state.models_info())
+}
+
+/// 释放已加载的模型，归还内存。
+#[tauri::command]
+pub async fn unload_asr_model(state: State<'_, AppState>) -> CommandResult<ModelsInfo> {
+    state.model_runtime().unload();
+    Ok(state.models_info())
+}
+
+/// 请求取消正在进行的模型下载；返回是否确实有任务被中断。
+#[tauri::command]
+pub fn cancel_asr_download(state: State<'_, AppState>) -> bool {
+    state.model_runtime().cancel_download()
+}
+
+/// 选择 WAV 文件并用已加载的模型识别；取消选择时返回 `null`。
+#[tauri::command]
+pub async fn transcribe_wav(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<String>> {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title("选择要识别的 WAV 音频")
+        .add_filter("WAV 音频", &["wav"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let wav = picked
+        .into_path()
+        .map_err(|error| format!("所选文件无效：{error}"))?;
+    let runtime = state.model_runtime();
+    let text = tauri::async_runtime::spawn_blocking(move || runtime.transcribe(&wav))
+        .await
+        .map_err(|error| format!("识别任务异常结束：{error}"))?
+        .map_err(describe)?;
+    Ok(Some(text))
 }
 
 #[derive(Serialize)]

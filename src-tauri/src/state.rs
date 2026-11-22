@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use bgm_core::categories::Categories;
@@ -23,6 +24,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::library_root;
 use crate::library_watch::LibraryWatcher;
+use crate::models::{self, ModelRuntime, ModelsInfo};
 use crate::settings::Settings;
 
 /// 曲库目录发生外部变化时发给前端的事件名。
@@ -42,6 +44,8 @@ pub struct AppState {
     runtime: RwLock<Runtime>,
     meta_cache: MetaCache,
     watcher: Mutex<Option<LibraryWatcher>>,
+    /// ASR 模型运行期状态：已加载模型与下载任务。
+    models: Arc<ModelRuntime>,
     /// 曲库写操作期间抑制 watch 扫描，避免「文件已移动、命令还没迁移 key」造成误删收藏。
     ops_lock: Mutex<()>,
 }
@@ -135,6 +139,16 @@ impl AppState {
         library.warnings = warnings;
         library_root::allow_audio_scope(app, &root)?;
 
+        // 模型目录只在进入「模型」分组时扫描；启动阶段仅确保目录存在，
+        // 避免在大目录 / 网络盘上拖慢启动。
+        let models_root = models::root_for(&prefs);
+        if let Err(error) = models::ensure_root(&models_root) {
+            eprintln!(
+                "[models] 无法创建模型目录 {}：{error}",
+                models_root.display()
+            );
+        }
+
         Ok(Self {
             prefs_path,
             categories_path,
@@ -153,6 +167,7 @@ impl AppState {
             }),
             meta_cache,
             watcher: Mutex::new(None),
+            models: Arc::new(ModelRuntime::default()),
             ops_lock: Mutex::new(()),
         })
     }
@@ -182,8 +197,9 @@ impl AppState {
         let rates = self.config.read().player.rates.clone();
         let mut current = self.prefs.write();
         let mut next = incoming.normalize_with_rates(&rates);
-        // 曲库目录只允许通过 choose/reset 命令修改，避免偏好保存把目录改坏。
+        // 曲库目录与模型目录只允许通过专用命令修改，避免偏好保存把目录改坏。
         next.library_dir = current.library_dir.clone();
+        next.models_dir = current.models_dir.clone();
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
         Ok(next)
@@ -324,6 +340,91 @@ impl AppState {
 
     pub fn root(&self) -> PathBuf {
         self.runtime.read().root.clone()
+    }
+
+    /// 模型运行期状态（已加载模型 / 下载任务），供异步命令跨线程持有。
+    pub fn model_runtime(&self) -> Arc<ModelRuntime> {
+        self.models.clone()
+    }
+
+    /// 当前生效的模型目录：用户自定义优先，否则为系统「下载」目录下的 `bgm-models`。
+    pub fn models_root(&self) -> PathBuf {
+        models::root_for(&self.prefs.read())
+    }
+
+    /// 当前生效的下载地址；自定义为空时使用内置的 0.6B-int8 地址。
+    pub fn asr_download_url(&self) -> String {
+        let prefs = self.prefs.read();
+        if prefs.asr_download_url.is_empty() {
+            models::DEFAULT_DOWNLOAD_URL.to_owned()
+        } else {
+            prefs.asr_download_url.clone()
+        }
+    }
+
+    /// 「模型」分组快照：每次进入分组都重新扫描目录下的 `.onnx`。
+    pub fn models_info(&self) -> ModelsInfo {
+        let (custom_dir, download_url) = {
+            let prefs = self.prefs.read();
+            (prefs.models_dir.clone(), prefs.asr_download_url.clone())
+        };
+        let root = custom_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(models::default_root);
+
+        let mut warnings = Vec::new();
+        if let Err(error) = models::ensure_root(&root) {
+            warnings.push(format!("无法创建模型目录 {}：{error}", root.display()));
+        }
+        let (list, mut scan_warnings) = models::scan(&root);
+        warnings.append(&mut scan_warnings);
+
+        ModelsInfo {
+            root: root.to_string_lossy().into_owned(),
+            is_default_root: custom_dir.is_none(),
+            default_download_url: models::DEFAULT_DOWNLOAD_URL.to_owned(),
+            download_url: if download_url.is_empty() {
+                models::DEFAULT_DOWNLOAD_URL.to_owned()
+            } else {
+                download_url
+            },
+            default_model: models::default_model(&root),
+            models: list,
+            loaded: self.models.loaded(),
+            downloading: self.models.is_downloading(),
+            warnings,
+        }
+    }
+
+    /// 切换模型目录；`None` 表示用户取消选择，保持当前目录。
+    pub fn choose_models_dir(&self, dir: Option<PathBuf>) -> Result<Option<ModelsInfo>> {
+        let Some(dir) = dir else {
+            return Ok(None);
+        };
+        if !dir.is_dir() {
+            bail!("所选模型目录不存在或不是文件夹：{}", dir.display());
+        }
+        let root = fs::canonicalize(&dir).unwrap_or(dir);
+        // Windows 上 canonicalize 会带 `\\?\` 前缀，落盘前去掉，保证与扫描路径一致。
+        let stored = bgm_core::paths::strip_verbatim_prefix(&root.to_string_lossy());
+        self.persist_models_dir(Some(stored))?;
+        Ok(Some(self.models_info()))
+    }
+
+    /// 恢复默认模型目录（系统「下载」目录下的 `bgm-models`）。
+    pub fn reset_models_dir(&self) -> Result<ModelsInfo> {
+        self.persist_models_dir(None)?;
+        Ok(self.models_info())
+    }
+
+    fn persist_models_dir(&self, models_dir: Option<String>) -> Result<()> {
+        let mut prefs = self.prefs.write();
+        let mut next = prefs.clone();
+        next.models_dir = models_dir;
+        next.save(&self.prefs_path).context("保存模型目录失败")?;
+        *prefs = next;
+        Ok(())
     }
 
     pub fn categories_path(&self) -> PathBuf {

@@ -120,6 +120,10 @@ export interface Prefs {
   audioEnhancement: boolean;
   /** Linux：MPRIS2（仅 Wayland 会话生效）。 */
   mpris2: boolean;
+  /** ASR 模型目录；`null` 表示系统「下载」目录下的 `bgm-models`。 */
+  modelsDir: string | null;
+  /** ASR 模型下载地址；空字符串表示内置的 0.6B-int8 地址。 */
+  asrDownloadUrl: string;
 }
 
 export interface BrandInfo {
@@ -307,4 +311,68 @@ export interface ApiEndpoint {
   path: string;
   summary: string;
   description: string;
+}
+
+/** 扫描到的一个 ASR 模型；同一目录内的 `.onnx` 归为一条。 */
+export interface AsrModel {
+  /** 相对模型目录的稳定标识。 */
+  id: string;
+  name: string;
+  /** 模型所在目录的绝对路径。 */
+  path: string;
+  /** 目录内的 `.onnx` 文件名。 */
+  files: string[];
+  sizeBytes: number;
+  isDefault: boolean;
+  /** Qwen3 四件套是否齐全；不齐全时不能加载。 */
+  loadable: boolean;
+  missing: string[];
+}
+
+/** ASR 默认模型（0.6B-int8）的安装状态。 */
+export interface DefaultModelStatus {
+  name: string;
+  path: string;
+  installed: boolean;
+  missing: string[];
+  sizeBytes: number;
+  /** 完整下载后的体积。 */
+  expectedBytes: number;
+}
+
+/** 已通过 sherpa-onnx 加载到内存的 ASR 模型。 */
+export interface LoadedAsrModel {
+  name: string;
+  path: string;
+  /** 推理引擎，固定为 `sherpa-onnx`。 */
+  engine: string;
+  threads: number;
+}
+
+/** 「模型」分组快照。 */
+export interface ModelsInfo {
+  root: string;
+  /** 是否使用默认目录（系统「下载」目录下的 `bgm-models/`）。 */
+  isDefaultRoot: boolean;
+  defaultDownloadUrl: string;
+  /** 当前生效的下载地址，自定义为空时等于默认地址。 */
+  downloadUrl: string;
+  defaultModel: DefaultModelStatus;
+  models: AsrModel[];
+  loaded: LoadedAsrModel | null;
+  downloading: boolean;
+  warnings: string[];
+}
+
+/** 模型下载进度事件。 */
+export interface ModelDownloadProgress {
+  file: string;
+  index: number;
+  totalFiles: number;
+  received: number;
+  fileBytes: number;
+  overallReceived: number;
+  overallBytes: number;
+  done: boolean;
+  error: string | null;
 }

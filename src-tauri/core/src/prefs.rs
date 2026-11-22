@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::limits::{MAX_FAVORITES, MAX_KEY_LEN};
 use crate::loudness::find_preset;
+use crate::paths::strip_verbatim_prefix;
 use crate::persist::{PersistError, write_json};
 
 pub const PREFS_VERSION: u32 = 3;
@@ -28,6 +29,14 @@ pub const MAX_OUTPUT_ROUTES: usize = 8;
 pub const DEFAULT_UI_FONT: &str = "system";
 /// 字体族名长度上限，避免异常配置写入超长字符串。
 const MAX_UI_FONT_LEN: usize = 128;
+/// 自定义模型目录长度上限。
+const MAX_MODELS_DIR_LEN: usize = 512;
+/// 模型下载地址长度上限。
+const MAX_DOWNLOAD_URL_LEN: usize = 1024;
+/// ASR 模型默认下载地址：ModelScope 上的 0.6B-int8 模型目录。
+/// 偏好里留空即表示使用此地址，下载地址的唯一真源放在 core，避免多处定义漂移。
+pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
+    "https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B";
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -58,6 +67,14 @@ pub fn is_wallpaper_path(path: &str) -> bool {
                 .iter()
                 .any(|allowed| ext.eq_ignore_ascii_case(allowed))
         })
+}
+
+/// 模型下载地址是否是可用的 http(s) 链接；不合法时回退内置地址。
+pub fn is_download_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && url.chars().count() <= MAX_DOWNLOAD_URL_LEN
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +197,12 @@ pub struct Prefs {
     /// 点击标题栏关闭按钮时的行为；`ask` 表示每次询问。
     pub close_action: CloseAction,
 
+    // ---- 基本系统配置 · 模型 ----
+    /// ASR 模型存放目录；`None` 表示系统「下载」目录下的 `bgm-models`。
+    pub models_dir: Option<String>,
+    /// ASR 模型下载地址；空字符串表示使用 `DEFAULT_ASR_DOWNLOAD_URL`（0.6B-int8）。
+    pub asr_download_url: String,
+
     // ---- 平台特有（仅对应平台读取）----
     /// Windows：系统媒体传输控制（SMTC）。
     pub smtc: bool,
@@ -218,6 +241,8 @@ impl Default for Prefs {
             autoplay_on_start: false,
             prevent_sleep: false,
             close_action: CloseAction::Ask,
+            models_dir: None,
+            asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
             smtc: false,
             spatial_audio: false,
             audio_enhancement: true,
@@ -346,6 +371,23 @@ impl Prefs {
             DEFAULT_UI_FONT.to_owned()
         } else {
             font.to_owned()
+        };
+
+        // 模型目录只保留非空路径；是否可用（存在、可写）由运行时判断，
+        // 这样目录被临时移走时不会把用户的选择直接丢掉。
+        // Windows 的 verbatim 前缀（`\\?\`）会与扫描路径不一致，落盘前统一去掉。
+        self.models_dir = self
+            .models_dir
+            .map(|dir| strip_verbatim_prefix(dir.trim()))
+            .filter(|dir| !dir.is_empty() && dir.chars().count() <= MAX_MODELS_DIR_LEN);
+
+        // 下载地址留空或非法时回到内置的 0.6B-int8 默认地址，
+        // 保证落盘的永远是一个可用地址，界面与下载逻辑无需各自兜底。
+        let download_url = self.asr_download_url.trim();
+        self.asr_download_url = if is_download_url(download_url) {
+            download_url.to_owned()
+        } else {
+            DEFAULT_ASR_DOWNLOAD_URL.to_owned()
         };
         self
     }
@@ -761,6 +803,60 @@ mod tests {
         assert!(prefs.audio_enhancement);
         // Linux 平台特有项：MPRIS2 默认关闭。
         assert!(!prefs.mpris2);
+    }
+
+    #[test]
+    fn model_settings_default_to_exe_models_dir_with_builtin_url() {
+        let prefs = Prefs::default();
+        // `None` 表示系统「下载」目录下的 bgm-models/；下载地址默认显式指向 0.6B-int8 目录。
+        assert!(prefs.models_dir.is_none());
+        assert_eq!(
+            prefs.asr_download_url,
+            "https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B"
+        );
+        assert_eq!(prefs.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
+    }
+
+    #[test]
+    fn model_settings_normalize_paths_and_urls() {
+        let prefs = Prefs {
+            models_dir: Some("  D:/听风吟/models  ".into()),
+            asr_download_url:
+                " https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B "
+                    .into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(prefs.models_dir.as_deref(), Some("D:/听风吟/models"));
+        assert!(prefs.asr_download_url.starts_with("https://modelscope.cn/"));
+
+        let invalid = Prefs {
+            models_dir: Some("   ".into()),
+            asr_download_url: "file:///models".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert!(invalid.models_dir.is_none());
+        // 非法地址回退到内置默认地址，而不是留下一个无法请求的链接。
+        assert_eq!(invalid.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
+
+        // Windows canonicalize 的 verbatim 前缀不能写进配置，否则与扫描路径不相等。
+        let verbatim = Prefs {
+            models_dir: Some(r"\\?\D:\听风吟\bgm-models".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(
+            verbatim.models_dir.as_deref(),
+            Some(r"D:\听风吟\bgm-models")
+        );
+
+        let unc = Prefs {
+            models_dir: Some(r"\\?\UNC\nas\models".into()),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(unc.models_dir.as_deref(), Some(r"\\nas\models"));
     }
 
     #[test]

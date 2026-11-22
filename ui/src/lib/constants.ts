@@ -34,12 +34,22 @@ export const COMMANDS = {
   quitApp: 'quit_app',
   apiPublishState: 'api_publish_state',
   apiReply: 'api_reply',
+  modelsInfo: 'models_info',
+  chooseModelsDir: 'choose_models_dir',
+  resetModelsDir: 'reset_models_dir',
+  openModelsDir: 'open_models_dir',
+  downloadAsrModel: 'download_asr_model',
+  loadAsrModel: 'load_asr_model',
+  unloadAsrModel: 'unload_asr_model',
+  cancelAsrDownload: 'cancel_asr_download',
+  transcribeWav: 'transcribe_wav',
 } as const;
 
-/** Rust 推给前端的事件名；与 `src-tauri/src/api.rs` 保持一致。 */
+/** Rust 推给前端的事件名；与 `src-tauri/src/api.rs`、`models.rs` 保持一致。 */
 export const EVENTS = {
   libraryChanged: 'library-changed',
   apiCommand: 'api-command',
+  modelDownload: 'model-download-progress',
 } as const;
 
 export const PLAY_MODES = {

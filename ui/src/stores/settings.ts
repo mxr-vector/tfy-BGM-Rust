@@ -19,7 +19,7 @@ import { apiStatus } from './api';
 import { persistPrefs } from './prefs';
 import { state } from './state';
 
-export type SettingsTab = 'general' | 'playback' | 'integrations';
+export type SettingsTab = 'general' | 'playback' | 'models' | 'integrations';
 
 export const settingsOpen = ref(false);
 export const settingsTab = ref<SettingsTab>('general');

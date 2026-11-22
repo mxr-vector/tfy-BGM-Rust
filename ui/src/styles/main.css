@@ -6793,6 +6793,180 @@ input[type="checkbox"]:indeterminate::after {
   flex-wrap: wrap;
 }
 
+/* 模型：目录、下载与 ASR 列表 */
+
+.settings-input[readonly] {
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-model-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid rgba(230, 181, 102, 0.28);
+  background: rgba(230, 181, 102, 0.07);
+}
+
+.settings-model-callout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-model-callout-text strong {
+  font-size: 12px;
+}
+
+.settings-model-callout-text span {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.settings-model-callout-text small {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.settings-download {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings-download-bar {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.settings-download-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(25, 217, 139, 0.65), var(--accent-bright));
+  transition: width 0.2s ease;
+}
+
+.settings-download-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-download-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-inline-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-transcript {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.022);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.settings-transcript-text {
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.settings-model.is-loaded {
+  border-color: rgba(25, 217, 139, 0.32);
+  background: rgba(25, 217, 139, 0.06);
+}
+
+.settings-model-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-model-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.settings-model-title strong {
+  font-size: 12.5px;
+}
+
+.settings-badge {
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-3);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.settings-badge.is-accent {
+  border-color: rgba(25, 217, 139, 0.35);
+  background: rgba(25, 217, 139, 0.14);
+  color: var(--accent-bright);
+}
+
+.settings-model-path,
+.settings-model-meta {
+  font-size: 10.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-path {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.settings-model > .settings-btn {
+  flex-shrink: 0;
+}
+
 .settings-endpoints {
   display: flex;
   flex-direction: column;

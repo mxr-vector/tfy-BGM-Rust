@@ -1,19 +1,43 @@
 <script setup lang="ts">
 /**
- * 基本系统配置：顶栏齿轮打开的三个分组。
+ * 基本系统配置：顶栏齿轮打开的分组。
  *
  * - 常规：字体、开机自动启动、最小化托盘、GPU 加速，以及当前平台特有的集成项；
  * - 播放：启动自动播放、防休眠、淡入淡出与输出设备；
+ * - 模型：ASR 模型目录、下载地址、扫描到的模型列表与 sherpa-onnx 加载状态；
  * - 第三方接入：token、开放接口清单与 CORS。
  */
 
 import { computed, nextTick, ref, watch } from 'vue';
 import { cachedFonts, fontOptions, loadSystemFonts, type FontOption } from '@/lib/fonts';
-import { normalizeError } from '@/lib/format';
+import { formatBytes, normalizeError } from '@/lib/format';
 import { toast } from '@/lib/toast';
 import { wakeLockSupported } from '@/composables/useSystemIntegration';
 import type { CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
 import { apiStatus, refreshApiInfo } from '@/stores/api';
+import {
+  cancelDownload,
+  chooseModelsDir,
+  clearTranscript,
+  downloadDefaultModel,
+  downloadPercent,
+  downloadProgress,
+  downloadUrlDraft,
+  downloading,
+  loadAsrModel,
+  loadingModelPath,
+  modelsInfo,
+  modelsLoading,
+  modelsRootBadge,
+  openModelsDir,
+  refreshModels,
+  resetModelsDir,
+  saveDownloadUrl,
+  transcribeWav,
+  transcribing,
+  transcript,
+  unloadAsrModel,
+} from '@/stores/models';
 import {
   applyOutputRoutes,
   describeOutputIssue,
@@ -58,6 +82,7 @@ const prefs = computed(() => state.prefs);
 const TABS: { id: SettingsTab; label: string; hint: string; icon: string }[] = [
   { id: 'general', label: '常规', hint: '字体与系统集成', icon: 'sliders' },
   { id: 'playback', label: '播放', hint: '启动行为与输出', icon: 'wave' },
+  { id: 'models', label: '模型', hint: 'ASR 模型与下载', icon: 'chip' },
   { id: 'integrations', label: '第三方接入', hint: 'token / 接口 / CORS', icon: 'external' },
 ];
 
@@ -116,10 +141,25 @@ const corsHint = computed(
   () => CORS_MODES.find((mode) => mode.id === corsMode.value)?.hint ?? '',
 );
 
+// ---------------- 模型 ----------------
+
+const models = computed(() => modelsInfo.value?.models ?? []);
+const defaultModel = computed(() => modelsInfo.value?.defaultModel ?? null);
+const loadedModel = computed(() => modelsInfo.value?.loaded ?? null);
+const modelDownloading = computed(() => downloading.value || Boolean(modelsInfo.value?.downloading));
+
+const progressText = computed(() => {
+  const progress = downloadProgress.value;
+  if (!progress) return '准备下载…';
+  const file = progress.file || '准备中';
+  return `${file} · ${formatBytes(progress.overallReceived)} / ${formatBytes(progress.overallBytes)}`;
+});
+
 function selectTab(tab: SettingsTab): void {
   settingsTab.value = tab;
   if (tab === 'general') void ensureFonts();
   if (tab === 'playback') void refreshOutputs();
+  if (tab === 'models') void refreshModels();
   if (tab === 'integrations') void syncIntegrationForm();
 }
 
@@ -231,6 +271,7 @@ watch(settingsOpen, async (open) => {
   if (!open) return;
   if (settingsTab.value === 'general') void ensureFonts();
   if (settingsTab.value === 'playback') void refreshOutputs();
+  if (settingsTab.value === 'models') void refreshModels();
   if (settingsTab.value === 'integrations') void syncIntegrationForm();
   await nextTick();
   panel.value?.focus();
@@ -257,7 +298,7 @@ watch(settingsOpen, async (open) => {
           <div class="settings-heading">
             <span class="settings-kicker"><Icon name="settings" /> SYSTEM SETTINGS</span>
             <h2 class="settings-title">基本系统配置</h2>
-            <p class="settings-sub">字体与系统集成 · 播放行为 · 第三方接入</p>
+            <p class="settings-sub">字体与系统集成 · 播放行为 · ASR 模型 · 第三方接入</p>
           </div>
           <button
             type="button"
@@ -553,6 +594,238 @@ watch(settingsOpen, async (open) => {
                     `已启用 ${activeOutputs} 路输出；主音量是全局音量，每路音量叠加在它之上。`
                   }}
                 </p>
+              </div>
+            </section>
+
+            <!-- ============ 模型 ============ -->
+            <section
+              v-else-if="settingsTab === 'models'"
+              class="settings-group"
+              role="tabpanel"
+              aria-label="模型"
+            >
+              <div class="settings-group-head">
+                <h3>模型</h3>
+                <p>ASR 推理统一使用 sherpa-onnx；模型保存在本地目录，可自行替换。</p>
+              </div>
+
+              <div class="settings-subgroup">
+                <div class="settings-subgroup-head">
+                  <h4>模型目录</h4>
+                  <span class="settings-muted">{{ modelsRootBadge }}</span>
+                </div>
+                <div class="settings-token-row">
+                  <input
+                    class="settings-input"
+                    :value="modelsInfo?.root ?? '读取中…'"
+                    readonly
+                    spellcheck="false"
+                    aria-label="模型目录"
+                  />
+                  <button type="button" class="settings-btn" @click="chooseModelsDir">
+                    更改…
+                  </button>
+                  <button
+                    type="button"
+                    class="settings-btn"
+                    :disabled="modelsInfo?.isDefaultRoot"
+                    @click="resetModelsDir"
+                  >
+                    恢复默认
+                  </button>
+                  <button
+                    type="button"
+                    class="settings-icon-btn"
+                    title="打开模型目录"
+                    aria-label="打开模型目录"
+                    @click="openModelsDir"
+                  >
+                    <Icon name="folder" />
+                  </button>
+                  <button
+                    type="button"
+                    class="settings-icon-btn"
+                    title="重新扫描模型目录"
+                    aria-label="重新扫描模型目录"
+                    :disabled="modelsLoading"
+                    @click="refreshModels"
+                  >
+                    <Icon name="refresh" />
+                  </button>
+                </div>
+                <p class="settings-hint">
+                  默认位置为系统「下载」目录下的 <code>bgm-models</code>（Windows / Linux 均取系统下载目录）；
+                  进入本分组时，会自动扫描该目录下所有 <code>.onnx</code> 模型文件。
+                </p>
+              </div>
+
+              <div class="settings-subgroup">
+                <div class="settings-subgroup-head">
+                  <h4>下载地址</h4>
+                  <span class="settings-muted">固定 0.6B-int8</span>
+                </div>
+                <div class="settings-token-row">
+                  <input
+                    v-model="downloadUrlDraft"
+                    class="settings-input"
+                    spellcheck="false"
+                    placeholder="https://modelscope.cn/models/…"
+                    aria-label="模型下载地址"
+                  />
+                  <button
+                    type="button"
+                    class="settings-btn is-primary"
+                    @click="saveDownloadUrl(downloadUrlDraft)"
+                  >
+                    保存
+                  </button>
+                  <button type="button" class="settings-btn" @click="saveDownloadUrl('')">
+                    恢复默认
+                  </button>
+                </div>
+                <p class="settings-hint">
+                  默认指向 ModelScope 的 0.6B-int8 目录；下载内容固定为
+                  <code>conv_frontend.onnx</code>、<code>encoder.int8.onnx</code>、
+                  <code>decoder.int8.onnx</code> 与 <code>tokenizer/</code>，
+                  不会下载 fp32 或 1.7B 版本。
+                </p>
+              </div>
+
+              <div class="settings-subgroup">
+                <div class="settings-subgroup-head">
+                  <h4>ASR 模型列表</h4>
+                  <span class="settings-muted">{{ models.length }} 个 · 引擎 sherpa-onnx</span>
+                </div>
+
+                <div v-if="defaultModel && !defaultModel.installed" class="settings-model-callout">
+                  <div class="settings-model-callout-text">
+                    <strong>默认模型未安装</strong>
+                    <span>{{ defaultModel.name }}</span>
+                    <small>
+                      {{ formatBytes(defaultModel.expectedBytes) }}
+                      <template v-if="defaultModel.sizeBytes > 0">
+                        · 缺少 {{ defaultModel.missing.join('、') }}
+                      </template>
+                      <template v-else> · 尚未下载</template>
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    class="settings-btn is-primary"
+                    :disabled="modelDownloading"
+                    @click="downloadDefaultModel"
+                  >
+                    {{ modelDownloading ? '下载中…' : '下载' }}
+                  </button>
+                </div>
+
+                <div v-if="modelDownloading" class="settings-download">
+                  <div class="settings-download-bar">
+                    <span class="settings-download-fill" :style="{ width: `${downloadPercent}%` }"></span>
+                  </div>
+                  <div class="settings-download-meta">
+                    <span>{{ progressText }}</span>
+                    <span class="settings-download-tail">
+                      <span>{{ downloadPercent }}%</span>
+                      <button type="button" class="settings-link" @click="cancelDownload">
+                        取消下载
+                      </button>
+                    </span>
+                  </div>
+                </div>
+
+                <div class="settings-models">
+                  <article
+                    v-for="model in models"
+                    :key="model.id"
+                    class="settings-model"
+                    :class="{ 'is-loaded': loadedModel?.path === model.path }"
+                  >
+                    <div class="settings-model-main">
+                      <div class="settings-model-title">
+                        <strong>{{ model.name }}</strong>
+                        <span v-if="model.isDefault" class="settings-badge">默认</span>
+                        <span
+                          v-if="loadedModel?.path === model.path"
+                          class="settings-badge is-accent"
+                        >
+                          已加载
+                        </span>
+                      </div>
+                      <p class="settings-model-path" :title="model.path">{{ model.path }}</p>
+                      <p class="settings-model-meta">
+                        {{ model.files.length }} 个 .onnx · {{ formatBytes(model.sizeBytes) }}
+                        <span v-if="!model.loadable">
+                          · {{
+                            model.missing.length
+                              ? `缺少 ${model.missing.join('、')}`
+                              : '非 Qwen3 目录结构，暂不支持加载'
+                          }}
+                        </span>
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="settings-btn"
+                      :disabled="!model.loadable || Boolean(loadingModelPath)"
+                      @click="loadAsrModel(model)"
+                    >
+                      {{
+                        loadingModelPath === model.path
+                          ? '加载中…'
+                          : loadedModel?.path === model.path
+                            ? '重新加载'
+                            : model.loadable
+                              ? '加载'
+                              : '不可加载'
+                      }}
+                    </button>
+                  </article>
+                  <p v-if="modelsLoading && models.length === 0" class="settings-hint">
+                    正在扫描模型目录…
+                  </p>
+                  <p v-else-if="models.length === 0" class="settings-hint">
+                    未在模型目录下找到 .onnx 模型{{ defaultModel?.installed ? '' : '，可先下载默认模型' }}。
+                  </p>
+                </div>
+
+                <p v-if="modelsInfo?.warnings.length" class="settings-hint is-warn">
+                  {{ modelsInfo.warnings.join('；') }}
+                </p>
+
+                <div class="settings-inline">
+                  <span class="settings-muted">
+                    {{
+                      loadedModel
+                        ? `已加载 ${loadedModel.name} · ${loadedModel.engine} · ${loadedModel.threads} 线程`
+                        : '尚未加载模型'
+                    }}
+                  </span>
+                  <div class="settings-inline-actions">
+                    <button
+                      v-if="loadedModel"
+                      type="button"
+                      class="settings-link"
+                      :disabled="transcribing"
+                      @click="transcribeWav"
+                    >
+                      {{ transcribing ? '识别中…' : '识别 WAV…' }}
+                    </button>
+                    <button
+                      v-if="loadedModel"
+                      type="button"
+                      class="settings-link"
+                      @click="unloadAsrModel"
+                    >
+                      释放模型
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="transcript !== null" class="settings-transcript">
+                  <span class="settings-transcript-text">{{ transcript || '（未识别到文本）' }}</span>
+                  <button type="button" class="settings-link" @click="clearTranscript">清除</button>
+                </div>
               </div>
             </section>
 

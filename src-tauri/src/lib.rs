@@ -4,6 +4,7 @@ mod desktop;
 mod fonts;
 mod library_root;
 mod library_watch;
+mod models;
 mod settings;
 mod state;
 mod wallpapers;
@@ -84,6 +85,15 @@ pub fn run() {
             commands::choose_library_dir,
             commands::reset_library_dir,
             commands::open_library_dir,
+            commands::models_info,
+            commands::choose_models_dir,
+            commands::reset_models_dir,
+            commands::open_models_dir,
+            commands::download_asr_model,
+            commands::load_asr_model,
+            commands::unload_asr_model,
+            commands::cancel_asr_download,
+            commands::transcribe_wav,
             commands::export_info,
             commands::export_track,
             commands::create_category,
