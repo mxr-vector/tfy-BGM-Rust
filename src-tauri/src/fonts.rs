@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 use ttf_parser::{Face, name_id};
@@ -29,7 +30,15 @@ pub struct SystemFont {
 }
 
 /// 扫描系统字体；单个文件解析失败只跳过该文件，不影响整体结果。
+///
+/// 字体列表在进程内缓存：解析要读取并遍历全部字体文件，歌词设置窗每次打开
+/// 都重新扫描会有明显延迟。运行期新装的字体重启应用后出现即可。
 pub fn list() -> Vec<SystemFont> {
+    static CACHE: OnceLock<Vec<SystemFont>> = OnceLock::new();
+    CACHE.get_or_init(scan).clone()
+}
+
+fn scan() -> Vec<SystemFont> {
     let mut families: BTreeMap<String, SystemFont> = BTreeMap::new();
     let mut seen: HashSet<String> = HashSet::new();
 

@@ -23,6 +23,7 @@ interface TauriGlobal {
       event: string,
       handler: (event: TauriEventPayload<T>) => void,
     ): Promise<() => void>;
+    emit<T>(event: string, payload?: T): Promise<void>;
   };
   window?: {
     getCurrentWindow(): TauriAppWindow;
@@ -68,4 +69,10 @@ export async function listen<T>(
     console.warn(`[event] 无法监听 ${event}`, error);
     return null;
   }
+}
+
+/** 向前端所有窗口广播事件；非 Tauri 环境或事件插件不可用时静默忽略。 */
+export function emit<T>(event: string, payload?: T): Promise<void> {
+  if (!bridge?.event?.emit) return Promise.resolve();
+  return bridge.event.emit(event, payload);
 }

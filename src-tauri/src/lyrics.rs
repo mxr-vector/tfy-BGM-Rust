@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Size, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent, webview::PageLoadEvent,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent, webview::PageLoadEvent,
 };
 
 use crate::desktop::DesktopState;
@@ -31,6 +31,15 @@ pub const LYRICS_DATA_EVENT: &str = "desktop-lyrics-data";
 pub const LYRICS_SIZE_EVENT: &str = "desktop-lyrics-size";
 /// 锁定态下鼠标是否进入歌词热区；前端据此显示 / 隐藏「解锁」入口。
 pub const LYRICS_HOVER_EVENT: &str = "desktop-lyrics-hover";
+/// 显示设置悬浮窗 label；需与 `capabilities/default.json` 中的 windows 列表一致。
+pub const LYRICS_SETTINGS_LABEL: &str = "desktop-lyrics-settings";
+/// 显示设置悬浮窗开关状态广播；Aa 按钮据此高亮。
+pub const LYRICS_SETTINGS_EVENT: &str = "desktop-lyrics-settings-state";
+/// 设置悬浮窗的逻辑像素尺寸（内容完整显示，不滚动）；高度需容纳全部控件。
+const LYRICS_SETTINGS_WIDTH: f64 = 380.0;
+const LYRICS_SETTINGS_HEIGHT: f64 = 420.0;
+/// 设置悬浮窗与歌词条之间的间距。
+const LYRICS_SETTINGS_GAP: f64 = 8.0;
 
 /// 窗口默认 / 允许的**逻辑像素**尺寸；与前端 `LYRICS_SIZE_LIMITS` 保持一致。
 pub const LYRICS_DEFAULT_WIDTH: f64 = 760.0;
@@ -140,6 +149,13 @@ pub struct LyricsHover {
     pub hovered: bool,
 }
 
+/// 显示设置悬浮窗开关事件负载。
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsSettingsState {
+    pub open: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct LockState {
     locked: bool,
@@ -238,9 +254,116 @@ pub fn set_enabled(app: &AppHandle, state: &LyricsState, enabled: bool) -> Resul
         if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
             let _ = window.close();
         }
+        close_settings(app);
     }
     emit_control(app, enabled);
     Ok(())
+}
+
+/// 关闭显示设置悬浮窗（歌词窗口关闭 / 歌词开关关闭时调用）。
+pub fn close_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LYRICS_SETTINGS_LABEL) {
+        let _ = window.close();
+    }
+}
+
+/// 打开 / 关闭贴在歌词条上方的显示设置悬浮窗。
+pub fn toggle_settings(app: &AppHandle) -> Result<()> {
+    if let Some(window) = app.get_webview_window(LYRICS_SETTINGS_LABEL) {
+        let _ = window.close();
+        return Ok(());
+    }
+    app.get_webview_window(LYRICS_WINDOW_LABEL)
+        .context("桌面歌词窗口尚未创建")?;
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        LYRICS_SETTINGS_LABEL,
+        WebviewUrl::App("lyrics-settings.html".into()),
+    )
+    .title("桌面歌词设置")
+    .inner_size(LYRICS_SETTINGS_WIDTH, LYRICS_SETTINGS_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(true)
+    .visible(false)
+    .on_page_load(|window, payload| {
+        if payload.event() == PageLoadEvent::Finished {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    })
+    .build()
+    .context("创建桌面歌词设置窗口失败")?;
+
+    place_settings(app, &window)?;
+    window
+        .set_always_on_top(true)
+        .context("设置桌面歌词设置窗口置顶失败")?;
+
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            let _ = handle.emit(LYRICS_SETTINGS_EVENT, LyricsSettingsState { open: false });
+        }
+    });
+
+    let _ = app.emit(LYRICS_SETTINGS_EVENT, LyricsSettingsState { open: true });
+    Ok(())
+}
+
+/// 设置悬浮窗贴在歌词条右上方；上方空间不足时改贴下方，并钳制到当前屏幕工作区内。
+fn place_settings(app: &AppHandle, settings: &WebviewWindow) -> Result<()> {
+    let lyrics = app
+        .get_webview_window(LYRICS_WINDOW_LABEL)
+        .context("桌面歌词窗口尚未创建")?;
+    let monitor = match lyrics.current_monitor()? {
+        Some(monitor) => monitor,
+        None => app
+            .primary_monitor()?
+            .context("无法定位当前屏幕，无法放置桌面歌词设置窗口")?,
+    };
+    let work = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let lyrics_position = lyrics.outer_position().context("读取歌词窗口位置失败")?;
+    let lyrics_size = lyrics.outer_size().context("读取歌词窗口尺寸失败")?;
+    let width = (LYRICS_SETTINGS_WIDTH * scale).round() as i32;
+    let height = (LYRICS_SETTINGS_HEIGHT * scale).round() as i32;
+    let gap = (LYRICS_SETTINGS_GAP * scale).round() as i32;
+
+    // 右对齐歌词条；优先贴正上方，上方放不下时改贴下方，避免遮住歌词。
+    let x = clamp_axis(
+        lyrics_position.x + lyrics_size.width as i32 - width,
+        work.position.x,
+        work.size.width,
+        width,
+    );
+    let above = lyrics_position.y - height - gap;
+    let below = lyrics_position.y + lyrics_size.height as i32 + gap;
+    let y = if above >= work.position.y {
+        clamp_axis(above, work.position.y, work.size.height, height)
+    } else {
+        clamp_axis(below, work.position.y, work.size.height, height)
+    };
+
+    settings
+        .set_position(PhysicalPosition::new(x, y))
+        .context("设置桌面歌词设置窗口位置失败")?;
+    Ok(())
+}
+
+/// 歌词条移动 / 改尺寸后让设置悬浮窗继续贴住它；设置窗未打开时无操作。
+fn sync_settings_position(app: &AppHandle) {
+    let Some(settings) = app.get_webview_window(LYRICS_SETTINGS_LABEL) else {
+        return;
+    };
+    let _ = place_settings(app, &settings);
 }
 
 fn emit_hover(app: &AppHandle, hovered: bool) {
@@ -568,6 +691,7 @@ fn ensure_window(app: &AppHandle) -> Result<()> {
             }
             lyrics.set_enabled(false);
             emit_control(&handle, false);
+            close_settings(&handle);
             if !handle.state::<DesktopState>().quitting() {
                 handle.state::<AppState>().set_desktop_lyrics_enabled(false);
             }
@@ -578,10 +702,13 @@ fn ensure_window(app: &AppHandle) -> Result<()> {
                 state.set_enabled(false);
                 emit_control(&handle, false);
             }
+            close_settings(&handle);
         }
         WindowEvent::Focused(false) => {
             enforce_top_most(&handle);
         }
+        // 设置悬浮窗锚定在歌词条上；歌词条被拖动 / 改尺寸后重新贴合。
+        WindowEvent::Moved(_) => sync_settings_position(&handle),
         WindowEvent::Resized(size) => {
             if let Some(window) = handle.get_webview_window(LYRICS_WINDOW_LABEL) {
                 if let Ok(scale) = window.scale_factor() {
@@ -597,6 +724,7 @@ fn ensure_window(app: &AppHandle) -> Result<()> {
                     }
                 }
             }
+            sync_settings_position(&handle);
         }
         _ => {}
     });

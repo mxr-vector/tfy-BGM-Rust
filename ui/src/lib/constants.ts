@@ -55,6 +55,8 @@ export const COMMANDS = {
   resizeDesktopLyrics: 'resize_desktop_lyrics',
   placeDesktopLyrics: 'place_desktop_lyrics',
   setDesktopLyricsLock: 'set_desktop_lyrics_lock',
+  /** 打开 / 关闭贴在歌词条上方的独立显示设置悬浮窗。 */
+  toggleDesktopLyricsSettings: 'toggle_desktop_lyrics_settings',
 } as const;
 
 /** Rust 推给前端的事件名；与 `src-tauri/src/api.rs`、`models.rs`、`subtitles.rs`、`lyrics.rs` 保持一致。 */
@@ -68,6 +70,12 @@ export const EVENTS = {
   desktopLyricsData: 'desktop-lyrics-data',
   desktopLyricsSize: 'desktop-lyrics-size',
   desktopLyricsHover: 'desktop-lyrics-hover',
+  /** 歌词窗口 ↔ 设置悬浮窗：显示样式（字体 / 字号 / 配色 / 尺寸 / 锁定）实时同步。 */
+  desktopLyricsStyle: 'desktop-lyrics-style',
+  /** 设置悬浮窗 → 歌词窗口：锁定 / 恢复默认等只能由歌词窗口执行的动作。 */
+  desktopLyricsCommand: 'desktop-lyrics-command',
+  /** 设置悬浮窗开关状态，Aa 按钮据此高亮。 */
+  desktopLyricsSettings: 'desktop-lyrics-settings-state',
 } as const;
 
 export const PLAY_MODES = {

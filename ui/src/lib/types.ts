@@ -490,6 +490,16 @@ export interface LyricsHover {
   hovered: boolean;
 }
 
+/** 设置悬浮窗只能请求、必须由歌词窗口执行的动作（锁定需要歌词热区）。 */
+export type LyricsCommand =
+  | { action: 'reset' }
+  | { action: 'lock'; locked: boolean };
+
+/** `desktop-lyrics-settings` 事件负载：显示设置悬浮窗是否打开。 */
+export interface LyricsSettingsState {
+  open: boolean;
+}
+
 /** 锁定态歌词热区（窗口内逻辑像素），用于 Rust 侧光标轮询命中检测。 */
 export interface LyricsHotZone {
   x: number;

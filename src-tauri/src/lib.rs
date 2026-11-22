@@ -112,6 +112,7 @@ pub fn run() {
             commands::desktop_lyrics_snapshot,
             commands::keep_desktop_lyrics_on_top,
             commands::resize_desktop_lyrics,
+            commands::toggle_desktop_lyrics_settings,
             commands::place_desktop_lyrics,
             commands::set_desktop_lyrics_lock,
             commands::export_info,

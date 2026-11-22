@@ -5,8 +5,8 @@
  * 避免错过创建前的最后一次广播。播放进度在本地按 100ms 平滑推进，
  * 后端每 1 秒校准一次 position，暂停 / 切歌 / 停止由快照状态直接驱动。
  *
- * 另外负责：定时巡检置顶状态；字体 / 字号 / 颜色 / 背景与窗口宽高的自定义及持久化
- * （含用户手动拖拽边缘后的尺寸记忆）；以及拦截拖动区域的双击，避免误触发窗口最大化。
+ * 另外负责：定时巡检置顶状态；Aa 打开的独立设置窗负责字体 / 字号 / 颜色 / 背景，
+ * 这里应用其修改并持久化用户拖拽边缘后的尺寸；以及拦截拖动区域的双击，避免误触发窗口最大化。
  */
 
 import {
@@ -15,16 +15,23 @@ import {
   EVENTS,
   LYRICS_SIZE_LIMITS,
 } from '@/lib/constants';
-import { invoke, listen } from '@/lib/tauri';
+import {
+  DEFAULT_LYRICS_STYLE,
+  readLyricsStyle,
+  sanitizeLyricsStyle,
+  writeLyricsStyle,
+} from '@/lib/lyrics-style';
+import { emit, invoke, listen } from '@/lib/tauri';
 import type {
   LyricLine,
   LyricsBootstrap,
+  LyricsCommand,
   LyricsHover,
   LyricsHotZone,
+  LyricsSettingsState,
   LyricsSnapshot,
   LyricsStyle,
   LyricsWindowSize,
-  SystemFont,
 } from '@/lib/types';
 
 const EMPTY: LyricsSnapshot = {
@@ -36,38 +43,6 @@ const EMPTY: LyricsSnapshot = {
   lines: [],
   hasLyrics: false,
 };
-
-/** 显示样式保存在歌词窗口自己的 localStorage 中，重启应用后仍生效。 */
-const STORAGE_KEY = 'tfy-bgm:desktop-lyrics-style';
-/** 存储结构版本：布局 / 默认配色调整时 +1，旧存储会做一次兼容迁移。 */
-const STYLE_VERSION = 4;
-const FONT_DEFAULT_VALUE = '__default__';
-const DEFAULT_STYLE: LyricsStyle = {
-  fontFamily: '',
-  fontSize: LYRICS_SIZE_LIMITS.fontSize.default,
-  highlight: '#19d98b',
-  background: 62,
-  width: LYRICS_SIZE_LIMITS.width.default,
-  height: LYRICS_SIZE_LIMITS.height.default,
-  locked: false,
-};
-const COLOR_PRESETS = [
-  { label: '薄荷绿', value: '#19d98b' },
-  { label: '纯白', value: '#e6f4ee' },
-  { label: '暖黄', value: '#efb32e' },
-  { label: '樱粉', value: '#ee6f9f' },
-  { label: '天蓝', value: '#5fa8e8' },
-];
-/** 旧版预设颜色 → 加深一个色度后的新预设，迁移时不改动用户自定义颜色。 */
-const LEGACY_COLOR_MAP: Readonly<Record<string, string>> = {
-  '#6ff3bc': '#19d98b',
-  '#ffffff': '#e6f4ee',
-  '#ffd479': '#efb32e',
-  '#ff9ec4': '#ee6f9f',
-  '#8ecbff': '#5fa8e8',
-};
-/** 扫描不到系统字体时的兜底选项。 */
-const FALLBACK_FONTS = ['Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'Segoe UI'];
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -92,30 +67,12 @@ const sizeDownBtn = element<HTMLButtonElement>('lyrics-size-down');
 const sizeUpBtn = element<HTMLButtonElement>('lyrics-size-up');
 const sizeBadge = element('lyrics-size-badge');
 const settingsBtn = element<HTMLButtonElement>('lyrics-settings');
-const panelEl = element('lyrics-panel');
-const panelCloseBtn = element<HTMLButtonElement>('lp-close');
-const panelLockBtn = element<HTMLButtonElement>('lp-lock');
-const fontSelect = element<HTMLSelectElement>('lp-font');
-const fontState = element('lp-font-state');
-const sizeInput = element<HTMLInputElement>('lp-size');
-const sizeValue = element('lp-size-value');
-const bgInput = element<HTMLInputElement>('lp-bg');
-const bgValue = element('lp-bg-value');
-const widthInput = element<HTMLInputElement>('lp-width');
-const widthValue = element('lp-width-value');
-const heightInput = element<HTMLInputElement>('lp-height');
-const heightValue = element('lp-height-value');
-const colorsEl = element('lp-colors');
-const topState = element('lp-top-state');
-const repinBtn = element<HTMLButtonElement>('lp-repin');
-const resetBtn = element<HTMLButtonElement>('lp-reset');
 
 let snapshot: LyricsSnapshot = EMPTY;
 let basePosition = 0;
 let baseStamp = performance.now();
 let playing = false;
 let rate = 1;
-let fontsLoaded = false;
 
 function setText(node: HTMLElement, text: string): void {
   if (node.textContent !== text) node.textContent = text;
@@ -306,77 +263,63 @@ function apply(next: LyricsSnapshot): void {
 
 // ---------------- 显示样式 ----------------
 
-function persistStyle(next: LyricsStyle): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...next, version: STYLE_VERSION }));
-  } catch {
-    // 隐私模式 / 存储被禁用时仅本次会话生效。
-  }
-}
+let style = readLyricsStyle();
 
-function readStyle(): LyricsStyle {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_STYLE };
-    const parsed = JSON.parse(raw) as Partial<LyricsStyle> & { version?: number };
-    const style: LyricsStyle = {
-      fontFamily: typeof parsed.fontFamily === 'string' ? parsed.fontFamily : '',
-      fontSize:
-        typeof parsed.fontSize === 'number' && Number.isFinite(parsed.fontSize)
-          ? clamp(
-              Math.round(parsed.fontSize),
-              LYRICS_SIZE_LIMITS.fontSize.min,
-              LYRICS_SIZE_LIMITS.fontSize.max,
-            )
-          : DEFAULT_STYLE.fontSize,
-      highlight:
-        typeof parsed.highlight === 'string' && /^#[0-9a-f]{6}$/i.test(parsed.highlight)
-          ? parsed.highlight
-          : DEFAULT_STYLE.highlight,
-      background:
-        typeof parsed.background === 'number' && Number.isFinite(parsed.background)
-          ? clamp(Math.round(parsed.background), 0, 90)
-          : DEFAULT_STYLE.background,
-      width:
-        typeof parsed.width === 'number' && Number.isFinite(parsed.width)
-          ? clamp(
-              Math.round(parsed.width),
-              LYRICS_SIZE_LIMITS.width.min,
-              LYRICS_SIZE_LIMITS.width.max,
-            )
-          : DEFAULT_STYLE.width,
-      height:
-        typeof parsed.height === 'number' && Number.isFinite(parsed.height)
-          ? clamp(
-              Math.round(parsed.height),
-              LYRICS_SIZE_LIMITS.height.min,
-              LYRICS_SIZE_LIMITS.height.max,
-            )
-          : DEFAULT_STYLE.height,
-      locked: parsed.locked === true,
-    };
-    // 旧版的默认高度偏大（也曾被最小化事件写成 110）；升级时把高度恢复为新默认，
-    // 字体 / 字号 / 背景等个性化设置保持不变；预设高亮色统一加深一个色度。
-    if (parsed.version !== STYLE_VERSION) {
-      style.height = DEFAULT_STYLE.height;
-      style.highlight = LEGACY_COLOR_MAP[style.highlight.toLowerCase()] ?? style.highlight;
-      persistStyle(style);
-    }
-    return style;
-  } catch {
-    return { ...DEFAULT_STYLE };
-  }
-}
-
-let style = readStyle();
-
+/** 本地修改后持久化并广播；设置悬浮窗会同步显示新值。 */
 function saveStyle(): void {
-  persistStyle(style);
+  writeLyricsStyle(style);
+  void emit(EVENTS.desktopLyricsStyle, { ...style }).catch(() => undefined);
+}
+
+function sameStyle(left: LyricsStyle, right: LyricsStyle): boolean {
+  return (
+    left.fontFamily === right.fontFamily &&
+    left.fontSize === right.fontSize &&
+    left.highlight === right.highlight &&
+    left.background === right.background &&
+    left.width === right.width &&
+    left.height === right.height &&
+    left.locked === right.locked
+  );
+}
+
+/** 设置悬浮窗修改样式后同步过来；只应用与持久化，不再广播以免来回触发。 */
+function adoptStyle(payload: LyricsStyle): void {
+  const next = sanitizeLyricsStyle(payload);
+  if (sameStyle(next, style)) return;
+  const sizeChanged = next.width !== style.width || next.height !== style.height;
+  const lockChanged = next.locked !== style.locked;
+  style = next;
+  writeLyricsStyle(style);
+  applyStyle();
+  applyLockState();
+  // 锁定还涉及原生穿透状态，必须同步给 Rust，否则会出现「界面已解锁但仍点击穿透」。
+  if (lockChanged) pushLockState(true);
+  if (sizeChanged) void resizeWindow();
+}
+
+/** 设置悬浮窗请求、只能由歌词窗口执行的动作（锁定需要热区）。 */
+function handleCommand(command: LyricsCommand): void {
+  if (command.action === 'lock') {
+    setLocked(command.locked);
+    return;
+  }
+  resetStyle();
+}
+
+/** 恢复默认样式：尺寸、底部居中位置与锁定状态一起还原。 */
+function resetStyle(): void {
+  style = { ...DEFAULT_LYRICS_STYLE };
+  saveStyle();
+  applyStyle();
+  applyLockState();
+  pushLockState(true);
+  void resizeWindow(true);
 }
 
 /** 族名 → CSS font-family；始终保留默认字体栈兜底缺字。 */
 function cssFont(family: string): string {
-  if (!family || family === FONT_DEFAULT_VALUE) return DEFAULT_FONT_STACK;
+  if (!family) return DEFAULT_FONT_STACK;
   const safe = family.replace(/["\\]/g, '');
   return `"${safe}", ${DEFAULT_FONT_STACK}`;
 }
@@ -389,27 +332,7 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
-function renderSwatches(): void {
-  colorsEl.replaceChildren();
-  for (const preset of COLOR_PRESETS) {
-    const swatch = document.createElement('button');
-    swatch.type = 'button';
-    swatch.className =
-      'lp-swatch' +
-      (preset.value.toLowerCase() === style.highlight.toLowerCase() ? ' is-active' : '');
-    swatch.style.background = preset.value;
-    swatch.title = preset.label;
-    swatch.setAttribute('aria-label', preset.label);
-    swatch.addEventListener('click', () => {
-      style.highlight = preset.value;
-      saveStyle();
-      applyStyle();
-    });
-    colorsEl.append(swatch);
-  }
-}
-
-/** 把当前样式写进 CSS 变量并同步控件显示。 */
+/** 把当前样式写进 CSS 变量，并刷新工具栏字号与步进按钮。 */
 function applyStyle(): void {
   const root = document.documentElement.style;
   root.setProperty('--lyrics-font', cssFont(style.fontFamily));
@@ -422,90 +345,18 @@ function applyStyle(): void {
   root.setProperty('--lyrics-bg-top', `rgba(4, 14, 11, ${top.toFixed(2)})`);
   root.setProperty('--lyrics-bg-bottom', `rgba(4, 14, 11, ${(top * 0.55).toFixed(2)})`);
 
-  sizeInput.value = String(style.fontSize);
-  sizeValue.textContent = `${style.fontSize}px`;
   sizeBadge.textContent = String(style.fontSize);
   sizeBadge.title = `当前字体大小 ${style.fontSize}px`;
   sizeDownBtn.disabled = style.fontSize <= LYRICS_SIZE_LIMITS.fontSize.min;
   sizeUpBtn.disabled = style.fontSize >= LYRICS_SIZE_LIMITS.fontSize.max;
-  bgInput.value = String(style.background);
-  bgValue.textContent = `${style.background}%`;
-  widthInput.value = String(style.width);
-  widthValue.textContent = `${style.width}px`;
-  heightInput.value = String(style.height);
-  heightValue.textContent = `${style.height}px`;
-  if (fontsLoaded) fontSelect.value = style.fontFamily || FONT_DEFAULT_VALUE;
-  renderSwatches();
   // 字号 / 字体变化后重建当前行，已唱词比例与热区随新布局刷新。
   render(true);
   scheduleHotZone();
 }
 
-/** 后台扫描系统字体；面板打开时直接使用结果，避免空白 / 卡顿。 */
-async function loadFonts(): Promise<void> {
-  if (fontsLoaded) return;
-  fontsLoaded = true;
-  fontSelect.replaceChildren();
-  fontSelect.disabled = true;
-  fontState.textContent = '正在读取系统字体…';
-
-  const fragment = document.createDocumentFragment();
-  const addOption = (value: string, label: string): void => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = label;
-    fragment.append(option);
-  };
-  addOption(FONT_DEFAULT_VALUE, '系统默认（自动匹配中文字体）');
-
-  let families: { value: string; label: string }[] = FALLBACK_FONTS.map((family) => ({
-    value: family,
-    label: family,
-  }));
-  let scanned = false;
-  try {
-    const fonts = await invoke<SystemFont[]>(COMMANDS.systemFonts);
-    if (fonts.length > 0) {
-      families = fonts.map((font) => ({ value: font.family, label: font.label || font.family }));
-      scanned = true;
-    }
-  } catch {
-    // 扫描失败时仍提供通用字体族。
-  }
-  // 后端已按「中文字体优先」排序，这里保持原顺序并按族名去重。
-  const seen = new Set<string>([FONT_DEFAULT_VALUE]);
-  for (const font of families) {
-    const family = font.value.trim();
-    if (!family || seen.has(family)) continue;
-    seen.add(family);
-    addOption(family, font.label || family);
-  }
-  fontSelect.append(fragment);
-  fontSelect.disabled = false;
-
-  // 配置里的字体本机已不存在时回退默认，避免出现「下拉空白」。
-  const wanted = style.fontFamily || FONT_DEFAULT_VALUE;
-  if (!seen.has(wanted)) {
-    style.fontFamily = '';
-    saveStyle();
-    fontState.textContent = '原字体不可用，已回退系统默认';
-    applyStyle();
-  } else {
-    fontState.textContent = scanned ? `共 ${seen.size - 1} 款字体` : '使用内置字体清单';
-  }
-  fontSelect.value = style.fontFamily || FONT_DEFAULT_VALUE;
-  fontSelect.dataset.ready = '1';
-}
-
-function setPanel(open: boolean): void {
-  if (style.locked) open = false;
-  panelEl.hidden = !open;
-  settingsBtn.classList.toggle('is-open', open);
-  rootEl.classList.toggle('is-panel-open', open);
-  if (open) {
-    void loadFonts();
-    scheduleHotZone();
-  }
+/** Aa 只负责开关独立设置悬浮窗，歌词条自身尺寸不变。 */
+function toggleSettings(): void {
+  void invoke(COMMANDS.toggleDesktopLyricsSettings).catch(() => undefined);
 }
 
 // ---------------- 锁定 / 鼠标穿透 ----------------
@@ -570,7 +421,6 @@ function applyLockState(): void {
   }
   unlockBtn.hidden = true;
   lockBtn.classList.toggle('is-open', style.locked);
-  if (style.locked) setPanel(false);
 }
 
 function setLocked(locked: boolean): void {
@@ -610,7 +460,7 @@ async function resizeWindow(place = false): Promise<void> {
 
 let sizeSaveTimer = 0;
 
-/** 用户拖拽边缘或滑块调整后记住尺寸；只更新状态，不再回写窗口以免形成循环。 */
+/** 用户拖拽边缘调整后记住尺寸；只更新状态，不再回写窗口以免形成循环。 */
 function rememberSize(next: LyricsWindowSize): void {
   // 最小化（Win+M / 显示桌面）时 Windows 广播的是 0×0，不能当成用户拖拽结果；
   // 否则会被钳到最小值并持久化，下次打开歌词窗就只剩一条细带。
@@ -626,14 +476,10 @@ function rememberSize(next: LyricsWindowSize): void {
     LYRICS_SIZE_LIMITS.height.min,
     LYRICS_SIZE_LIMITS.height.max,
   );
-  // 只同步尺寸控件，避免拖拽期间高频重建色块等 DOM。
-  widthInput.value = String(style.width);
-  widthValue.textContent = `${style.width}px`;
-  heightInput.value = String(style.height);
-  heightValue.textContent = `${style.height}px`;
-  // 拖拽会连续触发 Resized，写 localStorage 做 200ms 防抖。
+  // 拖拽会连续触发 Resized，写 localStorage 做 200ms 防抖。这里只落盘不广播：
+  // 设置悬浮窗通过 desktop-lyrics-size 自行同步输入框，广播整份样式只会互相覆盖。
   window.clearTimeout(sizeSaveTimer);
-  sizeSaveTimer = window.setTimeout(saveStyle, 200);
+  sizeSaveTimer = window.setTimeout(() => writeLyricsStyle(style), 200);
   scheduleHotZone();
 }
 
@@ -642,12 +488,9 @@ function rememberSize(next: LyricsWindowSize): void {
 /** 重新声明 Z 序；Rust 侧在窗口失焦时也会主动调用一次。 */
 async function enforceTop(): Promise<void> {
   try {
-    const ok = await invoke<boolean>(COMMANDS.keepDesktopLyricsOnTop);
-    setText(topState, ok ? '已置顶 · 始终在最前' : '置顶失效，请重试');
-    topState.classList.toggle('is-bad', !ok);
+    await invoke<boolean>(COMMANDS.keepDesktopLyricsOnTop);
   } catch {
-    setText(topState, '置顶状态未知');
-    topState.classList.add('is-bad');
+    // 窗口可能正在关闭；下次巡检会重试。
   }
 }
 
@@ -672,10 +515,8 @@ function installControls(): void {
   closeBtn.addEventListener('click', () => {
     void invoke(COMMANDS.setDesktopLyricsEnabled, { enabled: false });
   });
-  settingsBtn.addEventListener('click', () => setPanel(panelEl.hidden));
-  panelCloseBtn.addEventListener('click', () => setPanel(false));
+  settingsBtn.addEventListener('click', toggleSettings);
   lockBtn.addEventListener('click', () => setLocked(true));
-  panelLockBtn.addEventListener('click', () => setLocked(true));
   unlockBtn.addEventListener('click', () => setLocked(false));
   sizeDownBtn.addEventListener('click', () => stepFontSize(-FONT_SIZE_STEP));
   sizeUpBtn.addEventListener('click', () => stepFontSize(FONT_SIZE_STEP));
@@ -688,57 +529,6 @@ function installControls(): void {
   }
   rootEl.addEventListener('mouseleave', () => {
     if (style.locked) showUnlock(false);
-  });
-
-  fontSelect.addEventListener('change', () => {
-    style.fontFamily = fontSelect.value === FONT_DEFAULT_VALUE ? '' : fontSelect.value;
-    saveStyle();
-    applyStyle();
-    if (style.fontFamily) fontState.textContent = `已选择 ${fontSelect.selectedOptions[0]?.textContent ?? style.fontFamily}`;
-  });
-  sizeInput.addEventListener('input', () => {
-    style.fontSize = clamp(
-      Number(sizeInput.value) || DEFAULT_STYLE.fontSize,
-      LYRICS_SIZE_LIMITS.fontSize.min,
-      LYRICS_SIZE_LIMITS.fontSize.max,
-    );
-    saveStyle();
-    applyStyle();
-  });
-  bgInput.addEventListener('input', () => {
-    style.background = clamp(Number(bgInput.value) || 0, 0, 90);
-    saveStyle();
-    applyStyle();
-  });
-  widthInput.addEventListener('input', () => {
-    style.width = clamp(
-      Number(widthInput.value) || DEFAULT_STYLE.width,
-      LYRICS_SIZE_LIMITS.width.min,
-      LYRICS_SIZE_LIMITS.width.max,
-    );
-    saveStyle();
-    applyStyle();
-    void resizeWindow();
-  });
-  heightInput.addEventListener('input', () => {
-    style.height = clamp(
-      Number(heightInput.value) || DEFAULT_STYLE.height,
-      LYRICS_SIZE_LIMITS.height.min,
-      LYRICS_SIZE_LIMITS.height.max,
-    );
-    saveStyle();
-    applyStyle();
-    void resizeWindow();
-  });
-  repinBtn.addEventListener('click', () => void enforceTop());
-  resetBtn.addEventListener('click', () => {
-    style = { ...DEFAULT_STYLE };
-    saveStyle();
-    applyStyle();
-    applyLockState();
-    pushLockState(true);
-    // 「恢复默认」同时还原尺寸与底部居中位置。
-    void resizeWindow(true);
   });
 
   // Tauri 的拖动脚本在 document 上监听 mousedown，双击拖拽区域会触发最大化。
@@ -762,11 +552,15 @@ async function init(): Promise<void> {
   // 先按偏好尺寸调整并贴到底部居中，再开始拉取数据；窗口在页面加载完成后才显示，
   // 因此用户看到的就是最终尺寸与位置。
   void resizeWindow(true);
-  // 字体扫描放到后台，面板首次打开时列表已就绪；失败仍会回退到内置字体清单。
-  window.setTimeout(() => void loadFonts(), 350);
   await listen<LyricsSnapshot>(EVENTS.desktopLyricsData, apply);
   await listen<LyricsWindowSize>(EVENTS.desktopLyricsSize, rememberSize);
   await listen<LyricsHover>(EVENTS.desktopLyricsHover, ({ hovered }) => showUnlock(hovered));
+  // 独立设置悬浮窗的修改实时应用；锁定 / 恢复默认由设置窗请求、这里执行。
+  await listen<LyricsStyle>(EVENTS.desktopLyricsStyle, adoptStyle);
+  await listen<LyricsCommand>(EVENTS.desktopLyricsCommand, handleCommand);
+  await listen<LyricsSettingsState>(EVENTS.desktopLyricsSettings, ({ open }) => {
+    settingsBtn.classList.toggle('is-open', open);
+  });
   try {
     const boot = await invoke<LyricsBootstrap>(COMMANDS.desktopLyricsSnapshot);
     apply(boot.snapshot);

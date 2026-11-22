@@ -732,6 +732,16 @@ pub fn resize_desktop_lyrics(app: AppHandle, width: f64, height: f64) -> Command
     lyrics::resize(&app, width, height).map_err(describe)
 }
 
+/// 打开 / 关闭贴在歌词条上方的显示设置悬浮窗。
+#[tauri::command]
+pub async fn toggle_desktop_lyrics_settings(app: AppHandle) -> CommandResult<()> {
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || lyrics::toggle_settings(&task_app))
+        .await
+        .map_err(|error| format!("桌面歌词设置窗口任务异常结束：{error}"))?
+        .map_err(describe)
+}
+
 /// 把桌面歌词窗口放到屏幕底部居中（默认位置）。
 #[tauri::command]
 pub fn place_desktop_lyrics(app: AppHandle, width: f64, height: f64) -> CommandResult<()> {

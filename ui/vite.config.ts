@@ -25,12 +25,13 @@ export default defineConfig({
     target: isWindows ? 'chrome105' : 'safari13',
     minify: 'esbuild',
     sourcemap: false,
-    // 主窗口与「桌面歌词」悬浮窗是两个独立页面：后者由 Rust 运行时创建并加载
-    // lyrics.html，因此必须作为第二个构建入口一同产出到 frontendDist。
+    // 主窗口、桌面歌词悬浮窗与歌词设置悬浮窗是三个独立页面：后两者由 Rust
+    // 运行时创建并分别加载 lyrics.html / lyrics-settings.html，必须一同产出。
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         lyrics: fileURLToPath(new URL('./lyrics.html', import.meta.url)),
+        lyricsSettings: fileURLToPath(new URL('./lyrics-settings.html', import.meta.url)),
       },
     },
   },

@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>桌面歌词设置</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+      body {
+        color: #e6f4ee;
+        font-family: "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Noto Sans CJK SC",
+          "Source Han Sans SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 12px;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #settings-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 100%;
+        height: 100%;
+        padding: 12px 14px 14px;
+        overflow-y: auto;
+        border: 1px solid rgba(111, 243, 188, 0.3);
+        border-radius: 14px;
+        background:
+          radial-gradient(120% 90% at 100% 0%, rgba(25, 217, 139, 0.1), transparent 55%),
+          rgba(6, 16, 13, 0.97);
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+        cursor: move;
+      }
+      .head {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex: none;
+      }
+      .head strong {
+        font-size: 13.5px;
+        font-weight: 650;
+        color: #fff;
+      }
+      .head .sub {
+        flex: 1;
+        min-width: 0;
+        font-size: 10.5px;
+        color: rgba(230, 255, 244, 0.45);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #close {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.09);
+        color: rgba(255, 255, 255, 0.8);
+        font-family: inherit;
+        font-size: 15px;
+        line-height: 21px;
+        cursor: pointer;
+      }
+      #close:hover { background: rgba(248, 113, 113, 0.35); color: #fff; }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+        flex: none;
+      }
+      .field > span {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        color: rgba(230, 255, 244, 0.62);
+      }
+      .field b { color: #6ff3bc; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .field input[type="range"] {
+        width: 100%;
+        height: 16px;
+        margin: 0;
+        accent-color: #19d98b;
+        cursor: pointer;
+      }
+      .field select {
+        width: 100%;
+        height: 26px;
+        padding: 0 7px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.07);
+        color: #fff;
+        font-family: inherit;
+        font-size: 11.5px;
+        cursor: pointer;
+      }
+      .field select option { background: #101c18; color: #fff; }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px 12px;
+        flex: none;
+      }
+      .grid .wide { grid-column: 1 / -1; }
+      .hint { color: rgba(230, 255, 244, 0.45); font-size: 10.5px; line-height: 1.4; }
+      .colors { display: flex; gap: 9px; margin-top: 3px; }
+      .swatch {
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: 2px solid rgba(255, 255, 255, 0.25);
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      .swatch.is-active {
+        border-color: #fff;
+        box-shadow: 0 0 0 2px rgba(111, 243, 188, 0.45);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 26px;
+        flex: none;
+      }
+      #top-state { color: #6ff3bc; }
+      #top-state.is-bad { color: #fca5a5; }
+      .btn {
+        flex: none;
+        padding: 3px 10px;
+        border: 1px solid rgba(111, 243, 188, 0.32);
+        border-radius: 7px;
+        background: rgba(25, 217, 139, 0.12);
+        color: #c9fbe4;
+        font-family: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .btn:hover { background: rgba(25, 217, 139, 0.24); color: #fff; }
+      .row.end { margin-top: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="settings-card" data-tauri-drag-region>
+      <header class="head">
+        <strong>歌词显示设置</strong>
+        <span class="sub">修改立即应用到桌面歌词</span>
+        <button id="close" type="button" title="关闭设置" aria-label="关闭设置">&times;</button>
+      </header>
+
+      <label class="field" for="size">
+        <span>字体大小 <b id="size-value">24px</b></span>
+        <input id="size" type="range" min="12" max="64" step="1" value="24" />
+      </label>
+
+      <label class="field" for="font">
+        <span>字体（本机已安装）</span>
+        <select id="font" aria-label="歌词字体" disabled></select>
+        <small id="font-state" class="hint">正在读取系统字体…</small>
+      </label>
+
+      <div class="grid">
+        <label class="field" for="bg">
+          <span>背景浓度 <b id="bg-value">62%</b></span>
+          <input id="bg" type="range" min="0" max="90" step="2" value="62" />
+        </label>
+        <label class="field" for="width">
+          <span>窗口宽度 <b id="width-value">760px</b></span>
+          <input id="width" type="range" min="420" max="1600" step="10" value="760" />
+        </label>
+        <label class="field wide" for="height">
+          <span>窗口高度 <b id="height-value">120px</b></span>
+          <input id="height" type="range" min="120" max="900" step="6" value="120" />
+        </label>
+      </div>
+
+      <div class="field">
+        <span>高亮颜色</span>
+        <div id="colors" class="colors"></div>
+      </div>
+
+      <div class="row">
+        <span class="hint">锁定后只显示歌词，点击穿透到下层页面</span>
+        <button id="lock" class="btn" type="button">锁定歌词</button>
+      </div>
+
+      <div class="row">
+        <span id="top-state" class="hint">正在确认置顶…</span>
+        <button id="repin" class="btn" type="button">重新置顶</button>
+      </div>
+
+      <div class="row end">
+        <span class="hint">窗口宽高与拖拽边缘共用同一份偏好</span>
+        <button id="reset" class="btn" type="button">恢复默认</button>
+      </div>
+    </div>
+    <script type="module" src="/src/lyrics-settings.ts"></script>
+  </body>
+</html>

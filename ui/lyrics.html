@@ -160,10 +160,7 @@
         border-radius: 0;
         cursor: default;
       }
-      #lyrics.is-locked .lyrics-top,
-      #lyrics.is-locked .lyrics-panel {
-        display: none;
-      }
+      #lyrics.is-locked .lyrics-top { display: none; }
       #lyrics.is-locked .lyrics-line { cursor: default; }
       #lyrics.is-locked .lyrics-line.is-current { text-shadow: 0 2px 12px rgba(0, 0, 0, 0.92), 0 0 18px var(--lyrics-glow); }
 
@@ -202,118 +199,6 @@
         #lyrics-title { max-width: 40%; }
       }
 
-      /* ---------------- 显示设置面板 ---------------- */
-      /* 面板打开时把歌词行让到左侧，仍可实时预览字体 / 字号效果。 */
-      #lyrics.is-panel-open .lyrics-line { opacity: 0.35; }
-      @media (min-width: 680px) {
-        #lyrics.is-panel-open .lyrics-line {
-          opacity: 1;
-          transform: translateX(-160px);
-          max-width: calc(100% - 350px);
-        }
-      }
-      .lyrics-panel {
-        position: absolute;
-        /* 工具栏已改为文档流定位：面板从工具栏下方开始，保证 Aa / 关闭按钮始终可点击。 */
-        top: 32px;
-        right: 8px;
-        bottom: 6px;
-        z-index: 5;
-        width: 306px;
-        padding: 9px 11px;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 6px 10px;
-        align-content: start;
-        overflow-y: auto;
-        border: 1px solid rgba(111, 243, 188, 0.28);
-        border-radius: 12px;
-        background: rgba(6, 16, 13, 0.95);
-        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
-        font-size: 11px;
-        color: rgba(230, 255, 244, 0.82);
-      }
-      .lyrics-panel[hidden] { display: none; }
-      .lyrics-panel::-webkit-scrollbar { width: 6px; }
-      .lyrics-panel::-webkit-scrollbar-thumb { background: rgba(111, 243, 188, 0.25); border-radius: 3px; }
-      .lp-wide { grid-column: 1 / -1; }
-      .lp-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        font-size: 12px;
-        color: #fff;
-      }
-      .lp-head strong { font-weight: 600; }
-      .lp-close {
-        width: 18px;
-        height: 18px;
-        padding: 0;
-        border: 0;
-        border-radius: 5px;
-        background: rgba(255, 255, 255, 0.1);
-        color: rgba(255, 255, 255, 0.8);
-        font-size: 14px;
-        line-height: 17px;
-        cursor: pointer;
-      }
-      .lp-close:hover { background: rgba(248, 113, 113, 0.35); color: #fff; }
-      .lp-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-      .lp-field > span, .lp-label { color: rgba(230, 255, 244, 0.62); }
-      .lp-field b { color: #6ff3bc; font-weight: 600; }
-      .lp-field select {
-        width: 100%;
-        height: 24px;
-        padding: 0 6px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.07);
-        color: #fff;
-        font-family: inherit;
-        font-size: 11px;
-        cursor: pointer;
-      }
-      .lp-field select option { background: #101c18; color: #fff; }
-      .lp-field input[type="range"] {
-        width: 100%;
-        height: 18px;
-        margin: 0;
-        accent-color: #19d98b;
-        cursor: pointer;
-      }
-      .lp-colors { display: flex; gap: 7px; margin-top: 4px; }
-      .lp-swatch {
-        width: 18px;
-        height: 18px;
-        padding: 0;
-        border: 2px solid rgba(255, 255, 255, 0.25);
-        border-radius: 50%;
-        cursor: pointer;
-      }
-      .lp-swatch.is-active { border-color: #fff; box-shadow: 0 0 0 2px rgba(111, 243, 188, 0.45); }
-      .lp-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        min-height: 22px;
-      }
-      #lp-top-state { color: #6ff3bc; }
-      #lp-top-state.is-bad { color: #fca5a5; }
-      .lp-hint { color: rgba(230, 255, 244, 0.45); }
-      .lp-btn {
-        flex: none;
-        padding: 2px 9px;
-        border: 1px solid rgba(111, 243, 188, 0.32);
-        border-radius: 6px;
-        background: rgba(25, 217, 139, 0.12);
-        color: #c9fbe4;
-        font-family: inherit;
-        font-size: 11px;
-        cursor: pointer;
-      }
-      .lp-btn:hover { background: rgba(25, 217, 139, 0.24); color: #fff; }
-      .lp-actions { display: flex; flex: none; gap: 6px; }
     </style>
   </head>
   <body>
@@ -335,49 +220,6 @@
       <div id="lyrics-next" class="lyrics-line is-next"></div>
       <button id="lyrics-unlock" class="lyrics-unlock" type="button" title="解锁桌面歌词" hidden>解锁</button>
 
-      <!-- 面板本身不禁用拖动：控件自动排除，按住面板空白处仍可拖动窗口。 -->
-      <div id="lyrics-panel" class="lyrics-panel" hidden>
-        <div class="lp-head lp-wide">
-          <strong>歌词显示设置</strong>
-          <button id="lp-close" class="lp-close" type="button" title="收起设置" aria-label="收起设置">&times;</button>
-        </div>
-        <label class="lp-field lp-wide" for="lp-size">
-          <span>字体大小 <b id="lp-size-value">24px</b></span>
-          <input id="lp-size" type="range" min="12" max="64" step="1" value="24" />
-        </label>
-        <label class="lp-field lp-wide" for="lp-font">
-          <span>字体（本机已安装）</span>
-          <select id="lp-font" aria-label="歌词字体" disabled></select>
-          <span id="lp-font-state" class="lp-hint">正在读取系统字体…</span>
-        </label>
-        <label class="lp-field" for="lp-bg">
-          <span>背景浓度 <b id="lp-bg-value">62%</b></span>
-          <input id="lp-bg" type="range" min="0" max="90" step="2" value="62" />
-        </label>
-        <label class="lp-field" for="lp-width">
-          <span>窗口宽度 <b id="lp-width-value">760px</b></span>
-          <input id="lp-width" type="range" min="420" max="1600" step="10" value="760" />
-        </label>
-        <label class="lp-field" for="lp-height">
-          <span>窗口高度 <b id="lp-height-value">120px</b></span>
-          <input id="lp-height" type="range" min="120" max="900" step="6" value="120" />
-        </label>
-        <div class="lp-wide">
-          <span class="lp-label">高亮颜色</span>
-          <div id="lp-colors" class="lp-colors"></div>
-        </div>
-        <div class="lp-row lp-wide">
-          <span class="lp-hint">锁定后只显示歌词，点击穿透到下层页面</span>
-          <button id="lp-lock" class="lp-btn" type="button">锁定歌词</button>
-        </div>
-        <div class="lp-row lp-wide">
-          <span id="lp-top-state">正在确认置顶…</span>
-          <span class="lp-actions">
-            <button id="lp-repin" class="lp-btn" type="button">重新置顶</button>
-            <button id="lp-reset" class="lp-btn" type="button">恢复默认</button>
-          </span>
-        </div>
-      </div>
     </div>
     <script type="module" src="/src/lyrics.ts"></script>
   </body>
