@@ -38,8 +38,11 @@ import {
   hasEditable,
   hasExportable,
   insertSegment,
+  loadSeparationModels,
   modelReady,
   previewFormat,
+  revealSeparationAudio,
+  separationModelsLoading,
   previewText,
   progress,
   recordFilter,
@@ -77,6 +80,8 @@ const modelHint = computed(() => {
 const stageLabel = computed(() => {
   const stage = progress.value?.stage;
   switch (stage) {
+    case 'separating':
+      return '人声分离';
     case 'normalizing':
       return '音频归一化';
     case 'transcribing':
@@ -133,6 +138,114 @@ function audition(song: Song | null): void {
 /** 选中的曲目是否仍存在于当前曲库（可播放 / 可重新生成）。 */
 const selectedInLibrary = computed(() => Boolean(selectedSong.value?.path));
 
+/**
+ * 分离交付信息：本次生成结果优先，其次历史字幕记录里保存的路径。
+ * 让用户随时能确认「识别用的是哪个模型、哪个人声文件」。
+ */
+const separationForSelection = computed(() => {
+  if (result.value && result.value.key === selectedKey.value) {
+    return {
+      modelName: result.value.separation.modelName,
+      vocalsPath: result.value.separation.vocalsPath,
+      accompanimentPath: result.value.separation.accompanimentPath,
+      accompanimentKind: result.value.separation.accompanimentKind,
+      srtPath: result.value.srtPath,
+      lrcPath: result.value.lrcPath,
+      current: true,
+    };
+  }
+  const stored = savedForSelection.value;
+  if (!stored?.separationModelName || !stored.vocalsPath || !stored.accompanimentPath) return null;
+  return {
+    modelName: stored.separationModelName,
+    vocalsPath: stored.vocalsPath,
+    accompanimentPath: stored.accompanimentPath,
+    accompanimentKind: stored.accompanimentKind ?? '伴奏',
+    srtPath: stored.srtPath ?? null,
+    lrcPath: stored.lrcPath ?? null,
+    current: false,
+  };
+});
+
+/**
+ * 生成前必须由用户确认分离模型。未确认不发起任何后端任务，
+ * 因此不会出现跳过分离直接识别原始音频的情况。
+ */
+async function chooseSeparationModel(): Promise<void> {
+  if (
+    !selectedSong.value ||
+    !selectedInLibrary.value ||
+    !modelReady.value ||
+    generating.value ||
+    editing.value ||
+    separationModelsLoading.value
+  ) {
+    return;
+  }
+  const models = await loadSeparationModels(true);
+  if (!models) return;
+  const available = models.filter((model) => model.available);
+  if (available.length === 0) {
+    void showModal({
+      title: '没有可用的人声分离模型',
+      description:
+        '随包模型缺失或未放入自定义模型。请确认安装包完整，或把 sherpa-onnx 兼容的 2-stem 分离模型放到「模型目录 / separation /」后重试。',
+      confirmText: '知道了',
+    });
+    return;
+  }
+  const previous = state.prefs?.separationModel ?? null;
+  const defaultId = available.some((model) => model.id === previous)
+    ? previous
+    : available[0].id;
+  const values = await showModal({
+    title: '选择人声分离模型',
+    description:
+      '歌词识别只会使用分离后的人声文件。请先确认本次使用的人声 / 伴奏分离模型；未确认前不会开始分离。',
+    fields: [
+      {
+        name: 'model',
+        label: '人声分离模型',
+        type: 'select',
+        value: defaultId ?? '',
+        options: available.map((model) => ({
+          value: model.id,
+          label: `${model.name}（${model.engine}）`,
+        })),
+      },
+    ],
+    confirmText: '开始分离并识别',
+    cancelText: '取消',
+  });
+  if (!values) return;
+  const chosen = available.find((model) => model.id === values.model) ?? available[0];
+  // 自定义 UVR 模型无法从元数据得知主输出角色，必须由用户确认，避免把伴奏当人声识别。
+  let target: 'vocals' | 'instrumental' | undefined;
+  if (!chosen.targetKnown) {
+    const role = await showModal({
+      title: '确认模型主输出音轨',
+      description: `自定义模型「${chosen.name}」不带角色信息。请确认它直接输出的是人声还是乐器；选错会把伴奏送进歌词识别。`,
+      fields: [
+        {
+          name: 'target',
+          label: '模型主输出',
+          type: 'select',
+          value: chosen.target,
+          options: [
+            { value: 'vocals', label: '人声（伴奏 = 混合 − 输出）' },
+            { value: 'instrumental', label: '乐器（人声 = 混合 − 输出）' },
+          ],
+        },
+      ],
+      confirmText: '开始分离并识别',
+      cancelText: '取消',
+    });
+    if (!role) return;
+    target = role.target === 'instrumental' ? 'instrumental' : 'vocals';
+  }
+  await generateSubtitles(chosen.id, target);
+}
+
 function storedFor(key: string) {
   return savedSubtitles.value[key] ?? null;
 }
@@ -183,7 +296,7 @@ function onDraftTextInput(event: Event): void {
       <div>
         <h2>字幕生成</h2>
         <p>
-          选择音乐库曲目，自动归一化为 WAV 后调用 ASR 生成字幕；记录可检索，结果可分段编辑或直接修改 SRT / LRC 原文，再预览与导出。
+          选择曲目并确认人声分离模型：先分离出人声与伴奏，再仅对分离后的人声轨调用 ASR；记录可检索，结果可分段编辑或直接修改 SRT / LRC 原文，再预览与导出。
         </p>
       </div>
       <span class="subtitle-header-badge">
@@ -422,15 +535,26 @@ function onDraftTextInput(event: Event): void {
           <span>请从左侧选择一首曲目</span>
         </div>
 
+        <p class="subtitle-hint">
+          生成流程固定为：人声分离 → 仅识别分离后的人声轨 → 生成字幕，不提供跳过分离的入口。
+        </p>
+
         <div class="subtitle-actions">
           <button
             type="button"
             class="subtitle-btn is-primary"
-            :disabled="!selectedSong || !selectedInLibrary || !modelReady || generating || editing"
-            @click="generateSubtitles"
+            :disabled="
+              !selectedSong ||
+              !selectedInLibrary ||
+              !modelReady ||
+              generating ||
+              editing ||
+              separationModelsLoading
+            "
+            @click="chooseSeparationModel"
           >
             <Icon :name="generating ? 'refresh' : 'sparkles'" />
-            {{ generating ? '生成中…' : '生成字幕' }}
+            {{ generating ? '生成中…' : '选择模型并生成字幕' }}
           </button>
           <button
             type="button"
@@ -465,7 +589,7 @@ function onDraftTextInput(event: Event): void {
           <div>
             <strong>字幕生成失败</strong>
             <p>{{ error }}</p>
-            <small>常见原因：未加载 ASR 模型、缺少 ffmpeg、音频格式不受支持或文件不可读。</small>
+            <small>常见原因：未加载 ASR 模型、分离模型缺失或不兼容、缺少 ffmpeg、音频不可读。</small>
           </div>
         </div>
 
@@ -476,10 +600,74 @@ function onDraftTextInput(event: Event): void {
             <span>{{ result.segments.length }} 条 · {{ formatTime(result.duration) }}</span>
           </div>
           <p class="subtitle-result-meta">
-            {{ result.converted ? `已由 ${result.sourceFormat.toUpperCase()} 转换为 WAV` : '源格式即 WAV' }}
-            · 识别音频统一为 16 kHz 单声道 WAV（转换产生的临时文件已清理）
+            分离模型 {{ result.separation.modelName }}（{{ result.separation.engine }}）
+            · 歌词识别仅使用分离后的人声文件
           </p>
-          <p v-if="result.note" class="subtitle-result-note">{{ result.note }}</p>
+        </div>
+
+        <div v-if="separationForSelection" class="subtitle-separation">
+          <div class="subtitle-separation-head">
+            <Icon name="captions" />
+            <strong>{{ separationForSelection.current ? '本次分离交付' : '已保存的分离交付' }}</strong>
+            <span>{{ separationForSelection.modelName }}</span>
+          </div>
+          <dl class="subtitle-separation-paths">
+            <div>
+              <dt>人声文件</dt>
+              <dd :title="separationForSelection.vocalsPath">
+                {{ separationForSelection.vocalsPath }}
+              </dd>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost is-compact"
+                @click="revealSeparationAudio('vocals')"
+              >
+                打开位置
+              </button>
+            </div>
+            <div>
+              <dt>{{ separationForSelection.accompanimentKind }}文件</dt>
+              <dd :title="separationForSelection.accompanimentPath">
+                {{ separationForSelection.accompanimentPath }}
+              </dd>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost is-compact"
+                @click="revealSeparationAudio('accompaniment')"
+              >
+                打开位置
+              </button>
+            </div>
+            <div v-if="separationForSelection.srtPath">
+              <dt>SRT 字幕</dt>
+              <dd :title="separationForSelection.srtPath">
+                {{ separationForSelection.srtPath }}
+              </dd>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost is-compact"
+                @click="revealSeparationAudio('srt')"
+              >
+                打开位置
+              </button>
+            </div>
+            <div v-if="separationForSelection.lrcPath">
+              <dt>LRC 字幕</dt>
+              <dd :title="separationForSelection.lrcPath">
+                {{ separationForSelection.lrcPath }}
+              </dd>
+              <button
+                type="button"
+                class="subtitle-btn is-ghost is-compact"
+                @click="revealSeparationAudio('lrc')"
+              >
+                打开位置
+              </button>
+            </div>
+          </dl>
+          <p class="subtitle-separation-note">
+            本字幕的歌词识别输入仅为人声文件；伴奏 / 乐器文件仅作为交付物保存，未参与识别。
+          </p>
         </div>
 
         <!-- 结果预览 / 编辑 -->
@@ -924,7 +1112,7 @@ function onDraftTextInput(event: Event): void {
   background: var(--accent-soft);
   color: var(--accent-bright);
 }
-.subtitle-track-path, .subtitle-track-meta, .subtitle-result-meta, .subtitle-result-note, .subtitle-hint {
+.subtitle-track-path, .subtitle-track-meta, .subtitle-result-meta, .subtitle-hint {
   margin: 6px 0 0;
   font-size: 11px;
   color: var(--text-3);
@@ -1019,6 +1207,70 @@ function onDraftTextInput(event: Event): void {
 .subtitle-result-head { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text); }
 .subtitle-result-head :deep(svg) { width: 15px; height: 15px; color: var(--accent-bright); }
 .subtitle-result-head span { margin-left: auto; font-size: 11px; color: var(--text-3); }
+
+/* 分离交付：模型名 + 本地文件路径 */
+.subtitle-separation {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(25, 217, 139, 0.24);
+  border-radius: 9px;
+  background: rgba(25, 217, 139, 0.06);
+}
+.subtitle-separation-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text);
+}
+.subtitle-separation-head :deep(svg) { width: 14px; height: 14px; color: var(--accent-bright); }
+.subtitle-separation-head span {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subtitle-separation-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+.subtitle-separation-paths > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.subtitle-separation-paths dt {
+  flex: none;
+  width: 64px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.subtitle-separation-paths dd {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+  user-select: text;
+}
+.subtitle-separation-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
 
 .subtitle-preview { margin-bottom: 14px; }
 .subtitle-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }

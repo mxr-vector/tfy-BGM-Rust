@@ -1,18 +1,18 @@
-//! 「字幕生成」：音乐库曲目 → WAV 归一化 → 分片 ASR → SRT / LRC。
+//! 「字幕生成」：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
 //!
-//! 数据流：
-//! 1. 从曲库快照取 `Song.path`，按扩展名校验（wav / mp3 / flac / m4a / ogg）；
-//! 2. 非 WAV 用 ffmpeg 转为 16 kHz 单声道 PCM WAV（sherpa-onnx 的 `Wave::read`
-//!    只接受单声道 WAV），WAV 也统一重采样以保证可识别；ffmpeg 缺失且源已是 WAV 时
-//!    降级为直接使用源文件，采样率差异由识别层的兜底重采样消除；
-//! 3. `ModelRuntime::transcribe_segments` 先把 PCM 统一到 16 kHz，再按固定时间窗
-//!    切片逐段识别，得到带时间轴的
+//! 数据流（顺序固定，不允许跳过或合并）：
+//! 1. 用户在生成前确认人声分离模型；未确认时直接拒绝；
+//! 2. `separation::separate` 把原始音频分离为本地 `vocals.wav` 与伴奏 / 乐器文件，
+//!    并在返回前校验两个文件存在且非空；失败即终止；
+//! 3. 只对人声 WAV 用 ffmpeg 归一化为 16 kHz 单声道 PCM（sherpa-onnx 的
+//!    `Wave::read` 只接受单声道 WAV）；绝不读取原始混合音频或伴奏轨做识别；
+//! 4. `ModelRuntime::transcribe_segments` 按固定时间窗切片逐段识别，得到带时间轴的
 //!    `SubtitleSegment[]`，每完成一片推送一次进度；
-//! 4. 结果格式化为 SRT / LRC，同时持久化到应用配置目录的 `subtitles/` 下，
-//!    供「桌面歌词」按曲目 key 读取。
+//! 5. 结果格式化为 SRT / LRC，连同分离模型与文件路径持久化到应用配置目录的
+//!    `subtitles/` 下，供「桌面歌词」按曲目 key 读取。
 //!
-//! 字幕生成只依赖 `AppHandle`、`ModelRuntime` 与 `Song`，不持有 `State`，便于放进
-//! `spawn_blocking` 而不阻塞异步运行时。
+//! 字幕生成只依赖 `AppHandle`、`ModelRuntime`、`Song` 与模型根目录，不持有 `State`，
+//! 便于放进 `spawn_blocking` 而不阻塞异步运行时。
 
 use std::cmp::Ordering;
 use std::fs;
@@ -48,6 +48,7 @@ pub struct SubtitleSegment {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SubtitleStage {
+    Separating,
     Normalizing,
     Transcribing,
     Done,
@@ -73,15 +74,17 @@ pub struct SubtitleResult {
     pub title: String,
     pub source_path: String,
     pub source_format: String,
-    /// 是否发生了「非 WAV → WAV」的格式转换。
-    pub converted: bool,
-    /// ffmpeg 缺失时直接使用源 WAV 的降级说明（采样率已由识别层兜底重采样）。
-    pub note: Option<String>,
+    /// 本次使用的分离模型与本地人声 / 伴奏文件；歌词识别仅使用其中的人声文件。
+    pub separation: crate::separation::SeparationInfo,
     pub duration: f64,
     pub segments: Vec<SubtitleSegment>,
     pub srt: String,
     pub lrc: String,
+    /// 字幕记录 JSON 的本地路径。
     pub saved_path: String,
+    /// 自动落盘的 SRT / LRC 本地文件路径（与分离交付物放在同一目录）。
+    pub srt_path: String,
+    pub lrc_path: String,
 }
 
 /// 持久化到磁盘的字幕（桌面歌词与导出共用）。
@@ -106,6 +109,21 @@ pub struct StoredSubtitle {
     pub srt: String,
     #[serde(default)]
     pub lrc: String,
+    // ---- 人声分离交付信息（旧记录没有这些字段）----
+    /// 分离模型的显示名（不是偏好里保存的模型 id）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separation_model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocals_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accompaniment_path: Option<String>,
+    /// `伴奏` 或 `乐器`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accompaniment_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lrc_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,14 +132,6 @@ pub struct SubtitleExportResult {
     pub path: String,
     pub bytes: u64,
     pub format: String,
-}
-
-struct NormalizedAudio {
-    path: PathBuf,
-    converted: bool,
-    /// 是否为 ffmpeg 生成的临时文件；识别结束后需要删除，源文件绝不能被清理。
-    owned: bool,
-    note: Option<String>,
 }
 
 fn emit_progress(
@@ -155,7 +165,7 @@ fn subtitle_dir(app: &AppHandle) -> Result<PathBuf> {
 }
 
 /// key 里可能含路径分隔符与中文，用「可读前缀 + FNV-1a 哈希」保证唯一且稳定。
-fn subtitle_stem(key: &str) -> String {
+pub(crate) fn subtitle_stem(key: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in key.as_bytes() {
         hash ^= *byte as u64;
@@ -241,7 +251,16 @@ pub fn delete_stored(app: &AppHandle, key: &str) -> Result<bool> {
         .join("wav")
         .join(format!("{}.wav", subtitle_stem(key)));
     let _ = fs::remove_file(wav);
+    // 人声 / 伴奏文件是本曲目字幕的中间交付物；删除记录时一起清理。
+    crate::separation::cleanup(app, key);
     Ok(removed)
+}
+
+/// 一次生成需要随记录持久化的交付信息。
+struct Delivery<'a> {
+    separation: &'a crate::separation::SeparationInfo,
+    srt_path: &'a Path,
+    lrc_path: &'a Path,
 }
 
 fn save_stored(
@@ -251,8 +270,10 @@ fn save_stored(
     file_name: Option<&str>,
     duration_ms: Option<u32>,
     segments: &[SubtitleSegment],
+    delivery: &Delivery<'_>,
 ) -> Result<PathBuf> {
     let path = stored_path(app, key)?;
+    let separation = delivery.separation;
     let stored = StoredSubtitle {
         key: key.to_owned(),
         title: title.to_owned(),
@@ -263,6 +284,12 @@ fn save_stored(
         duration_ms,
         srt: format_srt(segments),
         lrc: format_lrc(title, segments),
+        separation_model_name: Some(separation.model_name.clone()),
+        vocals_path: Some(separation.vocals_path.clone()),
+        accompaniment_path: Some(separation.accompaniment_path.clone()),
+        accompaniment_kind: Some(separation.accompaniment_kind.clone()),
+        srt_path: Some(delivery.srt_path.to_string_lossy().into_owned()),
+        lrc_path: Some(delivery.lrc_path.to_string_lossy().into_owned()),
     };
     let json = serde_json::to_string_pretty(&stored).context("序列化字幕结果失败")?;
     overwrite(&path, &json)?;
@@ -294,7 +321,19 @@ pub fn migrate_keys(app: &AppHandle, changes: &[(String, String)], songs: &[Song
             continue;
         }
         let song = songs.iter().find(|song| &song.key == to);
-        if let Err(error) = migrate_one(app, from, to, song, &old_path) {
+        // 先搬分离目录；失败时记录告警并保留旧路径，避免把记录指向不存在的文件。
+        let moved = match crate::separation::migrate(app, from, to) {
+            Ok(moved) => moved,
+            Err(error) => {
+                warnings.push(format!("分离目录迁移失败（{from} → {to}）：{error:#}"));
+                false
+            }
+        };
+        if let Err(error) = migrate_one(app, from, to, song, &old_path, moved) {
+            // JSON 迁移失败时回滚目录，保证旧记录里的路径仍然有效。
+            if moved {
+                let _ = crate::separation::migrate(app, to, from);
+            }
             warnings.push(format!("字幕记录迁移失败（{from} → {to}）：{error:#}"));
         }
     }
@@ -307,12 +346,20 @@ fn migrate_one(
     to: &str,
     song: Option<&Song>,
     old_path: &Path,
+    remap_separation: bool,
 ) -> Result<()> {
     let text = fs::read_to_string(old_path)
         .with_context(|| format!("无法读取字幕文件：{}", old_path.display()))?;
     let stored: StoredSubtitle = serde_json::from_str(&text)
         .with_context(|| format!("字幕文件损坏：{}", old_path.display()))?;
-    let migrated = migrated_stored(&stored, to, song);
+    let mut migrated = migrated_stored(&stored, to, song);
+    if remap_separation {
+        let new_dir = crate::separation::dir_for(app, to)?;
+        remap_separation_path(&mut migrated.vocals_path, from, &new_dir);
+        remap_separation_path(&mut migrated.accompaniment_path, from, &new_dir);
+        remap_separation_path(&mut migrated.srt_path, from, &new_dir);
+        remap_separation_path(&mut migrated.lrc_path, from, &new_dir);
+    }
     let json = serde_json::to_string_pretty(&migrated).context("序列化字幕结果失败")?;
     let target = stored_path(app, to)?;
 
@@ -327,6 +374,28 @@ fn migrate_one(
         let _ = fs::remove_file(dir.join("wav").join(format!("{}.wav", subtitle_stem(from))));
     }
     Ok(())
+}
+
+/// 把交付文件路径的目录部分从旧曲目目录替换为新曲目目录。
+///
+/// 只处理确实位于 `<separation>/<旧 stem>/` 下的路径，避免误改用户自定义路径。
+fn remap_separation_path(path: &mut Option<String>, from: &str, new_dir: &Path) {
+    let Some(current) = path.as_deref() else {
+        return;
+    };
+    let current = Path::new(current);
+    let old_stem = subtitle_stem(from);
+    let inside_old = current
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some(old_stem.as_str());
+    if !inside_old {
+        return;
+    }
+    if let Some(name) = current.file_name() {
+        *path = Some(new_dir.join(name).to_string_lossy().into_owned());
+    }
 }
 
 /// 先写临时文件再 rename，保证迁移中断时不会留下半截 JSON。
@@ -382,34 +451,14 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-/// 把曲库音频归一化为 16 kHz 单声道 PCM WAV。
+/// 把分离后的人声 WAV 归一化为 16 kHz 单声道 PCM（sherpa-onnx 要求）。
 ///
-/// - 非 WAV：必须经 ffmpeg 转换，缺失时给出明确错误；
-/// - WAV：有 ffmpeg 时同样重采样（保证 16 kHz 单声道），缺失时降级为直接使用源文件，
-///   由 `ModelRuntime` 在识别前兜底重采样到 16 kHz。
-fn normalize_to_wav(
-    app: &AppHandle,
-    source: &Path,
-    key: &str,
-    ext: &str,
-) -> Result<NormalizedAudio> {
-    let is_wav = ext.eq_ignore_ascii_case("wav");
-    let Some(ffmpeg) = ffmpeg_path() else {
-        if is_wav {
-            return Ok(NormalizedAudio {
-                path: source.to_path_buf(),
-                converted: false,
-                owned: false,
-                note: Some(
-                    "未检测到 ffmpeg，直接使用源 WAV（识别前会自动重采样至 16 kHz；源文件需为单声道）"
-                        .to_owned(),
-                ),
-            });
-        }
-        bail!(
-            "未检测到 ffmpeg，无法把 .{ext} 转换为 WAV。请安装 ffmpeg 或设置 TFY_FFMPEG 环境变量后重试"
-        );
-    };
+/// 分离阶段已强制要求 ffmpeg，这里不再保留「直接使用源文件」的降级路径；
+/// 返回的临时文件由调用方在识别结束后删除。
+fn normalize_to_wav(app: &AppHandle, source: &Path, key: &str) -> Result<PathBuf> {
+    let ffmpeg = ffmpeg_path().ok_or_else(|| {
+        anyhow!("未检测到 ffmpeg，无法归一化人声轨。请安装 ffmpeg 或设置 TFY_FFMPEG 环境变量后重试")
+    })?;
 
     let target = wav_path_for(app, key)?;
     let output = ffmpeg_command(&ffmpeg)
@@ -439,16 +488,22 @@ fn normalize_to_wav(
         let _ = fs::remove_file(&target);
         bail!("音频归一化失败：ffmpeg 输出为空");
     }
-    Ok(NormalizedAudio {
-        path: target,
-        converted: !is_wav,
-        owned: true,
-        note: None,
-    })
+    Ok(target)
 }
 
-/// 生成字幕主流程；进度与错误都通过 `subtitle-progress` 事件推送，命令返回值用于结果展示。
-pub fn generate(app: &AppHandle, runtime: &ModelRuntime, song: &Song) -> Result<SubtitleResult> {
+/// 生成字幕主流程：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
+///
+/// 强制顺序：必须先产出并校验人声 / 伴奏文件，随后**只**对分离得到的人声 WAV
+/// 做归一化与识别。分离失败或文件缺失时直接返回错误，不会回退到原始混合音频。
+/// 进度与错误都通过 `subtitle-progress` 事件推送，命令返回值用于结果展示。
+pub fn generate(
+    app: &AppHandle,
+    runtime: &ModelRuntime,
+    song: &Song,
+    separation_model: &str,
+    separation_target: Option<&str>,
+    models_root: &Path,
+) -> Result<SubtitleResult> {
     let source = PathBuf::from(&song.path);
     if !source.is_file() {
         bail!("音频文件不存在：{}", source.display());
@@ -463,32 +518,50 @@ pub fn generate(app: &AppHandle, runtime: &ModelRuntime, song: &Song) -> Result<
     if runtime.loaded().is_none() {
         bail!("尚未加载 ASR 模型，请先在「设置 → 模型」中完成模型加载");
     }
+    if separation_model.trim().is_empty() {
+        bail!("请先选择并确认人声分离模型；未确认前不会开始分离");
+    }
 
     emit_progress(
         app,
-        SubtitleStage::Normalizing,
-        if ext.eq_ignore_ascii_case("wav") {
-            "正在归一化 WAV 音频…"
-        } else {
-            "正在将音频转换为 WAV…"
-        },
+        SubtitleStage::Separating,
+        "正在分离人声与伴奏…",
         0,
         0,
         None,
     );
-    let normalized = normalize_to_wav(app, &source, &song.key, ext)?;
+    let separation =
+        crate::separation::separate(app, song, separation_model, models_root, separation_target)?;
+    // 交付物必须真实落盘；这里再次校验，避免任何降级路径进入识别阶段。
+    for path in [&separation.vocals_path, &separation.accompaniment_path] {
+        let path = Path::new(path);
+        let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if !path.is_file() || size <= 44 {
+            bail!("人声分离未产出有效文件：{}；已停止生成字幕", path.display());
+        }
+    }
+
+    emit_progress(
+        app,
+        SubtitleStage::Normalizing,
+        "正在归一化分离后的人声轨…",
+        0,
+        0,
+        None,
+    );
+    let normalized = normalize_to_wav(app, Path::new(&separation.vocals_path), &song.key)?;
 
     emit_progress(
         app,
         SubtitleStage::Transcribing,
-        "正在识别音频…",
+        "正在识别分离后的人声轨…",
         0,
         0,
         None,
     );
     let progress_app = app.clone();
     let transcribed = runtime.transcribe_segments(
-        &normalized.path,
+        &normalized,
         crate::models::SEGMENT_TARGET_SECS,
         &mut |current, total| {
             emit_progress(
@@ -502,13 +575,17 @@ pub fn generate(app: &AppHandle, runtime: &ModelRuntime, song: &Song) -> Result<
         },
     );
     // 归一化 WAV 只服务于本次识别；临时文件用完即删，避免在配置目录长期累积。
-    if normalized.owned {
-        let _ = fs::remove_file(&normalized.path);
-    }
+    let _ = fs::remove_file(&normalized);
     let segments = transcribed?;
 
     let srt = format_srt(&segments);
     let lrc = format_lrc(&song.title, &segments);
+    // 字幕文件与分离交付物放在同一目录，便于一次性交付 / 核对。
+    let delivery = crate::separation::separation_dir(app, &song.key)?;
+    let srt_path = delivery.join("subtitles.srt");
+    let lrc_path = delivery.join("subtitles.lrc");
+    write_subtitle(&srt_path, &srt)?;
+    write_subtitle(&lrc_path, &lrc)?;
     let saved_path = save_stored(
         app,
         &song.key,
@@ -516,6 +593,11 @@ pub fn generate(app: &AppHandle, runtime: &ModelRuntime, song: &Song) -> Result<
         Some(&song.file_name),
         song.duration_ms,
         &segments,
+        &Delivery {
+            separation: &separation,
+            srt_path: &srt_path,
+            lrc_path: &lrc_path,
+        },
     )?;
     let duration = segments.last().map(|segment| segment.end).unwrap_or(0.0);
 
@@ -533,13 +615,14 @@ pub fn generate(app: &AppHandle, runtime: &ModelRuntime, song: &Song) -> Result<
         title: song.title.clone(),
         source_path: source.to_string_lossy().into_owned(),
         source_format: ext.to_owned(),
-        converted: normalized.converted,
-        note: normalized.note,
+        separation,
         duration,
         segments,
         srt,
         lrc,
         saved_path: saved_path.to_string_lossy().into_owned(),
+        srt_path: srt_path.to_string_lossy().into_owned(),
+        lrc_path: lrc_path.to_string_lossy().into_owned(),
     })
 }
 
@@ -671,13 +754,28 @@ pub fn update_stored(
             anyhow!("无法读取字幕文件 {}：{error}", path.display())
         }
     })?;
-    let mut stored: StoredSubtitle = serde_json::from_str(&text)
-        .with_context(|| format!("字幕文件损坏：{}", path.display()))?;
+    let mut stored: StoredSubtitle =
+        serde_json::from_str(&text).with_context(|| format!("字幕文件损坏：{}", path.display()))?;
     stored.segments = segments;
     stored.updated_at_ms = Some(now_ms());
     // 与 load_stored 一致：预览文本始终按当前格式化规则重建。
     stored.srt = format_srt(&stored.segments);
     stored.lrc = format_lrc(&stored.title, &stored.segments);
+    // 自动落盘的 SRT / LRC 只是交付副本：写入失败（目录被手动删除、文件被占用）
+    // 不应阻断字幕记录本身的保存；旧记录没有路径字段则跳过。
+    for (path, content) in [
+        (stored.srt_path.as_deref(), stored.srt.as_str()),
+        (stored.lrc_path.as_deref(), stored.lrc.as_str()),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        let path = Path::new(path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = write_subtitle(path, content);
+    }
     let json = serde_json::to_string_pretty(&stored).context("序列化字幕结果失败")?;
     overwrite(&path, &json)?;
     Ok(stored)
@@ -837,10 +935,24 @@ pub fn parse_lrc(text: &str, duration_secs: Option<f64>) -> Result<Vec<SubtitleS
 /// 只有白名单键会被当作元数据；其它无法解析为时间的标签一律报错，避免 `[00:01,500]`
 /// 这类手误让整行歌词被静默丢弃。`[offset:]` 仅作为元数据忽略，不参与时间轴调整。
 fn is_lrc_metadata_tag(tag: &str) -> bool {
-    let key = tag.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    let key = tag
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     matches!(
         key.as_str(),
-        "ar" | "al" | "ti" | "au" | "by" | "offset" | "re" | "ve" | "length" | "tool" | "kana"
+        "ar" | "al"
+            | "ti"
+            | "au"
+            | "by"
+            | "offset"
+            | "re"
+            | "ve"
+            | "length"
+            | "tool"
+            | "kana"
             | "language"
     )
 }
@@ -926,6 +1038,12 @@ mod tests {
             duration_ms: Some(1_000),
             srt: String::new(),
             lrc: String::new(),
+            separation_model_name: None,
+            vocals_path: None,
+            accompaniment_path: None,
+            accompaniment_kind: None,
+            srt_path: None,
+            lrc_path: None,
         };
         let song = Song {
             key: "epic/new_name".to_owned(),
@@ -948,6 +1066,30 @@ mod tests {
         assert_eq!(next.created_at_ms, 42);
         assert!(next.lrc.starts_with("[ar:]\n[ti:新标题]\n"));
         assert_eq!(next.srt, format_srt(&stored.segments));
+    }
+
+    #[test]
+    fn migration_remaps_separation_paths_only_inside_old_dir() {
+        let from = "ambient/old_name";
+        let old_dir = PathBuf::from("C:/config/separations").join(subtitle_stem(from));
+        let new_dir = PathBuf::from("C:/config/separations").join(subtitle_stem("epic/new_name"));
+
+        let mut vocals = Some(old_dir.join("vocals.wav").to_string_lossy().into_owned());
+        remap_separation_path(&mut vocals, from, &new_dir);
+        assert_eq!(
+            vocals.as_deref(),
+            Some(new_dir.join("vocals.wav").to_string_lossy().as_ref())
+        );
+
+        // 不在旧分离目录下的自定义路径保持原样。
+        let external = Some("D:/deliveries/custom.srt".to_owned());
+        let mut untouched = external.clone();
+        remap_separation_path(&mut untouched, from, &new_dir);
+        assert_eq!(untouched, external);
+
+        let mut empty: Option<String> = None;
+        remap_separation_path(&mut empty, from, &new_dir);
+        assert!(empty.is_none());
     }
 
     #[test]
@@ -981,29 +1123,36 @@ mod tests {
         assert!(normalized[1].text.starts_with("第二句"));
 
         assert!(normalize_segments(Vec::new()).is_err());
-        assert!(normalize_segments(vec![SubtitleSegment {
-            start: 5.0,
-            end: 5.0,
-            text: "零长度".to_owned(),
-        }])
-        .is_err());
-        assert!(normalize_segments(vec![SubtitleSegment {
-            start: -1.0,
-            end: 2.0,
-            text: "负数".to_owned(),
-        }])
-        .is_err());
-        assert!(normalize_segments(vec![SubtitleSegment {
-            start: f64::NAN,
-            end: 2.0,
-            text: "非数字".to_owned(),
-        }])
-        .is_err());
+        assert!(
+            normalize_segments(vec![SubtitleSegment {
+                start: 5.0,
+                end: 5.0,
+                text: "零长度".to_owned(),
+            }])
+            .is_err()
+        );
+        assert!(
+            normalize_segments(vec![SubtitleSegment {
+                start: -1.0,
+                end: 2.0,
+                text: "负数".to_owned(),
+            }])
+            .is_err()
+        );
+        assert!(
+            normalize_segments(vec![SubtitleSegment {
+                start: f64::NAN,
+                end: 2.0,
+                text: "非数字".to_owned(),
+            }])
+            .is_err()
+        );
     }
 
     #[test]
     fn parse_srt_accepts_missing_indexes_and_multiline_text() {
-        let srt = "1\n00:00:01,500 --> 00:00:03.250\n第一句\n第二行\n\n00:04.0 --> 00:06.0\n第三句\n";
+        let srt =
+            "1\n00:00:01,500 --> 00:00:03.250\n第一句\n第二行\n\n00:04.0 --> 00:06.0\n第三句\n";
         let segments = parse_srt(srt).unwrap();
         assert_eq!(segments.len(), 2);
         assert!((segments[0].start - 1.5).abs() < 1e-9);
@@ -1076,7 +1225,8 @@ mod tests {
 
     #[test]
     fn parse_srt_rejects_broken_timeline_after_first_cue() {
-        let srt = "1\n00:00:01,000 --> 00:00:02,000\n第一句\n00:00:03,XXX --> 00:00:04,000\n第二句\n";
+        let srt =
+            "1\n00:00:01,000 --> 00:00:02,000\n第一句\n00:00:03,XXX --> 00:00:04,000\n第二句\n";
         let message = parse_srt(srt).unwrap_err().to_string();
         assert!(message.contains("时间轴无法解析"), "{message}");
         assert!(message.contains("第 4 行"), "{message}");

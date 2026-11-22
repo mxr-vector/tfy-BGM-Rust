@@ -15,6 +15,7 @@ import { formatSegments, parseSubtitleText, validateSegments } from '@/lib/subti
 import { invoke, listen } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import type {
+  SeparationModelInfo,
   Song,
   StoredSubtitle,
   SubtitleExportResult,
@@ -204,6 +205,49 @@ export const selectedSong = computed<Song | null>(
 
 export const modelReady = computed(() => Boolean(modelsInfo.value?.loaded));
 
+// ---------------- 人声分离模型 ----------------
+
+/** 可选分离模型；由后端扫描随包模型与 `<模型目录>/separation/` 得到。 */
+export const separationModels = ref<SeparationModelInfo[]>([]);
+export const separationModelsLoading = ref(false);
+
+/**
+ * 读取分离模型列表。生成前必须让用户从列表中选择并确认；
+ * `force` 用于每次打开选择框时拿到最新的文件可用性。
+ *
+ * 读取失败时返回 `null`（已弹错误提示），调用方据此区分
+ * 「读取失败」与「确实没有可用模型」。
+ */
+export async function loadSeparationModels(
+  force = false,
+): Promise<SeparationModelInfo[] | null> {
+  if (separationModelsLoading.value) return separationModels.value;
+  if (!force && separationModels.value.length > 0) return separationModels.value;
+  separationModelsLoading.value = true;
+  try {
+    separationModels.value = await invoke<SeparationModelInfo[]>(COMMANDS.separationModels);
+  } catch (cause) {
+    toast(`读取分离模型失败：${normalizeError(cause)}`, 'error');
+    return null;
+  } finally {
+    separationModelsLoading.value = false;
+  }
+  return separationModels.value;
+}
+
+/** 在文件管理器中定位当前记录的人声 / 伴奏文件。 */
+export async function revealSeparationAudio(
+  which: 'vocals' | 'accompaniment' | 'srt' | 'lrc',
+): Promise<void> {
+  const key = selectedKey.value;
+  if (!key) return;
+  try {
+    await invoke(COMMANDS.revealSubtitleAudio, { key, which });
+  } catch (cause) {
+    toast(`打开分离文件失败：${normalizeError(cause)}`, 'error');
+  }
+}
+
 /** 当前曲目是否已有可导出的字幕（本次生成或历史保存）。 */
 export const hasExportable = computed(() => {
   const key = selectedKey.value;
@@ -359,27 +403,48 @@ export async function deleteSubtitleRecord(key: string): Promise<void> {
   }
 }
 
-/** 为选中曲目生成字幕。 */
-export async function generateSubtitles(): Promise<void> {
+/**
+ * 为选中曲目生成字幕。
+ *
+ * `separationModel` 是用户在生成前确认的分离模型；为空时拒绝执行。
+ * `separationTarget` 仅用于自定义 UVR 模型：确认模型主输出是人声还是乐器。
+ * 后端同样会再次校验，确保不会跳过人声分离或改用原始音频识别。
+ */
+export async function generateSubtitles(
+  separationModel: string,
+  separationTarget?: 'vocals' | 'instrumental',
+): Promise<void> {
   const key = selectedKey.value;
   if (!key || generating.value || editing.value) return;
+  if (!separationModel) {
+    toast('请先选择并确认人声分离模型', 'error');
+    return;
+  }
   if (!modelReady.value) {
     toast('请先完成 ASR 模型加载，再生成字幕', 'error');
     return;
+  }
+  if (state.prefs && state.prefs.separationModel !== separationModel) {
+    state.prefs = { ...state.prefs, separationModel };
+    persistPrefs();
   }
   await ensureProgressListener();
   generating.value = true;
   error.value = null;
   result.value = null;
   progress.value = {
-    stage: 'normalizing',
+    stage: 'separating',
     message: '准备生成字幕…',
     current: 0,
     total: 0,
     error: null,
   };
   try {
-    const generated = await invoke<SubtitleResult>(COMMANDS.generateSubtitles, { key });
+    const generated = await invoke<SubtitleResult>(COMMANDS.generateSubtitles, {
+      key,
+      separationModel,
+      separationTarget,
+    });
     result.value = generated;
     const song = selectedSong.value;
     const stored: StoredSubtitle = {
@@ -391,6 +456,12 @@ export async function generateSubtitles(): Promise<void> {
       durationMs: song?.durationMs,
       srt: generated.srt,
       lrc: generated.lrc,
+      separationModelName: generated.separation.modelName,
+      vocalsPath: generated.separation.vocalsPath,
+      accompanimentPath: generated.separation.accompanimentPath,
+      accompanimentKind: generated.separation.accompanimentKind,
+      srtPath: generated.srtPath,
+      lrcPath: generated.lrcPath,
     };
     savedSubtitles.value = { ...savedSubtitles.value, [key]: stored };
     generatedSubtitles.value = [

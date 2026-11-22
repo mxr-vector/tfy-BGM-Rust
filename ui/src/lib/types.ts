@@ -126,6 +126,8 @@ export interface Prefs {
   asrDownloadUrl: string;
   /** 上次加载成功的模型 id（相对模型目录）；由后端维护，启动时自动恢复。 */
   lastAsrModel: string | null;
+  /** 上次确认的人声分离模型 id；每次生成前仍会再次确认。 */
+  separationModel: string | null;
   /** 桌面歌词开关；由后端维护，模型可用时随启动恢复。 */
   desktopLyricsEnabled: boolean;
   /** 字幕预览偏好格式。 */
@@ -395,7 +397,32 @@ export interface SubtitleSegment {
   text: string;
 }
 
-export type SubtitleStage = 'normalizing' | 'transcribing' | 'done' | 'error';
+/** 分离模型：`target` 为模型主输出轨道，`instrumental` 时人声取混合减乐器。 */
+export interface SeparationModelInfo {
+  id: string;
+  name: string;
+  engine: string;
+  target: 'vocals' | 'instrumental';
+  /** false 时模型主输出角色不确定（自定义 UVR），生成前需要用户确认。 */
+  targetKnown: boolean;
+  description: string;
+  available: boolean;
+  detail: string;
+}
+
+/** 一次人声分离的交付信息；歌词识别只使用 `vocalsPath`。 */
+export interface SeparationInfo {
+  modelId: string;
+  modelName: string;
+  engine: string;
+  target: 'vocals' | 'instrumental';
+  vocalsPath: string;
+  accompanimentPath: string;
+  accompanimentKind: string;
+  sampleRate: number;
+}
+
+export type SubtitleStage = 'separating' | 'normalizing' | 'transcribing' | 'done' | 'error';
 
 /** `subtitle-progress` 事件负载。 */
 export interface SubtitleProgress {
@@ -412,13 +439,16 @@ export interface SubtitleResult {
   title: string;
   sourcePath: string;
   sourceFormat: string;
-  converted: boolean;
-  note: string | null;
+  /** 本次分离模型与本地人声 / 伴奏文件。 */
+  separation: SeparationInfo;
   duration: number;
   segments: SubtitleSegment[];
   srt: string;
   lrc: string;
   savedPath: string;
+  /** 自动落盘的 SRT / LRC 文件路径。 */
+  srtPath: string;
+  lrcPath: string;
 }
 
 export interface SubtitleExportResult {
@@ -442,6 +472,17 @@ export interface StoredSubtitle {
   /** 后端按统一规则格式化好的文本，预览与导出共用。 */
   srt: string;
   lrc: string;
+  /** 生成时使用的人声分离模型显示名（不是偏好里的模型 id）；旧记录没有该字段。 */
+  separationModelName?: string;
+  /** 分离后的人声文件绝对路径；歌词识别只使用该文件。 */
+  vocalsPath?: string;
+  /** 分离后的伴奏 / 乐器文件绝对路径。 */
+  accompanimentPath?: string;
+  /** `伴奏` 或 `乐器`。 */
+  accompanimentKind?: string;
+  /** 自动落盘的 SRT / LRC 文件路径；旧记录没有该字段。 */
+  srtPath?: string;
+  lrcPath?: string;
 }
 
 // ---------------- 桌面歌词 ----------------

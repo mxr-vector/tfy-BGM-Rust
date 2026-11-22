@@ -22,6 +22,7 @@ use crate::desktop::{self, DesktopState};
 use crate::fonts;
 use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, LyricsState};
 use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
+use crate::separation::{self, SeparationModelInfo};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::subtitles;
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
@@ -574,21 +575,40 @@ pub async fn transcribe_wav(
     Ok(Some(text))
 }
 
-/// 为音乐库曲目生成字幕：格式归一化 → 分片 ASR → SRT / LRC。
+/// 可选的人声分离模型：随包 Spleeter / UVR 与 `<模型目录>/separation/` 自定义模型。
+#[tauri::command]
+pub fn separation_models(app: AppHandle, state: State<'_, AppState>) -> Vec<SeparationModelInfo> {
+    separation::catalog(&app, &state.models_root())
+}
+
+/// 为音乐库曲目生成字幕：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
+///
+/// `separation_model` 由用户在生成前确认；为空时直接拒绝，不会回退到原始音频。
+/// `separation_target` 仅用于自定义 UVR 模型：用户确认模型主输出是人声还是乐器。
 /// 过程进度通过 `subtitle-progress` 推送，失败也会推送带原因的 error 事件。
 #[tauri::command]
 pub async fn generate_subtitles(
     app: AppHandle,
     state: State<'_, AppState>,
     key: String,
+    separation_model: String,
+    separation_target: Option<String>,
 ) -> CommandResult<subtitles::SubtitleResult> {
     let song = state
         .song(&key)
         .ok_or_else(|| format!("曲目不存在：{key}"))?;
     let runtime = state.model_runtime();
+    let models_root = state.models_root();
     let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        subtitles::generate(&task_app, &runtime, &song)
+        subtitles::generate(
+            &task_app,
+            &runtime,
+            &song,
+            &separation_model,
+            separation_target.as_deref(),
+            &models_root,
+        )
     })
     .await
     .map_err(|error| format!("字幕生成任务异常结束：{error}"))?;
@@ -661,6 +681,22 @@ pub fn list_subtitles(app: AppHandle) -> Vec<subtitles::StoredSubtitle> {
 #[tauri::command]
 pub fn delete_subtitle(app: AppHandle, key: String) -> CommandResult<bool> {
     subtitles::delete_stored(&app, &key).map_err(describe)
+}
+
+/// 在文件管理器中定位某条字幕记录使用的人声 / 伴奏文件。
+#[tauri::command]
+pub fn reveal_subtitle_audio(app: AppHandle, key: String, which: String) -> CommandResult<()> {
+    let stored =
+        subtitles::load_stored(&app, &key).ok_or_else(|| format!("字幕记录不存在：{key}"))?;
+    let (path, label) = match which.as_str() {
+        "vocals" => (stored.vocals_path, "人声文件"),
+        "accompaniment" => (stored.accompaniment_path, "伴奏 / 乐器文件"),
+        "srt" => (stored.srt_path, "SRT 字幕文件"),
+        "lrc" => (stored.lrc_path, "LRC 字幕文件"),
+        _ => return Err(format!("未知的分离文件类型：{which}")),
+    };
+    let path = path.ok_or_else(|| format!("该字幕记录没有保存{label}路径"))?;
+    reveal_in_dir(&app, Path::new(&path), label)
 }
 
 /// 保存「分段编辑」结果：校验 / 规范化分段后写回字幕文件，返回最新快照。

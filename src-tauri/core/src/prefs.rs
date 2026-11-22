@@ -15,7 +15,7 @@ use crate::loudness::find_preset;
 use crate::paths::strip_verbatim_prefix;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 3;
+pub const PREFS_VERSION: u32 = 4;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 /// 切歌交叉淡入淡出的默认时长（秒）；`0` 表示硬切。
@@ -33,6 +33,8 @@ const MAX_UI_FONT_LEN: usize = 128;
 const MAX_MODELS_DIR_LEN: usize = 512;
 /// 模型下载地址长度上限。
 const MAX_DOWNLOAD_URL_LEN: usize = 1024;
+/// 分离模型 id 长度上限。
+const MAX_SEPARATION_MODEL_LEN: usize = 256;
 /// ASR 模型默认下载地址：ModelScope 上的 0.6B-int8 模型目录。
 /// 偏好里留空即表示使用此地址，下载地址的唯一真源放在 core，避免多处定义漂移。
 pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
@@ -205,6 +207,8 @@ pub struct Prefs {
     /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
     /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
     pub last_asr_model: Option<String>,
+    /// 上次确认的人声分离模型 id；每次生成字幕前仍会再次让用户确认。
+    pub separation_model: Option<String>,
 
     // ---- 桌面歌词 / 字幕 ----
     /// 桌面歌词开关；模型可用时随启动恢复。由歌词命令维护，整包保存不会覆盖。
@@ -253,6 +257,7 @@ impl Default for Prefs {
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
             last_asr_model: None,
+            separation_model: None,
             desktop_lyrics_enabled: false,
             subtitle_format: "srt".to_owned(),
             smtc: false,
@@ -277,6 +282,10 @@ impl Prefs {
             .library_dir
             .map(|dir| dir.trim().to_owned())
             .filter(|dir| !dir.is_empty());
+        self.separation_model = self
+            .separation_model
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty() && id.chars().count() <= MAX_SEPARATION_MODEL_LEN);
 
         let mut seen = HashSet::new();
         let favorites = self

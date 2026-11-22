@@ -6,6 +6,7 @@ mod library_root;
 mod library_watch;
 mod lyrics;
 mod models;
+mod separation;
 mod settings;
 mod state;
 mod subtitles;
@@ -17,6 +18,13 @@ use lyrics::LyricsState;
 use state::AppState;
 use tauri::Manager;
 use tauri::webview::{PermissionKind, PermissionResponse};
+
+/// 分离 worker 入口：若本次进程由人声分离任务启动，执行任务并返回退出码。
+///
+/// 必须在初始化 Tauri 之前调用，worker 不创建窗口、不加载状态。
+pub fn separation_worker_main() -> Option<i32> {
+    separation::worker_main()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -102,11 +110,13 @@ pub fn run() {
             commands::unload_asr_model,
             commands::cancel_asr_download,
             commands::transcribe_wav,
+            commands::separation_models,
             commands::generate_subtitles,
             commands::export_subtitle,
             commands::subtitle_for_track,
             commands::list_subtitles,
             commands::delete_subtitle,
+            commands::reveal_subtitle_audio,
             commands::update_subtitle,
             commands::update_subtitle_text,
             commands::set_desktop_lyrics_enabled,

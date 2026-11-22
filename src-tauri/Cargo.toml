@@ -32,6 +32,11 @@ parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "webpki-roots"] }
 # ASR 推理引擎：sherpa-onnx 的 Rust API（构建时自动下载对应平台的预编译库）。
 sherpa-onnx = "2"
+# 人声分离直接调用 sherpa-onnx 的 C API：Rust 封装尚未暴露 OfflineSourceSeparation。
+sherpa-onnx-sys = "2"
+# 首次使用 spleeter 模型时解压随包分发的 .tar.bz2。
+bzip2 = "0.4"
+tar = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
