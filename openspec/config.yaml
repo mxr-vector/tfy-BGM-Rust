@@ -1,0 +1,15 @@
+schema: spec-driven
+
+context: |
+  需求与验收正文使用简体中文，保留 OpenSpec 的英文结构标题和 SHALL/MUST 关键字。
+  项目为 tfy-bgm 的 GPUI 分支，客户端以 Rust + GPUI 实现，macOS 最低版本为 26.0。
+  业务行为跟随 Gitee 上游 bgm-tauri2，界面采用独立设计。
+  core/ 与上游 src-tauri/core 同步，记录实际采用的提交，并以可重现的场景验收。
+
+rules:
+  proposal:
+    - 说明已有实现、剩余差异及前置变更。
+  specs:
+    - 每条需求附可验证的验收场景。
+  tasks:
+    - 任务包含实施步骤和验收步骤，验收完成后再勾选。

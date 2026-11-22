@@ -32,6 +32,12 @@ README.md          面向用户的说明，必须写清 GPUI 分支定位
 `core/` 是从主线 `src-tauri/core` 同步过来的独立 crate。更新它时从主线复制对应文件，
 并在提交信息中注明同步的主线提交号；不要在 `core/` 里做 GPUI 专属改动。
 
+## OpenSpec 需求管理
+
+- 新需求先在 `openspec/changes/` 新建变更，写明提案、设计、验收场景与任务，再开始实现。
+- 上游对齐顺序和前置关系见 `openspec/roadmap.md`。实施前确认实际对齐的主线提交。
+- 验收后勾选任务，运行 `openspec validate <变更名> --strict` 并归档，把通过验收的契约纳入 `openspec/specs/`。
+
 ## 能力同步（主线 → GPUI）
 
 主线在 `bgm-tauri2` 分支用 Tauri/TS 实现功能，本分支用 GPUI/Rust 对齐。同步套路：
@@ -59,6 +65,7 @@ cargo test
 
 ## 编码约定
 
+- 严禁出现过程性以及禁令性的注释。
 - 注释密度、命名和写法跟随现有 `src/` 代码：中文模块级 `//!` 注释、简洁行内注释、不写空泛注释。
 - 视图代码集中在 `view.rs` 的 `impl Workspace`：渲染逻辑用 GPUI 的 `Render`/`IntoElement` 风格，
   状态放进 `Workspace` 的字段，不要在渲染函数里做文件 IO 或耗时操作。
