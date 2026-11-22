@@ -12,6 +12,8 @@ export interface ModalField {
   value?: string;
   placeholder?: string;
   options?: ModalOption[];
+  /** 只读展示字段：仍随表单返回，但不可编辑。 */
+  readonly?: boolean;
 }
 
 export interface ModalOptions {

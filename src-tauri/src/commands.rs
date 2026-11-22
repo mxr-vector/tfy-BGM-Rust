@@ -22,7 +22,7 @@ use crate::desktop::{self, DesktopState};
 use crate::fonts;
 use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, LyricsState};
 use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
-use crate::separation::{self, SeparationModelInfo};
+use crate::separation::{self, SeparationCatalog};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::subtitles;
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
@@ -575,9 +575,9 @@ pub async fn transcribe_wav(
     Ok(Some(text))
 }
 
-/// 可选的人声分离模型：随包 Spleeter / UVR 与 `<模型目录>/separation/` 自定义模型。
+/// 人声分离模型目录：人声模型可选，伴奏模型固定为 UVR-MDX-NET-Inst_HQ_3。
 #[tauri::command]
-pub fn separation_models(app: AppHandle, state: State<'_, AppState>) -> Vec<SeparationModelInfo> {
+pub fn separation_models(app: AppHandle, state: State<'_, AppState>) -> SeparationCatalog {
     separation::catalog(&app, &state.models_root())
 }
 
@@ -690,7 +690,7 @@ pub fn reveal_subtitle_audio(app: AppHandle, key: String, which: String) -> Comm
         subtitles::load_stored(&app, &key).ok_or_else(|| format!("字幕记录不存在：{key}"))?;
     let (path, label) = match which.as_str() {
         "vocals" => (stored.vocals_path, "人声文件"),
-        "accompaniment" => (stored.accompaniment_path, "伴奏 / 乐器文件"),
+        "accompaniment" => (stored.accompaniment_path, "伴奏文件"),
         "srt" => (stored.srt_path, "SRT 字幕文件"),
         "lrc" => (stored.lrc_path, "LRC 字幕文件"),
         _ => return Err(format!("未知的分离文件类型：{which}")),

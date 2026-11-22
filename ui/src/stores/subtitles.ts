@@ -15,6 +15,7 @@ import { formatSegments, parseSubtitleText, validateSegments } from '@/lib/subti
 import { invoke, listen } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import type {
+  SeparationCatalog,
   SeparationModelInfo,
   Song,
   StoredSubtitle,
@@ -207,12 +208,14 @@ export const modelReady = computed(() => Boolean(modelsInfo.value?.loaded));
 
 // ---------------- 人声分离模型 ----------------
 
-/** 可选分离模型；由后端扫描随包模型与 `<模型目录>/separation/` 得到。 */
+/** 可选的人声分离模型；由后端扫描随包模型与 `<模型目录>/separation/` 得到。 */
 export const separationModels = ref<SeparationModelInfo[]>([]);
+/** 固定的伴奏分离模型（UVR-MDX-NET-Inst_HQ_3），不可更改。 */
+export const separationAccompaniment = ref<SeparationModelInfo | null>(null);
 export const separationModelsLoading = ref(false);
 
 /**
- * 读取分离模型列表。生成前必须让用户从列表中选择并确认；
+ * 读取分离模型目录。生成前必须让用户从人声列表中选择并确认；
  * `force` 用于每次打开选择框时拿到最新的文件可用性。
  *
  * 读取失败时返回 `null`（已弹错误提示），调用方据此区分
@@ -222,10 +225,12 @@ export async function loadSeparationModels(
   force = false,
 ): Promise<SeparationModelInfo[] | null> {
   if (separationModelsLoading.value) return separationModels.value;
-  if (!force && separationModels.value.length > 0) return separationModels.value;
+  if (!force && separationAccompaniment.value) return separationModels.value;
   separationModelsLoading.value = true;
   try {
-    separationModels.value = await invoke<SeparationModelInfo[]>(COMMANDS.separationModels);
+    const catalog = await invoke<SeparationCatalog>(COMMANDS.separationModels);
+    separationModels.value = catalog.vocals;
+    separationAccompaniment.value = catalog.accompaniment;
   } catch (cause) {
     toast(`读取分离模型失败：${normalizeError(cause)}`, 'error');
     return null;
@@ -457,6 +462,7 @@ export async function generateSubtitles(
       srt: generated.srt,
       lrc: generated.lrc,
       separationModelName: generated.separation.modelName,
+      accompanimentModelName: generated.separation.accompanimentModelName,
       vocalsPath: generated.separation.vocalsPath,
       accompanimentPath: generated.separation.accompanimentPath,
       accompanimentKind: generated.separation.accompanimentKind,

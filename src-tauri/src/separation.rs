@@ -1,8 +1,9 @@
 //! 「人声分离」：原始音频 → 44.1 kHz 双声道 PCM → sherpa-onnx 分离 → 本地人声 / 伴奏文件。
 //!
-//! 字幕生成必须先经过本模块：先产出并校验 `vocals.wav` 与伴奏（或乐器）文件，
-//! 再由字幕链路只对 `vocals.wav` 做归一化与 ASR。分离失败、文件缺失或为空时
-//! 直接返回错误，调用方不得继续识别。
+//! 字幕生成必须先经过本模块：人声由用户选择的模型生成，伴奏固定由
+//! `UVR-MDX-NET-Inst_HQ_3` 生成；两者都产出并校验 `vocals.wav` 与
+//! `accompaniment.wav` 后，再由字幕链路只对 `vocals.wav` 做归一化与 ASR。
+//! 分离失败、文件缺失或为空时直接返回错误，调用方不得继续识别。
 //!
 //! sherpa-onnx 的 Rust 封装尚未暴露 `OfflineSourceSeparation`，这里直接绑定其
 //! C API（与 `sherpa-onnx` crate 链接同一份静态库），模型格式由 sherpa-onnx 校验。
@@ -30,9 +31,14 @@ pub const CUSTOM_DIR_NAME: &str = "separation";
 const SPLEETER_ARCHIVE: &str = "sherpa-onnx-spleeter-2stems-int8.tar.bz2";
 /// 解压后的 spleeter 模型目录名。
 const SPLEETER_DIR: &str = "sherpa-onnx-spleeter-2stems-int8";
+/// 伴奏固定使用的 UVR 乐器模型；用户不可更改。
+const ACCOMPANIMENT_MODEL_FILE: &str = "UVR-MDX-NET-Inst_HQ_3.onnx";
+const ACCOMPANIMENT_MODEL_ID: &str = "uvr-inst-hq-3";
 /// 分离引擎输入采样率；sherpa-onnx 内部会重采样到模型要求的采样率。
 const INPUT_SAMPLE_RATE: u32 = 44_100;
 const INPUT_CHANNELS: usize = 2;
+/// 超过该时长的音频改为串行分离：两个引擎的整轨输出不同时驻留，峰值内存约减半。
+const SEQUENTIAL_SEPARATION_SECONDS: usize = 10 * 60;
 /// 分离产物目录名（位于应用配置目录下）。
 const SEPARATIONS_DIR: &str = "separations";
 /// 自身可执行文件的隐藏子进程参数：分离在独立进程内执行。
@@ -41,12 +47,16 @@ const SEPARATIONS_DIR: &str = "separations";
 /// 把引擎调用隔离到子进程后，最坏情况只是 worker 退出，主进程照常报错。
 pub const WORKER_ARG: &str = "--separation-worker";
 
-/// 模型输出的主轨类型：决定两个 stem 里哪一个是人声。
+/// 模型的主输出角色：决定 `stems[0]` 装的是人声还是乐器。
+///
+/// 注意：sherpa-onnx 只保证「`stems[0]` = 模型主输出，`stems[1]` = 混合 − 主输出」，
+/// 并不保证 `stems[1]` 一定是伴奏。主输出是人声还是乐器，取决于模型自身的训练目标，
+/// 因此取某个角色时必须结合本枚举换算下标，不能写死。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StemTarget {
-    /// 模型直接输出人声：stem[0] 人声，stem[1] 伴奏。
+    /// 人声模型：stem[0] 人声，stem[1] = 混合 − 人声（伴奏）。
     Vocals,
-    /// 模型输出乐器：stem[0] 乐器，stem[1] = 混合 − 乐器（人声）。
+    /// 乐器模型：stem[0] 乐器，stem[1] = 混合 − 乐器（人声）。
     Instrumental,
 }
 
@@ -93,6 +103,14 @@ pub struct SeparationModelInfo {
     pub detail: String,
 }
 
+/// 分离模型目录：人声模型由用户选择，伴奏模型固定。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparationCatalog {
+    pub vocals: Vec<SeparationModelInfo>,
+    pub accompaniment: SeparationModelInfo,
+}
+
 /// 本次分离的完整交付信息；随字幕结果一起返回并持久化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,9 +119,11 @@ pub struct SeparationInfo {
     pub model_name: String,
     pub engine: String,
     pub target: String,
+    /// 固定的伴奏模型显示名。
+    pub accompaniment_model_name: String,
     pub vocals_path: String,
     pub accompaniment_path: String,
-    /// `伴奏` 或 `乐器`，用于界面标注第二个文件的性质。
+    /// `伴奏` 或 `乐器`，用于界面标注第二个文件的性质；新版固定为「伴奏」。
     pub accompaniment_kind: String,
     pub sample_rate: u32,
 }
@@ -116,6 +136,7 @@ struct SeparationRecord<'a> {
     model_name: &'a str,
     engine: &'a str,
     target: &'a str,
+    accompaniment_model_name: &'a str,
     vocals_path: &'a str,
     accompaniment_path: &'a str,
     accompaniment_kind: &'a str,
@@ -131,8 +152,12 @@ struct SeparationRecord<'a> {
 #[serde(rename_all = "camelCase")]
 struct WorkerJob {
     source_path: String,
-    engine: WorkerEngine,
-    target: String,
+    /// 用户选择的人声模型。
+    vocals: WorkerEngine,
+    vocals_target: String,
+    /// 固定伴奏模型（UVR-MDX-NET-Inst_HQ_3）。
+    accompaniment: WorkerEngine,
+    accompaniment_target: String,
     vocals_path: String,
     accompaniment_path: String,
     result_path: String,
@@ -458,8 +483,8 @@ fn specs(app: &AppHandle, models_root: &Path) -> Vec<Spec> {
         spleeter_spec(app, bundled.as_deref()),
         uvr_spec(
             bundled.as_deref(),
-            "UVR-MDX-NET-Inst_HQ_3.onnx",
-            "uvr-inst-hq-3",
+            ACCOMPANIMENT_MODEL_FILE,
+            ACCOMPANIMENT_MODEL_ID,
             StemTarget::Instrumental,
         ),
         uvr_spec(
@@ -480,29 +505,42 @@ fn target_label(target: StemTarget) -> &'static str {
     }
 }
 
-/// 可选分离模型列表；随包模型即使缺失也保留一条，界面据此显示缺失原因。
-pub fn catalog(app: &AppHandle, models_root: &Path) -> Vec<SeparationModelInfo> {
-    specs(app, models_root)
-        .into_iter()
-        .map(|spec| {
-            let available = spec.installable || spec.source.as_ref().is_some_and(source_exists);
-            let detail = if available || spec.detail.starts_with("缺少") {
-                spec.detail
-            } else {
-                format!("{}；首次使用时会自动解压", spec.detail)
-            };
-            SeparationModelInfo {
-                id: spec.id,
-                name: spec.name,
-                engine: spec.engine,
-                target: target_label(spec.target).to_owned(),
-                target_known: spec.target_known,
-                description: spec.description,
-                available,
-                detail,
-            }
-        })
-        .collect()
+impl Spec {
+    /// 转成前端展示项；随包模型即使缺失也保留一条，界面据此显示缺失原因。
+    fn info(&self) -> SeparationModelInfo {
+        let available = self.installable || self.source.as_ref().is_some_and(source_exists);
+        let detail = if available || self.detail.starts_with("缺少") {
+            self.detail.clone()
+        } else {
+            format!("{}；首次使用时会自动解压", self.detail)
+        };
+        SeparationModelInfo {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            engine: self.engine.clone(),
+            target: target_label(self.target).to_owned(),
+            target_known: self.target_known,
+            description: self.description.clone(),
+            available,
+            detail,
+        }
+    }
+}
+
+/// 分离模型目录：人声模型由用户选择，伴奏固定为 UVR-MDX-NET-Inst_HQ_3。
+pub fn catalog(app: &AppHandle, models_root: &Path) -> SeparationCatalog {
+    let mut specs = specs(app, models_root);
+    let accompaniment = specs
+        .iter()
+        .find(|spec| spec.id == ACCOMPANIMENT_MODEL_ID)
+        .map(Spec::info)
+        .expect("随包伴奏模型条目必须存在");
+    // 人声列表只保留人声主输出的模型；伴奏固定由内置乐器模型生成，不在此列出。
+    specs.retain(|spec| spec.id != ACCOMPANIMENT_MODEL_ID && spec.target == StemTarget::Vocals);
+    SeparationCatalog {
+        vocals: specs.iter().map(Spec::info).collect(),
+        accompaniment,
+    }
 }
 
 fn source_exists(source: &Source) -> bool {
@@ -541,6 +579,22 @@ fn resolve_spec(app: &AppHandle, models_root: &Path, id: &str) -> Result<Spec> {
     }
     if spec.source.is_none() {
         bail!("分离模型不可用：{}（{}）", spec.name, spec.detail);
+    }
+    Ok(spec)
+}
+
+/// 解析固定的伴奏模型；缺失时返回可读错误，不静默降级。
+fn resolve_accompaniment(app: &AppHandle, models_root: &Path) -> Result<Spec> {
+    let spec = specs(app, models_root)
+        .into_iter()
+        .find(|spec| spec.id == ACCOMPANIMENT_MODEL_ID)
+        .ok_or_else(|| anyhow!("缺少固定的伴奏分离模型：{ACCOMPANIMENT_MODEL_FILE}"))?;
+    if spec
+        .source
+        .as_ref()
+        .is_none_or(|source| !source_exists(source))
+    {
+        bail!("伴奏分离模型不可用：{}（{}）", spec.name, spec.detail);
     }
     Ok(spec)
 }
@@ -606,6 +660,7 @@ fn with_engine<R>(
     source: &Source,
     channels: &[Vec<f32>],
     sample_rate: u32,
+    num_threads: i32,
     consume: impl FnOnce(RawStems<'_>) -> Result<R>,
 ) -> Result<R> {
     if channels.is_empty() {
@@ -643,7 +698,7 @@ fn with_engine<R>(
                     uvr: UvrModelConfig {
                         model: uvr_model.as_ptr(),
                     },
-                    num_threads: thread_count(),
+                    num_threads,
                     debug: 0,
                     provider: provider.as_ptr(),
                 },
@@ -663,7 +718,7 @@ fn with_engine<R>(
                     uvr: UvrModelConfig {
                         model: uvr_model.as_ptr(),
                     },
-                    num_threads: thread_count(),
+                    num_threads,
                     debug: 0,
                     provider: provider.as_ptr(),
                 },
@@ -740,8 +795,13 @@ unsafe fn read_stem(stem: &SourceSeparationStem, index: usize) -> Result<Vec<&[f
 
 /// 调用引擎并复制出独立音轨；仅测试与需要持有数据的调用方使用。
 #[cfg_attr(not(test), allow(dead_code))]
-fn run_engine(source: &Source, channels: &[Vec<f32>], sample_rate: u32) -> Result<Stems> {
-    with_engine(source, channels, sample_rate, |raw| {
+fn run_engine(
+    source: &Source,
+    channels: &[Vec<f32>],
+    sample_rate: u32,
+    num_threads: i32,
+) -> Result<Stems> {
+    with_engine(source, channels, sample_rate, num_threads, |raw| {
         let stems = raw
             .stems
             .into_iter()
@@ -754,10 +814,16 @@ fn run_engine(source: &Source, channels: &[Vec<f32>], sample_rate: u32) -> Resul
     })
 }
 
-fn thread_count() -> i32 {
+/// 可用 CPU 核心数；探测失败时按 2 核处理。
+fn available_cores() -> usize {
     std::thread::available_parallelism()
-        .map(|count| count.get().min(4) as i32)
+        .map(|count| count.get())
         .unwrap_or(2)
+}
+
+/// 并行引擎各自分到的线程数：按引擎数均分核心，避免两个模型互相抢核。
+fn split_thread_count(cores: usize, engines: usize) -> i32 {
+    (cores / engines.max(1)).clamp(1, 4) as i32
 }
 
 /// sherpa-onnx 对 UVR 模型要求的全部元数据键；缺失任一项会 `_Exit(-1)`。
@@ -1141,12 +1207,27 @@ pub fn separate(
         bail!("请先选择并确认人声分离模型");
     }
     let spec = resolve_spec(app, models_root, model_id)?;
+    if spec.id == ACCOMPANIMENT_MODEL_ID {
+        bail!("{ACCOMPANIMENT_MODEL_FILE} 固定用于伴奏轨道，请选择人声分离模型");
+    }
+    let accompaniment_spec = resolve_accompaniment(app, models_root)?;
     let source = spec
         .source
         .clone()
         .ok_or_else(|| anyhow!("分离模型不可用：{}（{}）", spec.name, spec.detail))?;
     if !source_exists(&source) {
         bail!("分离模型文件缺失：{}（{}）", spec.name, spec.detail);
+    }
+    let accompaniment_source = accompaniment_spec
+        .source
+        .clone()
+        .ok_or_else(|| anyhow!("伴奏分离模型不可用：{}", accompaniment_spec.name))?;
+    if !source_exists(&accompaniment_source) {
+        bail!(
+            "伴奏分离模型文件缺失：{}（{}）",
+            accompaniment_spec.name,
+            accompaniment_spec.detail
+        );
     }
     let target = match target_override {
         None => spec.target,
@@ -1163,14 +1244,10 @@ pub fn separate(
 
     let dir = separation_dir(app, &song.key)?;
     let vocals_path = dir.join("vocals.wav");
-    let accompaniment_name = match target {
-        StemTarget::Instrumental => "instrumental.wav",
-        StemTarget::Vocals => "accompaniment.wav",
-    };
-    let accompaniment_path = dir.join(accompaniment_name);
+    let accompaniment_path = dir.join("accompaniment.wav");
     // worker 先写 `.part`，成功后再替换正式文件：重新生成失败不会破坏上一份交付物。
     let voices_part = dir.join("vocals.wav.part");
-    let accompaniment_part = dir.join(format!("{accompaniment_name}.part"));
+    let accompaniment_part = dir.join("accompaniment.wav.part");
     let parts = [&voices_part, &accompaniment_part];
     for part in parts {
         let _ = fs::remove_file(part);
@@ -1187,19 +1264,10 @@ pub fn separate(
     let result_path = work_dir.join("result.json");
     let job = WorkerJob {
         source_path: song.path.clone(),
-        engine: match &source {
-            Source::Spleeter {
-                vocals,
-                accompaniment,
-            } => WorkerEngine::Spleeter {
-                vocals: vocals.to_string_lossy().into_owned(),
-                accompaniment: accompaniment.to_string_lossy().into_owned(),
-            },
-            Source::Uvr { model } => WorkerEngine::Uvr {
-                model: model.to_string_lossy().into_owned(),
-            },
-        },
-        target: target_label(target).to_owned(),
+        vocals: worker_engine(&source),
+        vocals_target: target_label(target).to_owned(),
+        accompaniment: worker_engine(&accompaniment_source),
+        accompaniment_target: target_label(StemTarget::Instrumental).to_owned(),
         vocals_path: voices_part.to_string_lossy().into_owned(),
         accompaniment_path: accompaniment_part.to_string_lossy().into_owned(),
         result_path: result_path.to_string_lossy().into_owned(),
@@ -1239,8 +1307,10 @@ pub fn separate(
             return abort_parts(
                 &parts,
                 anyhow!(
-                    "人声分离子进程异常退出（{}）；模型可能与 sherpa-onnx 不兼容",
-                    worker_failure_detail(&output)
+                    "人声分离子进程异常退出（{}）；人声模型 {} 或伴奏模型 {} 可能与 sherpa-onnx 不兼容",
+                    worker_failure_detail(&output),
+                    spec.name,
+                    accompaniment_spec.name
                 ),
             );
         }
@@ -1249,8 +1319,10 @@ pub fn separate(
         return abort_parts(
             &parts,
             anyhow!(
-                "人声分离子进程异常退出（{}）",
-                worker_failure_detail(&output)
+                "人声分离子进程异常退出（{}）；人声模型 {} 或伴奏模型 {} 中有一个退出异常",
+                worker_failure_detail(&output),
+                spec.name,
+                accompaniment_spec.name
             ),
         );
     }
@@ -1277,22 +1349,17 @@ pub fn separate(
                 .with_context(|| format!("无法保存分离文件：{}", target_path.display()));
         }
     }
-    // 切换同类模型后清掉另一种命名的旧文件，避免目录里留下过期交付物。
-    let stale = dir.join(match target {
-        StemTarget::Instrumental => "accompaniment.wav",
-        StemTarget::Vocals => "instrumental.wav",
-    });
-    let _ = fs::remove_file(stale);
+    // 旧版本可能把伴奏写成 instrumental.wav；统一为 accompaniment.wav 后清掉旧交付物。
+    let _ = fs::remove_file(dir.join("instrumental.wav"));
 
-    let accompaniment_kind = match target {
-        StemTarget::Instrumental => "乐器",
-        StemTarget::Vocals => "伴奏",
-    };
+    // 伴奏固定由 UVR 乐器模型生成，交付物统一标注为「伴奏」。
+    let accompaniment_kind = "伴奏";
     let info = SeparationInfo {
         model_id: spec.id.clone(),
         model_name: spec.name.clone(),
         engine: spec.engine.clone(),
         target: target_label(target).to_owned(),
+        accompaniment_model_name: accompaniment_spec.name.clone(),
         vocals_path: vocals_path.to_string_lossy().into_owned(),
         accompaniment_path: accompaniment_path.to_string_lossy().into_owned(),
         accompaniment_kind: accompaniment_kind.to_owned(),
@@ -1305,6 +1372,7 @@ pub fn separate(
         model_name: &info.model_name,
         engine: &info.engine,
         target: &info.target,
+        accompaniment_model_name: &info.accompaniment_model_name,
         vocals_path: &info.vocals_path,
         accompaniment_path: &info.accompaniment_path,
         accompaniment_kind: &info.accompaniment_kind,
@@ -1369,8 +1437,23 @@ fn run_worker(job_path: &Path) -> i32 {
     if result.is_ok() { 0 } else { 1 }
 }
 
-fn execute_job(job: &WorkerJob) -> Result<u32> {
-    let source = match &job.engine {
+fn worker_engine(source: &Source) -> WorkerEngine {
+    match source {
+        Source::Spleeter {
+            vocals,
+            accompaniment,
+        } => WorkerEngine::Spleeter {
+            vocals: vocals.to_string_lossy().into_owned(),
+            accompaniment: accompaniment.to_string_lossy().into_owned(),
+        },
+        Source::Uvr { model } => WorkerEngine::Uvr {
+            model: model.to_string_lossy().into_owned(),
+        },
+    }
+}
+
+fn worker_source(engine: &WorkerEngine) -> Source {
+    match engine {
         WorkerEngine::Spleeter {
             vocals,
             accompaniment,
@@ -1381,37 +1464,107 @@ fn execute_job(job: &WorkerJob) -> Result<u32> {
         WorkerEngine::Uvr { model } => Source::Uvr {
             model: PathBuf::from(model),
         },
-    };
-    let target = match job.target.as_str() {
-        "vocals" => StemTarget::Vocals,
-        "instrumental" => StemTarget::Instrumental,
+    }
+}
+
+fn parse_target(value: &str) -> Result<StemTarget> {
+    match value {
+        "vocals" => Ok(StemTarget::Vocals),
+        "instrumental" => Ok(StemTarget::Instrumental),
         other => bail!("未知的分离主输出：{other}"),
-    };
+    }
+}
+
+/// 在引擎输出的两个 stem 中，找到指定角色所在的下标。
+///
+/// sherpa-onnx 只保证 `stems[0]` = 模型主输出、`stems[1]` = 「混合 − 主输出」。
+/// 「想要的角色」与「模型主输出角色」一致时取 0，否则取 1：
+/// - 人声模型取人声 → 0；人声模型取伴奏 → 1；
+/// - 乐器模型取乐器 → 0；乐器模型取人声 → 1。
+///
+/// 这与旧版单引擎的 `Instrumental => (人声 1, 伴奏 0)` 映射一致；固定伴奏模型
+/// 是乐器模型，因此伴奏取它自己的 `stems[0]`（不是角色枚举值本身）。
+fn stem_index(primary: StemTarget, wanted: StemTarget) -> usize {
+    if primary == wanted { 0 } else { 1 }
+}
+
+/// 取出线程 panic 的文本，方便在子进程日志里定位。
+fn panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "未知 panic".to_owned())
+}
+
+fn execute_job(job: &WorkerJob) -> Result<u32> {
+    let vocals_source = worker_source(&job.vocals);
+    let accompaniment_source = worker_source(&job.accompaniment);
+    let vocals_target = parse_target(&job.vocals_target)?;
+    let accompaniment_target = parse_target(&job.accompaniment_target)?;
     let input = decode_input(Path::new(&job.source_path))?;
     let vocals_path = PathBuf::from(&job.vocals_path);
     let accompaniment_path = PathBuf::from(&job.accompaniment_path);
-    let (vocals_index, accompaniment_index) = match target {
-        StemTarget::Vocals => (0, 1),
-        // sherpa-onnx 的 UVR 约定：stem[0] 为模型主输出，stem[1] 为「混合 − 主输出」。
-        StemTarget::Instrumental => (1, 0),
+    let vocals_index = stem_index(vocals_target, StemTarget::Vocals);
+    let accompaniment_index = stem_index(accompaniment_target, StemTarget::Instrumental);
+
+    let run_vocals = |threads: i32| -> Result<u32> {
+        with_engine(&vocals_source, &input, INPUT_SAMPLE_RATE, threads, |raw| {
+            if raw.stems.len() < 2 {
+                bail!("人声分离失败：所选模型未同时输出人声轨与残差轨");
+            }
+            let stem = &raw.stems[vocals_index];
+            if stem.is_empty() || stem[0].is_empty() {
+                bail!("人声分离失败：人声轨为空");
+            }
+            write_wav16_slices(&vocals_path, stem, raw.sample_rate)?;
+            Ok(raw.sample_rate)
+        })
+    };
+    let run_accompaniment = |threads: i32| -> Result<()> {
+        with_engine(
+            &accompaniment_source,
+            &input,
+            INPUT_SAMPLE_RATE,
+            threads,
+            |raw| {
+                if raw.stems.len() < 2 {
+                    bail!("伴奏分离失败：伴奏模型未同时输出乐器轨与残差轨");
+                }
+                let stem = &raw.stems[accompaniment_index];
+                if stem.is_empty() || stem[0].is_empty() {
+                    bail!("伴奏分离失败：伴奏轨为空");
+                }
+                write_wav16_slices(&accompaniment_path, stem, raw.sample_rate)?;
+                Ok(())
+            },
+        )
     };
 
-    with_engine(&source, &input, INPUT_SAMPLE_RATE, |raw| {
-        if raw.stems.len() < 2 {
-            bail!("人声分离失败：未同时得到人声轨与伴奏轨");
-        }
-        let vocals = &raw.stems[vocals_index];
-        let accompaniment = &raw.stems[accompaniment_index];
-        if vocals.is_empty() || vocals[0].is_empty() {
-            bail!("人声分离失败：人声轨为空");
-        }
-        if accompaniment.is_empty() || accompaniment[0].is_empty() {
-            bail!("人声分离失败：伴奏 / 乐器轨为空");
-        }
-        write_wav16_slices(&vocals_path, vocals, raw.sample_rate)?;
-        write_wav16_slices(&accompaniment_path, accompaniment, raw.sample_rate)?;
-        Ok(raw.sample_rate)
-    })
+    let cores = available_cores();
+    // 超长音频串行执行：两个引擎的整轨输出不同时驻留，避免峰值内存翻倍。
+    let samples = input.first().map_or(0, Vec::len);
+    if samples > SEQUENTIAL_SEPARATION_SECONDS * INPUT_SAMPLE_RATE as usize {
+        let threads = split_thread_count(cores, 1);
+        let sample_rate = run_vocals(threads)?;
+        run_accompaniment(threads)?;
+        return Ok(sample_rate);
+    }
+
+    // 常规歌曲：解码只做一次，两个独立引擎并行生成，线程数按核心均分。
+    let threads = split_thread_count(cores, 2);
+    let (vocals_result, accompaniment_result) = std::thread::scope(|scope| {
+        let vocals = scope.spawn(|| run_vocals(threads));
+        let accompaniment = scope.spawn(|| run_accompaniment(threads));
+        (vocals.join(), accompaniment.join())
+    });
+    let sample_rate = vocals_result.map_err(|payload| {
+        anyhow!("人声分离线程异常结束：{}", panic_payload(payload.as_ref()))
+    })??;
+    accompaniment_result.map_err(|payload| {
+        anyhow!("伴奏分离线程异常结束：{}", panic_payload(payload.as_ref()))
+    })??;
+    Ok(sample_rate)
 }
 
 fn run_worker_process(job_path: &Path) -> Result<std::process::Output> {
@@ -1484,6 +1637,33 @@ mod tests {
         assert_eq!(uvr_target_from_name("custom_model"), StemTarget::Vocals);
     }
 
+    /// 回归用例：下标由「模型主输出角色」与「想取的角色」共同决定。
+    ///
+    /// sherpa-onnx 只保证 `stems[0]` 是模型主输出。人声模型的主输出是人声，
+    /// 乐器模型（含固定伴奏模型）的主输出是乐器；两者取到「伴奏」时下标分别是 1 和 0。
+    /// 该映射与旧版单引擎的 `Instrumental => (人声 1, 伴奏 0)` 完全一致。
+    #[test]
+    fn stem_index_follows_primary_output() {
+        assert_eq!(stem_index(StemTarget::Vocals, StemTarget::Vocals), 0);
+        assert_eq!(stem_index(StemTarget::Vocals, StemTarget::Instrumental), 1);
+        assert_eq!(
+            stem_index(StemTarget::Instrumental, StemTarget::Instrumental),
+            0
+        );
+        assert_eq!(stem_index(StemTarget::Instrumental, StemTarget::Vocals), 1);
+    }
+
+    #[test]
+    fn split_thread_count_shares_cores_between_engines() {
+        assert_eq!(split_thread_count(12, 2), 4);
+        assert_eq!(split_thread_count(8, 2), 4);
+        assert_eq!(split_thread_count(4, 2), 2);
+        assert_eq!(split_thread_count(2, 2), 1);
+        assert_eq!(split_thread_count(1, 2), 1);
+        assert_eq!(split_thread_count(0, 2), 1);
+        assert_eq!(split_thread_count(16, 1), 4);
+    }
+
     fn repo_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -1519,6 +1699,7 @@ mod tests {
             },
             &input,
             44_100,
+            split_thread_count(available_cores(), 1),
         )
         .unwrap();
         assert_eq!(output.stems.len(), 2, "Spleeter 应输出两轨");
@@ -1595,8 +1776,13 @@ mod tests {
         for file in ["UVR-MDX-NET-Voc_FT.onnx", "UVR-MDX-NET-Inst_HQ_3.onnx"] {
             let model = repo_path(&format!("models/{file}"));
             assert!(model.is_file(), "缺少随包模型：{}", model.display());
-            let output = run_engine(&Source::Uvr { model }, &input, INPUT_SAMPLE_RATE)
-                .unwrap_or_else(|error| panic!("{file} 分离失败：{error:#}"));
+            let output = run_engine(
+                &Source::Uvr { model },
+                &input,
+                INPUT_SAMPLE_RATE,
+                split_thread_count(available_cores(), 1),
+            )
+            .unwrap_or_else(|error| panic!("{file} 分离失败：{error:#}"));
             assert_eq!(output.stems.len(), 2, "{file} 应输出两轨");
             assert!(!output.stems[0][0].is_empty(), "{file} 主轨为空");
             assert!(!output.stems[1][0].is_empty(), "{file} 残差轨为空");
@@ -1606,6 +1792,71 @@ mod tests {
                 output.sample_rate
             );
         }
+    }
+
+    /// 两个 UVR 引擎在独立线程中并发运行，验证 C API / ORT 会话可并行。
+    #[test]
+    #[ignore = "需要随包 UVR 模型、ffmpeg 与真实歌曲"]
+    fn parallel_uvr_engines_run_on_short_clip() {
+        let song = std::env::var_os("TFY_E2E_SONG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo_path("bgm/cheerful/上春山.mp3"));
+        if !song.is_file() {
+            eprintln!("跳过：找不到测试歌曲 {}", song.display());
+            return;
+        }
+        let mut input = decode_input(&song).unwrap();
+        for channel in &mut input {
+            channel.truncate(10 * INPUT_SAMPLE_RATE as usize);
+        }
+        let vocals_model = repo_path("models/UVR-MDX-NET-Voc_FT.onnx");
+        let accompaniment_model = repo_path("models/UVR-MDX-NET-Inst_HQ_3.onnx");
+        assert!(
+            vocals_model.is_file(),
+            "缺少随包模型：{}",
+            vocals_model.display()
+        );
+        assert!(
+            accompaniment_model.is_file(),
+            "缺少随包模型：{}",
+            accompaniment_model.display()
+        );
+        let threads = split_thread_count(available_cores(), 2);
+        let input = &input;
+        let (vocals, accompaniment) = std::thread::scope(|scope| {
+            let vocals = scope.spawn(move || {
+                run_engine(
+                    &Source::Uvr {
+                        model: vocals_model,
+                    },
+                    input,
+                    INPUT_SAMPLE_RATE,
+                    threads,
+                )
+            });
+            let accompaniment = scope.spawn(move || {
+                run_engine(
+                    &Source::Uvr {
+                        model: accompaniment_model,
+                    },
+                    input,
+                    INPUT_SAMPLE_RATE,
+                    threads,
+                )
+            });
+            (vocals.join().unwrap(), accompaniment.join().unwrap())
+        });
+        let vocals = vocals.expect("人声模型并行运行失败");
+        let accompaniment = accompaniment.expect("伴奏模型并行运行失败");
+        assert_eq!(vocals.stems.len(), 2);
+        assert_eq!(accompaniment.stems.len(), 2);
+        assert!(!vocals.stems[0][0].is_empty());
+        assert!(!accompaniment.stems[0][0].is_empty());
+        eprintln!(
+            "并行分离完成：人声 {} 轨 / 伴奏 {} 轨",
+            vocals.stems.len(),
+            accompaniment.stems.len()
+        );
     }
 
     #[test]
@@ -1770,5 +2021,67 @@ mod tests {
         let job = dir.path().join("job.json");
         fs::write(&job, b"not json").unwrap();
         assert_eq!(run_worker(&job), 2);
+    }
+
+    /// 用真实模型验证 stem 语义：伴奏模型的主输出（stem[0]）是乐器，不是人声。
+    ///
+    /// 以人声模型 stem[0] 为参照，乐器模型的 stem[1] 应与之高度相关（残差 = 人声），
+    /// 而 stem[0] 几乎不相关（乐器）。若有人把「伴奏 → 下标」写成 1，
+    /// 本测试会失败，提醒伴奏轨会被写成人声。
+    #[test]
+    #[ignore = "需要随包 UVR 模型、ffmpeg 与真实歌曲"]
+    fn accompaniment_model_primary_stem_is_instrumental() {
+        fn correlation(a: &[f32], b: &[f32]) -> f32 {
+            let n = a.len().min(b.len());
+            let (mut mean_a, mut mean_b) = (0f64, 0f64);
+            for i in 0..n {
+                mean_a += a[i] as f64;
+                mean_b += b[i] as f64;
+            }
+            mean_a /= n as f64;
+            mean_b /= n as f64;
+            let (mut num, mut dev_a, mut dev_b) = (0f64, 0f64, 0f64);
+            for i in 0..n {
+                let x = a[i] as f64 - mean_a;
+                let y = b[i] as f64 - mean_b;
+                num += x * y;
+                dev_a += x * x;
+                dev_b += y * y;
+            }
+            (num / (dev_a.sqrt() * dev_b.sqrt() + 1e-12)) as f32
+        }
+
+        let song = repo_path("bgm/cheerful/buttercup.mp3");
+        let mut input = decode_input(&song).unwrap();
+        for channel in &mut input {
+            channel.truncate(10 * INPUT_SAMPLE_RATE as usize);
+        }
+        let threads = split_thread_count(available_cores(), 1);
+        let vocals = run_engine(
+            &Source::Uvr {
+                model: repo_path("models/UVR-MDX-NET-Voc_FT.onnx"),
+            },
+            &input,
+            INPUT_SAMPLE_RATE,
+            threads,
+        )
+        .unwrap();
+        let accompaniment = run_engine(
+            &Source::Uvr {
+                model: repo_path(&format!("models/{ACCOMPANIMENT_MODEL_FILE}")),
+            },
+            &input,
+            INPUT_SAMPLE_RATE,
+            threads,
+        )
+        .unwrap();
+
+        let vocals_ch0 = &vocals.stems[0][0];
+        let with_primary = correlation(vocals_ch0, &accompaniment.stems[0][0]);
+        let with_residual = correlation(vocals_ch0, &accompaniment.stems[1][0]);
+        assert!(
+            with_residual > with_primary + 0.3,
+            "伴奏模型的 stem[1]（残差）应是人声：与主输出的相关度 {with_residual} 未显著高于 {with_primary}"
+        );
     }
 }

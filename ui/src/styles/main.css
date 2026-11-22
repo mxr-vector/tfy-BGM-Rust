@@ -3902,6 +3902,17 @@ input[type="checkbox"]:indeterminate::after {
   box-shadow: 0 0 0 3px rgba(25, 217, 139, 0.1);
 }
 
+.modal-input[readonly] {
+  color: var(--text-2);
+  cursor: default;
+}
+
+.modal-input[readonly]:focus {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
 .modal-select option {
   background: #10241d;
   color: var(--text);

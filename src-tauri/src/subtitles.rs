@@ -2,7 +2,7 @@
 //!
 //! 数据流（顺序固定，不允许跳过或合并）：
 //! 1. 用户在生成前确认人声分离模型；未确认时直接拒绝；
-//! 2. `separation::separate` 把原始音频分离为本地 `vocals.wav` 与伴奏 / 乐器文件，
+//! 2. `separation::separate` 把原始音频分离为本地 `vocals.wav` 与伴奏文件，
 //!    并在返回前校验两个文件存在且非空；失败即终止；
 //! 3. 只对人声 WAV 用 ffmpeg 归一化为 16 kHz 单声道 PCM（sherpa-onnx 的
 //!    `Wave::read` 只接受单声道 WAV）；绝不读取原始混合音频或伴奏轨做识别；
@@ -113,11 +113,14 @@ pub struct StoredSubtitle {
     /// 分离模型的显示名（不是偏好里保存的模型 id）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separation_model_name: Option<String>,
+    /// 固定的伴奏模型显示名；旧记录没有该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accompaniment_model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocals_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accompaniment_path: Option<String>,
-    /// `伴奏` 或 `乐器`。
+    /// `伴奏` 或 `乐器`；新版固定为「伴奏」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accompaniment_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,6 +288,7 @@ fn save_stored(
         srt: format_srt(segments),
         lrc: format_lrc(title, segments),
         separation_model_name: Some(separation.model_name.clone()),
+        accompaniment_model_name: Some(separation.accompaniment_model_name.clone()),
         vocals_path: Some(separation.vocals_path.clone()),
         accompaniment_path: Some(separation.accompaniment_path.clone()),
         accompaniment_kind: Some(separation.accompaniment_kind.clone()),
@@ -525,7 +529,7 @@ pub fn generate(
     emit_progress(
         app,
         SubtitleStage::Separating,
-        "正在分离人声与伴奏…",
+        "正在分离人声与伴奏（模型并行运行）…",
         0,
         0,
         None,
@@ -1039,6 +1043,7 @@ mod tests {
             srt: String::new(),
             lrc: String::new(),
             separation_model_name: None,
+            accompaniment_model_name: None,
             vocals_path: None,
             accompaniment_path: None,
             accompaniment_kind: None,

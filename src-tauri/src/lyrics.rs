@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Size, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent, webview::PageLoadEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Size, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent, webview::PageLoadEvent,
 };
 
 use crate::desktop::DesktopState;

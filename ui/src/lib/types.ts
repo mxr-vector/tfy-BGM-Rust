@@ -410,12 +410,20 @@ export interface SeparationModelInfo {
   detail: string;
 }
 
+/** 分离模型目录：人声模型可选，伴奏模型固定。 */
+export interface SeparationCatalog {
+  vocals: SeparationModelInfo[];
+  accompaniment: SeparationModelInfo;
+}
+
 /** 一次人声分离的交付信息；歌词识别只使用 `vocalsPath`。 */
 export interface SeparationInfo {
   modelId: string;
   modelName: string;
   engine: string;
   target: 'vocals' | 'instrumental';
+  /** 固定伴奏模型的显示名。 */
+  accompanimentModelName: string;
   vocalsPath: string;
   accompanimentPath: string;
   accompanimentKind: string;
@@ -474,11 +482,13 @@ export interface StoredSubtitle {
   lrc: string;
   /** 生成时使用的人声分离模型显示名（不是偏好里的模型 id）；旧记录没有该字段。 */
   separationModelName?: string;
+  /** 生成时使用的固定伴奏模型显示名；旧记录没有该字段。 */
+  accompanimentModelName?: string;
   /** 分离后的人声文件绝对路径；歌词识别只使用该文件。 */
   vocalsPath?: string;
-  /** 分离后的伴奏 / 乐器文件绝对路径。 */
+  /** 分离后的伴奏文件绝对路径。 */
   accompanimentPath?: string;
-  /** `伴奏` 或 `乐器`。 */
+  /** `伴奏` 或 `乐器`；新版固定为「伴奏」。 */
   accompanimentKind?: string;
   /** 自动落盘的 SRT / LRC 文件路径；旧记录没有该字段。 */
   srtPath?: string;

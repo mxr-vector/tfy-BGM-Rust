@@ -133,6 +133,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown, true));
                 class="modal-input"
                 type="text"
                 :name="field.name"
+                :readonly="field.readonly === true"
                 :placeholder="field.placeholder ?? ''"
                 autocomplete="off"
                 spellcheck="false"

@@ -42,6 +42,7 @@ import {
   modelReady,
   previewFormat,
   revealSeparationAudio,
+  separationAccompaniment,
   separationModelsLoading,
   previewText,
   progress,
@@ -146,6 +147,7 @@ const separationForSelection = computed(() => {
   if (result.value && result.value.key === selectedKey.value) {
     return {
       modelName: result.value.separation.modelName,
+      accompanimentModelName: result.value.separation.accompanimentModelName,
       vocalsPath: result.value.separation.vocalsPath,
       accompanimentPath: result.value.separation.accompanimentPath,
       accompanimentKind: result.value.separation.accompanimentKind,
@@ -158,6 +160,8 @@ const separationForSelection = computed(() => {
   if (!stored?.separationModelName || !stored.vocalsPath || !stored.accompanimentPath) return null;
   return {
     modelName: stored.separationModelName,
+    // 旧记录没有单独的伴奏模型字段：当时的伴奏由同一分离模型产出，按原模型名展示。
+    accompanimentModelName: stored.accompanimentModelName ?? stored.separationModelName,
     vocalsPath: stored.vocalsPath,
     accompanimentPath: stored.accompanimentPath,
     accompanimentKind: stored.accompanimentKind ?? '伴奏',
@@ -183,13 +187,14 @@ async function chooseSeparationModel(): Promise<void> {
     return;
   }
   const models = await loadSeparationModels(true);
-  if (!models) return;
+  const accompaniment = separationAccompaniment.value;
+  if (!models || !accompaniment) return;
   const available = models.filter((model) => model.available);
   if (available.length === 0) {
     void showModal({
       title: '没有可用的人声分离模型',
       description:
-        '随包模型缺失或未放入自定义模型。请确认安装包完整，或把 sherpa-onnx 兼容的 2-stem 分离模型放到「模型目录 / separation /」后重试。',
+        '随包模型缺失或未放入自定义模型。请确认安装包完整，或把 sherpa-onnx 兼容的 2-stem 人声分离模型放到「模型目录 / separation /」后重试。',
       confirmText: '知道了',
     });
     return;
@@ -198,10 +203,12 @@ async function chooseSeparationModel(): Promise<void> {
   const defaultId = available.some((model) => model.id === previous)
     ? previous
     : available[0].id;
+  const accompanimentLabel = accompaniment.available
+    ? `${accompaniment.name}（${accompaniment.engine}）· 固定`
+    : `${accompaniment.name} · 固定 · 不可用：${accompaniment.detail}`;
   const values = await showModal({
     title: '选择人声分离模型',
-    description:
-      '歌词识别只会使用分离后的人声文件。请先确认本次使用的人声 / 伴奏分离模型；未确认前不会开始分离。',
+    description: `人声由所选模型分离，伴奏固定使用 ${accompaniment.name}，不可更改。歌词识别只使用分离后的人声文件，伴奏文件仅作为交付物保存。`,
     fields: [
       {
         name: 'model',
@@ -213,7 +220,17 @@ async function chooseSeparationModel(): Promise<void> {
           label: `${model.name}（${model.engine}）`,
         })),
       },
+      {
+        name: 'accompaniment',
+        label: '伴奏分离模型',
+        type: 'text',
+        value: accompanimentLabel,
+        readonly: true,
+      },
     ],
+    validate: accompaniment.available
+      ? undefined
+      : () => `伴奏分离模型不可用：${accompaniment.detail}`,
     confirmText: '开始分离并识别',
     cancelText: '取消',
   });
@@ -536,7 +553,7 @@ function onDraftTextInput(event: Event): void {
         </div>
 
         <p class="subtitle-hint">
-          生成流程固定为：人声分离 → 仅识别分离后的人声轨 → 生成字幕，不提供跳过分离的入口。
+          生成流程固定为：人声分离（人声可选模型，伴奏固定内置伴奏模型）→ 仅识别分离后的人声轨 → 生成字幕，不提供跳过分离的入口。
         </p>
 
         <div class="subtitle-actions">
@@ -601,6 +618,7 @@ function onDraftTextInput(event: Event): void {
           </div>
           <p class="subtitle-result-meta">
             分离模型 {{ result.separation.modelName }}（{{ result.separation.engine }}）
+            · 伴奏模型 {{ result.separation.accompanimentModelName }}
             · 歌词识别仅使用分离后的人声文件
           </p>
         </div>
@@ -609,7 +627,12 @@ function onDraftTextInput(event: Event): void {
           <div class="subtitle-separation-head">
             <Icon name="captions" />
             <strong>{{ separationForSelection.current ? '本次分离交付' : '已保存的分离交付' }}</strong>
-            <span>{{ separationForSelection.modelName }}</span>
+            <span
+              :title="`${separationForSelection.modelName} · 伴奏 ${separationForSelection.accompanimentModelName}`"
+            >
+              {{ separationForSelection.modelName }}
+              · 伴奏 {{ separationForSelection.accompanimentModelName }}
+            </span>
           </div>
           <dl class="subtitle-separation-paths">
             <div>
@@ -666,7 +689,7 @@ function onDraftTextInput(event: Event): void {
             </div>
           </dl>
           <p class="subtitle-separation-note">
-            本字幕的歌词识别输入仅为人声文件；伴奏 / 乐器文件仅作为交付物保存，未参与识别。
+            本字幕的歌词识别输入仅为人声文件；伴奏文件（{{ separationForSelection.accompanimentModelName }} 分离）仅作为交付物保存，未参与识别。
           </p>
         </div>
 

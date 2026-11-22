@@ -524,7 +524,7 @@ impl ModelRuntime {
         loaded.recognizer.decode(&stream);
         stream
             .get_result()
-            .map(|result| clean_asr_text(&result.text))
+            .map(|result| strip_meta_instructions(&clean_asr_text(&result.text)))
             .ok_or_else(|| anyhow!("识别失败：sherpa-onnx 未返回结果"))
     }
 
@@ -576,7 +576,7 @@ impl ModelRuntime {
                 stream.accept_waveform(rate, &samples[from..to]);
                 loaded.recognizer.decode(&stream);
                 if let Some(result) = stream.get_result() {
-                    let text = clean_asr_text(&result.text);
+                    let text = strip_meta_instructions(&clean_asr_text(&result.text));
                     if !text.is_empty() {
                         segments.push(SubtitleSegment { start, end, text });
                     }
@@ -927,6 +927,29 @@ fn clean_asr_text(raw: &str) -> String {
         None => rest,
     };
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 去掉 Qwen3-ASR 输出里偶发夹带的训练指令句（元指令幻觉）。
+///
+/// 模型在没有明确歌词的窗口（歌曲尾部、纯乐器段）上偶尔会把训练期的系统指令
+/// 当作识别结果输出，例如「特别注意，不要把“system”翻译成“系统”。」。
+/// 这类句子含「翻译 / 转写」且带引号或「不要 / 请」，不属于歌词；按句丢弃，
+/// 同一段里正常识别出的歌词句子保留。
+fn strip_meta_instructions(text: &str) -> String {
+    text.split_inclusive(|c: char| matches!(c, '。' | '！' | '？' | '；' | '!' | '?' | ';' | '.'))
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty() && !is_meta_instruction(sentence))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_meta_instruction(sentence: &str) -> bool {
+    let mentions_translation = sentence.contains("翻译") || sentence.contains("转写");
+    let quoted = sentence.contains('“')
+        || sentence.contains('”')
+        || sentence.contains('"')
+        || sentence.contains('「');
+    mentions_translation && (quoted || sentence.contains("不要") || sentence.contains("请"))
 }
 
 /// 规划字幕分片区间：按目标时长切分，并把每个切点吸附到附近能量最低的帧。
@@ -1322,6 +1345,31 @@ mod tests {
             clean_asr_text("离别。<|endoftext|>Human Rights Watch is a non-profit organization."),
             "离别。"
         );
+    }
+
+    #[test]
+    fn strip_meta_instructions_drops_prompt_hallucinations() {
+        // 实测：歌曲尾部窗口上 Qwen3-ASR 吐出训练指令而非歌词。
+        assert_eq!(
+            strip_meta_instructions("特别注意，不要把“system”翻译成“系统”。"),
+            ""
+        );
+        assert_eq!(
+            strip_meta_instructions("不要把\"system\"翻译成\"系统\""),
+            ""
+        );
+        assert_eq!(strip_meta_instructions("请把这段音频转写出来。"), "");
+        // 同段里真实歌词保留，只丢元指令句。
+        assert_eq!(
+            strip_meta_instructions("回头看，不曾走远。特别注意，不要把“system”翻译成“系统”。"),
+            "回头看，不曾走远。"
+        );
+        // 歌词里的「翻译 / 请」不带指令特征时不能误伤。
+        assert_eq!(
+            strip_meta_instructions("把思念翻译成一首歌。"),
+            "把思念翻译成一首歌。"
+        );
+        assert_eq!(strip_meta_instructions("请不要离开。"), "请不要离开。");
     }
 
     #[test]
