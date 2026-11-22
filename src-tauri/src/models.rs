@@ -901,22 +901,32 @@ fn emit_progress(app: &AppHandle, progress: DownloadProgress) {
 }
 
 /// 去掉 Qwen3-ASR 输出里可能夹带的 `<|...|>` 控制标记，并压平空白。
+///
+/// 官方 `generation_config.json` 把 `<|endoftext|>`(151643) 与 `<|im_end|>`(151645)
+/// 都声明为终止符，但 sherpa-onnx 的 `QwenAsrTokenizer` 只把 `<|im_end|>` 当 EOS，
+/// `<|endoftext|>` 仅作为 pad token。模型一旦先吐出 `<|endoftext|>`，解码不会停止，
+/// 而会在没有音频约束的情况下自由续写，把预训练语料里的原文带进字幕（典型表现是
+/// 歌词后面接一段与歌曲无关的百科式介绍）。因此正文之后第一次出现控制标记即视为
+/// 本次识别的终止，丢弃其后的全部内容；开头连续的控制标记仍按脚手架跳过。
 fn clean_asr_text(raw: &str) -> String {
-    let mut cleaned = String::with_capacity(raw.len());
     let mut rest = raw;
-    while let Some(start) = rest.find("<|") {
-        cleaned.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find("|>") {
-            Some(end) => rest = &after[end + 2..],
-            None => {
-                rest = "";
-                break;
-            }
+    loop {
+        let trimmed = rest.trim_start();
+        if !trimmed.starts_with("<|") {
+            rest = trimmed;
+            break;
         }
+        let Some(end) = trimmed.find("|>") else {
+            rest = "";
+            break;
+        };
+        rest = &trimmed[end + 2..];
     }
-    cleaned.push_str(rest);
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    let text = match rest.find("<|") {
+        Some(position) => &rest[..position],
+        None => rest,
+    };
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 规划字幕分片区间：按目标时长切分，并把每个切点吸附到附近能量最低的帧。
@@ -1290,6 +1300,24 @@ mod tests {
             "你好 世界 第二行"
         );
         assert_eq!(clean_asr_text("  纯文本  "), "纯文本");
+        assert_eq!(clean_asr_text("<|im_start|><|endoftext|>"), "");
+        assert_eq!(clean_asr_text("<|im_start|><|endoftext|>你好"), "你好");
+    }
+
+    #[test]
+    fn clean_asr_text_drops_free_generation_after_end_token() {
+        // sherpa-onnx 只把 <|im_end|> 当 EOS；Qwen3-ASR 先吐 <|endoftext|> 时
+        // 解码会继续自由续写，其后的正文不属于识别结果，必须整段丢弃。
+        assert_eq!(
+            clean_asr_text(
+                "浪漫情歌，春去，小梦不觉。<|endoftext|>Human Rights Watch（人权观察）是全球最大的人权组织。"
+            ),
+            "浪漫情歌，春去，小梦不觉。"
+        );
+        assert_eq!(
+            clean_asr_text("离别。<|endoftext|>Human Rights Watch is a non-profit organization."),
+            "离别。"
+        );
     }
 
     #[test]
