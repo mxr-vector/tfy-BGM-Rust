@@ -1,4 +1,4 @@
-//! 键盘动作。绑定在 `main` 里按上下文区分：曲库快捷键不会吃掉输入框里的按键。
+//! 曲库、对话框和输入框的键盘动作。
 
 use gpui::actions;
 
@@ -6,12 +6,15 @@ actions!(
     tfy,
     [
         PlayPause,
+        TrackPage,
+        ToggleDesktopLyrics,
         SeekBack,
         SeekForward,
         VolumeUp,
         VolumeDown,
         Mute,
         FocusSearch,
+        OpenSettings,
         Dismiss,
         Confirm,
         Quit,

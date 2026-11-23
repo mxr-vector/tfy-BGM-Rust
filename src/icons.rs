@@ -33,9 +33,6 @@ pub fn source(name: &str) -> String {
         "music" => {
             r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##
         }
-        "brand-disc" => {
-            r##"<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#b8f5d9"/></linearGradient></defs><circle cx="12" cy="12" r="9.25" stroke="url(#g)" stroke-width="1.15"/><circle cx="12" cy="12" r="7.2" stroke="url(#g)" stroke-width="0.5" opacity="0.35"/><circle cx="12" cy="12" r="5.3" stroke="url(#g)" stroke-width="0.5" opacity="0.24"/><path d="M17.3 6.6a7.5 7.5 0 0 1 1.4 8.7" stroke="url(#g)" stroke-width="1.8"/><circle cx="12" cy="12" r="2.7" fill="url(#g)" stroke="none"/><circle cx="12" cy="12" r="0.65" fill="#06150e" stroke="none"/><path d="M10.3 15.5c-.9.1-1.6.5-1.6 1s.8.9 1.8.9 1.7-.4 1.7-.9c0-.4-.4-.7-1-.9" fill="none" stroke="url(#g)" stroke-width="0.7" opacity="0.8"/>"##
-        }
         "heart" => {
             r##"<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z"/>"##
         }
@@ -76,6 +73,9 @@ pub fn source(name: &str) -> String {
         "more" => {
             r##"<circle cx="5" cy="12" r="1" fill="#fff" stroke="none"/><circle cx="12" cy="12" r="1" fill="#fff" stroke="none"/><circle cx="19" cy="12" r="1" fill="#fff" stroke="none"/>"##
         }
+        "list-ordered" => {
+            r##"<path d="M10 6h11M10 12h11M10 18h11M3 5h1v4M3 9h2M3 14h1a1 1 0 0 1 .7 1.7L3 18h2"/>"##
+        }
         "list-music" => {
             r##"<path d="M21 15V6"/><circle cx="18.5" cy="18" r="2.5"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/>"##
         }
@@ -98,6 +98,9 @@ pub fn source(name: &str) -> String {
         "settings" => {
             r##"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>"##
         }
+        "chevron-left" => r##"<path d="m15 6-6 6 6 6"/>"##,
+        "chevron-right" => r##"<path d="m9 6 6 6-6 6"/>"##,
+        "chevron-up" => r##"<path d="m6 15 6-6 6 6"/>"##,
         "chevron-down" => r##"<path d="m6 9 6 6 6-6"/>"##,
         "rotate" => r##"<path d="M3 12a9 9 0 1 0 2.64-6.36"/><path d="M3 3v6h6"/>"##,
         "sparkles" => {

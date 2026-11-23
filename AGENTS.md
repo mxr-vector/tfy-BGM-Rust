@@ -6,7 +6,7 @@
 
 - 主线（Tauri 版）在 `https://gitee.com/yuanjie2001/tfy-bgm.git` 的 **`bgm-tauri2` 分支**上。
 - 本分支用 **纯 Rust + GPUI** 重新实现客户端，功能范围**跟随主线**；主线新增或调整功能时，这里需要对齐。
-- 不使用 WebView、Node 或任何前端构建链。视觉与交互对照主线对齐（当前基线为 `bgm-tauri2` 的 `63a0598`；
+- 不使用 WebView、Node 或任何前端构建链。业务行为跟随主线，界面采用独立设计（当前核心基线为 `bgm-tauri2` 的 `8ba4f85`；
   两边历史都重建过，主线旧提交号 `203c641` 已失效，做能力同步时以 `origin/bgm-tauri2` 最新代码为准）。
 - 本分支主要由 `@mojl` 维护；提交与合并到 `bgm-gpui` 的命令以其为准。
 
@@ -52,16 +52,19 @@ README.md          面向用户的说明，必须写清 GPUI 分支定位
 
 ## 构建与验证
 
-需要 Rust 1.90+（edition 2024）。提交前应执行：
+macOS 客户端的最低系统版本为 26.0。需要 Rust 1.91+（edition 2024）。提交前应执行：
 
 ```bash
-cargo check --all-targets   # 或 cargo check --offline；--all-targets 才会编译测试代码
-cargo fmt --check
-cargo test
+cargo check --workspace --all-targets
+cargo fmt --all -- --check
+cargo test --workspace
 ```
 
-依赖全部来自 crates.io 与本地 `core/`。`cargo check` 不编译 `#[cfg(test)]`，改了测试辅助
-函数或数据结构字段后务必跑 `--all-targets`。
+依赖来自 crates.io 与本地 `core/`。工作区包含应用和共享核心，`--all-targets` 会同时检查测试目标。
+
+## GPUI 界面设计
+
+新界面沿用 [界面设计规范](docs/ui-design.md)。共用色彩、尺寸和封套组件在 `src/design.rs`，默认与最小窗口的预览收录在规范中。
 
 ## 编码约定
 
@@ -72,11 +75,10 @@ cargo test
 - 快捷键在 `main.rs::bind_keys` 统一绑定，用 context（`Library && !TextInput && !Dialog` 等）
   区分作用域，避免吃掉输入框里的按键。
 - 曲库与配置逻辑放在 `src/library.rs` 或 `core/`，并在 `core/` 保持与主线一致。
-- 图标用编译期内嵌 SVG（`icons.rs` + `assets.rs`），不要引入 emoji 或外部前端资源。
-- 播放走 rodio；倍速改变音高是已知差异，不要为了"修"它而引入浏览器依赖。
+- 功能图标用编译期内嵌 SVG（`icons.rs` + `assets.rs`）。应用图标源文件位于 `assets/macos/AppIcon.icon`，GPUI 侧栏品牌区用同一图案的内嵌预览图。
+- 播放走 rodio，`src/audio/stretch.rs` 负责 PCM 保音高变速。
   A/B 循环靠 `audio.rs` 的整曲 PCM 音源在采样级回绕，不要改回流式 Decoder。
-- 已知的能力缺口（主线有、本分支暂无）：mp4 动态壁纸与毛玻璃模糊（GPUI 无视频解码/背景模糊）、
-  批量多选操作、诊断面板。补齐时先在 README「已知差异」里更新状态。
+- 能力差异见 README 和 OpenSpec 路线图。验收后更新这两处的状态。
 
 ## 提交与推送
 

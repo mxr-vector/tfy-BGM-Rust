@@ -1,7 +1,8 @@
 //! 音频导出：复制到用户选择的位置，并校验落盘字节数与源文件一致。
 //!
-//! 开启响度归一化时先经 ffmpeg 两遍 `loudnorm` 处理；ffmpeg 缺失或处理失败
-//! 会自动回退为原文件复制，保证导出始终能完成。
+//! 开启响度归一化且目标为 mp3 时先经 ffmpeg 两遍 `loudnorm` 处理；ffmpeg 缺失、
+//! 目标不是 mp3 或处理失败时回退为原格式复制，并在结果里说明原因。
+//! 源与目标扩展名不同又无法归一化时直接报错，避免把错误格式的字节写进导出文件。
 
 use std::fs;
 use std::io;
@@ -75,28 +76,37 @@ pub(crate) fn export_with_ffmpeg(
     }
 
     if !settings.normalize {
-        let bytes = copy_validated(source, destination)?;
-        return Ok(ExportOutcome {
-            bytes,
-            normalized: false,
-            warning: None,
-        });
+        return copy_same_format(
+            source,
+            destination,
+            None,
+            "未开启响度归一化，只能按原格式复制",
+        );
     }
 
     let Some(ffmpeg) = ffmpeg else {
-        let bytes = copy_validated(source, destination)?;
-        return Ok(ExportOutcome {
-            bytes,
-            normalized: false,
-            warning: Some("未检测到 ffmpeg，响度归一化已跳过".to_owned()),
-        });
+        return copy_same_format(
+            source,
+            destination,
+            Some("未检测到 ffmpeg，响度归一化已跳过".to_owned()),
+            "未检测到 ffmpeg，无法转码",
+        );
     };
+
+    // loudnorm 固定输出 mp3：目标扩展名是其它容器时不能直接写入。
+    // 与源同格式时退回复制并提示未归一化，否则明确报错（例如 flac → wav）。
+    if extension_of(destination).as_deref() != Some(loudness::NORMALIZED_EXTENSION) {
+        return copy_same_format(
+            source,
+            destination,
+            Some("目标扩展名不是 mp3，已按原格式复制（未做响度归一化）".to_owned()),
+            "响度归一化固定输出 mp3",
+        );
+    }
 
     match loudness::normalize_file(ffmpeg, source, destination, settings.preset) {
         Ok(()) => {
-            let bytes = fs::metadata(destination)
-                .map_err(ExportError::Read)?
-                .len();
+            let bytes = fs::metadata(destination).map_err(ExportError::Read)?.len();
             Ok(ExportOutcome {
                 bytes,
                 normalized: true,
@@ -105,14 +115,51 @@ pub(crate) fn export_with_ffmpeg(
         }
         Err(error) => {
             let _ = fs::remove_file(destination);
-            let bytes = copy_validated(source, destination)?;
-            Ok(ExportOutcome {
-                bytes,
-                normalized: false,
-                warning: Some(format!("响度归一化失败，已按原文件导出：{error}")),
-            })
+            // 归一化失败时回退为复制；只有目标扩展名与源一致才安全，
+            // 否则会把 flac / wav 的字节写进 .mp3 文件，反而产生损坏素材。
+            let warning = format!("响度归一化失败，已按原格式复制：{error}");
+            copy_same_format(
+                source,
+                destination,
+                Some(warning),
+                &format!("响度归一化失败（{error}），且目标扩展名与源文件不一致"),
+            )
         }
     }
+}
+
+/// 按原格式复制；格式不一致时把具体原因带进错误，避免只看到笼统的「格式不一致」。
+fn copy_same_format(
+    source: &Path,
+    destination: &Path,
+    warning: Option<String>,
+    reason: &str,
+) -> Result<ExportOutcome, ExportError> {
+    ensure_same_format(source, destination, reason)?;
+    let bytes = copy_validated(source, destination)?;
+    Ok(ExportOutcome {
+        bytes,
+        normalized: false,
+        warning,
+    })
+}
+
+/// 未归一化时只能原样复制，目标扩展名必须与源文件一致。
+fn ensure_same_format(source: &Path, destination: &Path, reason: &str) -> Result<(), ExportError> {
+    if extension_of(source) != extension_of(destination) {
+        return Err(ExportError::FormatMismatch {
+            source_file: source.to_path_buf(),
+            destination_file: destination.to_path_buf(),
+            reason: reason.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn extension_of(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
 }
 
 /// 复制源音频到目标路径，成功后返回复制字节数。
@@ -174,6 +221,17 @@ pub enum ExportError {
     SourceMissing(PathBuf),
     #[error("导出目标与源文件相同，已取消导出")]
     SameFile,
+    #[error(
+        "导出目标扩展名必须与源文件一致（源 {}，目标 {}）：{}",
+        .source_file.display(),
+        .destination_file.display(),
+        .reason
+    )]
+    FormatMismatch {
+        source_file: PathBuf,
+        destination_file: PathBuf,
+        reason: String,
+    },
     #[error("读取源音频失败：{0}")]
     Read(#[source] io::Error),
     #[error("写入导出文件失败：{0}")]
@@ -235,6 +293,70 @@ mod tests {
 
         assert!(matches!(error, ExportError::SameFile));
         assert_eq!(fs::read(&source).unwrap(), b"keep-me");
+    }
+
+    #[test]
+    fn copy_fallback_rejects_extension_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.flac");
+        let destination = dir.path().join("export.mp3");
+        fs::write(&source, b"fake-flac").unwrap();
+
+        let error = export_with_ffmpeg(
+            &source,
+            &destination,
+            ExportSettings::from_prefs(false, ""),
+            None,
+        )
+        .expect_err("mismatched extension must fail");
+
+        assert!(matches!(error, ExportError::FormatMismatch { .. }));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn normalized_export_to_source_format_copies_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.flac");
+        let destination = dir.path().join("export.flac");
+        fs::write(&source, b"flac-bytes").unwrap();
+
+        let outcome = export_with_ffmpeg(
+            &source,
+            &destination,
+            ExportSettings::from_prefs(true, ""),
+            // 目标不是 mp3 时不会真正调用 ffmpeg，用一个占位路径即可。
+            Some(Path::new("ffmpeg-placeholder")),
+        )
+        .expect("same-format copy should succeed");
+
+        assert!(!outcome.normalized);
+        assert!(outcome.warning.is_some());
+        assert_eq!(fs::read(&destination).unwrap(), b"flac-bytes");
+    }
+
+    #[test]
+    fn normalized_export_to_other_format_reports_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.flac");
+        let destination = dir.path().join("export.wav");
+        fs::write(&source, b"flac-bytes").unwrap();
+
+        let error = export_with_ffmpeg(
+            &source,
+            &destination,
+            ExportSettings::from_prefs(true, ""),
+            Some(Path::new("ffmpeg-placeholder")),
+        )
+        .expect_err("flac to wav cannot be copied");
+
+        match error {
+            ExportError::FormatMismatch { reason, .. } => {
+                assert!(reason.contains("mp3"), "{reason}");
+            }
+            other => panic!("期望 FormatMismatch，实际 {other:?}"),
+        }
+        assert!(!destination.exists());
     }
 
     #[test]

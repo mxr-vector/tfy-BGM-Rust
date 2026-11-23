@@ -1,12 +1,22 @@
-//! 听风吟 BGM 的 GPUI 桌面端。界面用 GPUI 0.2.2，曲库逻辑复用旁边仓库里的 bgm-core。
+//! 听风吟 BGM 的 GPUI 桌面端与后台推理进程入口。
 
 mod actions;
+mod api;
 mod assets;
 mod audio;
+mod design;
+mod desktop;
+mod desktop_lyrics;
+mod diagnostics;
 mod icons;
 mod library;
+mod lyrics;
+mod playback_queue;
+mod scheduler;
+mod settings;
 mod text_input;
 mod view;
+mod wallpaper;
 mod watch;
 
 use gpui::{
@@ -15,17 +25,38 @@ use gpui::{
 };
 
 use crate::actions::{
-    Backspace, Confirm, Copy, Cut, Delete, Dismiss, End, FocusSearch, Home, Left, Mute, Paste,
-    PlayPause, Quit, Right, SeekBack, SeekForward, SelectAll, SelectLeft, SelectRight, VolumeDown,
-    VolumeUp,
+    Backspace, Confirm, Copy, Cut, Delete, Dismiss, End, FocusSearch, Home, Left, Mute,
+    OpenSettings, Paste, PlayPause, Quit, Right, SeekBack, SeekForward, SelectAll, SelectLeft,
+    SelectRight, VolumeDown, VolumeUp,
 };
 use crate::view::Workspace;
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(library::WORKER_FLAG)) {
+        if let Err(error) = library::run_asr_worker() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(library::separation::WORKER_FLAG))
+    {
+        let result = std::env::args_os()
+            .nth(2)
+            .ok_or_else(|| anyhow::anyhow!("缺少分离任务文件"))
+            .and_then(|path| library::separation::run_worker(std::path::Path::new(&path)));
+        if let Err(error) = result {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     Application::new()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
-            // GPUI 自带 CoreText 系统字体回退，不必把整套中文字体读进内存。
+            #[cfg(target_os = "macos")]
+            desktop::set_unbundled_icon();
             bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
 
@@ -51,7 +82,11 @@ fn main() {
                     },
                 )
                 .unwrap();
-            let _ = window;
+            window
+                .update(cx, |workspace, window, cx| {
+                    workspace.install_desktop(window, cx)
+                })
+                .ok();
             cx.activate(true);
         });
 }
@@ -60,6 +95,8 @@ fn bind_keys(cx: &mut App) {
     let library = Some("Library && !TextInput && !Dialog");
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-enter", crate::actions::TrackPage, library),
+        KeyBinding::new("cmd-shift-l", crate::actions::ToggleDesktopLyrics, library),
         KeyBinding::new("space", PlayPause, library),
         KeyBinding::new("left", SeekBack, library),
         KeyBinding::new("right", SeekForward, library),
@@ -67,8 +104,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", VolumeDown, library),
         KeyBinding::new("m", Mute, library),
         KeyBinding::new("/", FocusSearch, Some("Library && !TextInput")),
+        KeyBinding::new("cmd-,", OpenSettings, Some("Library && !Dialog")),
         KeyBinding::new("escape", Dismiss, Some("Library")),
         KeyBinding::new("enter", Confirm, Some("Dialog")),
+        KeyBinding::new("enter", Confirm, Some("Library && TextInput && !Dialog")),
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
         KeyBinding::new("left", Left, Some("TextInput")),

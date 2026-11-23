@@ -318,9 +318,18 @@ mod tests {
 
         let songs = &schedule.entries[0].songs;
         assert_eq!(songs.len(), 3);
-        assert_eq!((songs[0].start.as_str(), songs[0].end.as_str()), ("09:00", "10:00"));
-        assert_eq!((songs[1].start.as_str(), songs[1].end.as_str()), ("09:50", "09:55"));
-        assert_eq!((songs[2].start.as_str(), songs[2].end.as_str()), ("09:59", "10:00"));
+        assert_eq!(
+            (songs[0].start.as_str(), songs[0].end.as_str()),
+            ("09:00", "10:00")
+        );
+        assert_eq!(
+            (songs[1].start.as_str(), songs[1].end.as_str()),
+            ("09:50", "09:55")
+        );
+        assert_eq!(
+            (songs[2].start.as_str(), songs[2].end.as_str()),
+            ("09:59", "10:00")
+        );
     }
 
     #[test]
@@ -371,7 +380,11 @@ mod tests {
         .drop_overlaps();
 
         assert_eq!(
-            schedule.entries.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            schedule
+                .entries
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
             ["A", "C"]
         );
         assert!(schedule.overlap_error().is_none());
@@ -380,10 +393,7 @@ mod tests {
     #[test]
     fn adjacent_ranges_do_not_overlap() {
         let schedule = Schedule {
-            entries: vec![
-                entry("09:00", "10:00", "A"),
-                entry("10:00", "11:00", "B"),
-            ],
+            entries: vec![entry("09:00", "10:00", "A"), entry("10:00", "11:00", "B")],
             ..Schedule::default()
         }
         .normalize();

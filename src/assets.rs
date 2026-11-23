@@ -1,4 +1,4 @@
-//! 编译期内嵌 SVG 与内置壁纸资源，运行时无需依赖仓库中的前端目录。
+//! 内嵌图标、封套与静态壁纸资源。
 
 use std::borrow::Cow;
 
@@ -6,15 +6,61 @@ use gpui::{AssetSource, Result, SharedString};
 
 use crate::icons;
 
-/// 内置静态壁纸（雪山云海），与主线 `assets/bg/2.jpg` 同源；动态壁纸为 mp4，GPUI 暂不支持。
-const BUILTIN_WALLPAPER: &[u8] = include_bytes!("../assets/bg/2.jpg");
+pub const BRAND_MARK: &[u8] = include_bytes!("../assets/branding/brand-mark.png");
+pub const BUILTIN_WALLPAPER: &[u8] = include_bytes!("../assets/bg/2.jpg");
+
+#[cfg(target_os = "macos")]
+pub const MENU_BAR_TEMPLATE: &[u8] = include_bytes!("../assets/branding/menu-bar-template.pdf");
+
+const SLEEVES: &[(&str, &str, &[u8])] = &[
+    (
+        "cheerful",
+        "sleeves/cheerful.jpg",
+        include_bytes!("../assets/sleeves/cheerful.jpg"),
+    ),
+    (
+        "solitude",
+        "sleeves/solitude.jpg",
+        include_bytes!("../assets/sleeves/solitude.jpg"),
+    ),
+    (
+        "memories",
+        "sleeves/memories.jpg",
+        include_bytes!("../assets/sleeves/memories.jpg"),
+    ),
+    (
+        "epic",
+        "sleeves/epic.jpg",
+        include_bytes!("../assets/sleeves/epic.jpg"),
+    ),
+    (
+        "gufeng",
+        "sleeves/gufeng.jpg",
+        include_bytes!("../assets/sleeves/gufeng.jpg"),
+    ),
+    (
+        "country",
+        "sleeves/country.jpg",
+        include_bytes!("../assets/sleeves/country.jpg"),
+    ),
+];
+
+pub fn sleeve_path(category: &str) -> Option<&'static str> {
+    SLEEVES
+        .iter()
+        .find(|(id, _, _)| *id == category)
+        .map(|(_, path, _)| *path)
+}
 
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == "bg/2.jpg" {
-            return Ok(Some(Cow::Borrowed(BUILTIN_WALLPAPER)));
+        if path == "brand/mark.png" {
+            return Ok(Some(Cow::Borrowed(BRAND_MARK)));
+        }
+        if let Some((_, _, bytes)) = SLEEVES.iter().find(|(_, asset, _)| *asset == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
         }
         let name = path
             .strip_prefix("icons/")

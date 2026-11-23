@@ -1,0 +1,37 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.08700,0.12500,0.20000,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "wind.svg",
+          "name": "Wind"
+        },
+        {
+          "glass": true,
+          "image-name": "spindle.svg",
+          "name": "Spindle"
+        },
+        {
+          "glass": true,
+          "image-name": "record.svg",
+          "name": "Record"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.33
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.39
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": ["macOS"]
+  }
+}

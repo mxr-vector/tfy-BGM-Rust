@@ -1,9 +1,4 @@
-//! 曲库文件监听：系统级 watch 事件 + 低频兜底扫描。
-//!
-//! 对齐主线 `library_watch.rs` 的行为：notify 事件先做 700ms 防抖，再触发增量扫描；
-//! 即使事件丢失（网络盘、休眠恢复），30 秒兜底扫描也能补上变化。
-//! 这里只记录「最后事件时间」，防抖与兜底由界面的 200ms 轮询统一处理，
-//! 增量扫描因此永远发生在界面线程，不需要与曲库写操作互斥。
+//! 曲库文件监听，含 700 ms 事件防抖和 30 秒补偿扫描。
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -11,8 +6,12 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-/// 持续有事件时不断延长，直到安静 DEBOUNCE 后才触发扫描。
 const DEBOUNCE: Duration = Duration::from_millis(700);
+const FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+
+pub fn fallback_due(now: Instant, last_scan: Instant) -> bool {
+    now.saturating_duration_since(last_scan) >= FALLBACK_INTERVAL
+}
 
 pub struct LibraryWatcher {
     last_event: Arc<Mutex<Option<Instant>>>,
@@ -47,46 +46,105 @@ impl LibraryWatcher {
         })
     }
 
-    /// 距最近一次相关事件已经安静了 DEBOUNCE，可以触发扫描；调用方处理完需调 [`Self::consume`]。
-    pub fn pending(&self) -> bool {
-        self.last_event
-            .lock()
-            .ok()
-            .and_then(|slot| *slot)
-            .is_some_and(|at| at.elapsed() >= DEBOUNCE)
-    }
-
-    pub fn consume(&self) {
-        if let Ok(mut slot) = self.last_event.lock() {
-            *slot = None;
+    pub fn take_scan_due(&self, now: Instant, fallback_due: bool) -> bool {
+        match self.last_event.lock() {
+            Ok(mut event) => take_scan_due(&mut event, now, fallback_due),
+            Err(_) => fallback_due,
         }
     }
 }
 
-/// 只关心音频文件与目录级变化，忽略缩略图、配置文件等噪声。
+fn take_scan_due(event: &mut Option<Instant>, now: Instant, fallback_due: bool) -> bool {
+    match *event {
+        Some(at) if now.saturating_duration_since(at) >= DEBOUNCE => {
+            *event = None;
+            true
+        }
+        Some(_) => false,
+        None => fallback_due,
+    }
+}
+
+/// 影响曲库索引的文件系统事件。
 fn is_relevant(event: &Event) -> bool {
     use notify::EventKind;
-    use notify::event::ModifyKind;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+
+    if event.need_rescan() {
+        return true;
+    }
 
     let touches_audio_or_dir = event.paths.iter().any(|path| {
         path.extension().is_none()
             || path.is_dir()
             || path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(bgm_core::library::has_audio_extension)
     });
-    if !touches_audio_or_dir {
-        return false;
+    let directory_event = matches!(
+        event.kind,
+        EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder)
+    );
+
+    (touches_audio_or_dir || directory_event)
+        && matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(ModifyKind::Name(_))
+                | EventKind::Modify(ModifyKind::Data(_))
+                | EventKind::Modify(ModifyKind::Metadata(_))
+                | EventKind::Any
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::EventKind;
+    use notify::event::{CreateKind, Flag, RemoveKind};
+    use std::path::PathBuf;
+
+    #[test]
+    fn scan_consumes_only_a_ready_notification() {
+        let first = Instant::now();
+        let latest = first + Duration::from_millis(100);
+        let mut event = Some(latest);
+        assert!(!take_scan_due(&mut event, first + DEBOUNCE, true));
+        assert_eq!(event, Some(latest));
+        assert!(take_scan_due(&mut event, latest + DEBOUNCE, false));
+        assert!(!take_scan_due(&mut event, latest + DEBOUNCE, false));
+        assert!(take_scan_due(&mut event, latest + DEBOUNCE, true));
     }
 
-    matches!(
-        event.kind,
-        EventKind::Create(_)
-            | EventKind::Remove(_)
-            | EventKind::Modify(ModifyKind::Name(_))
-            | EventKind::Modify(ModifyKind::Data(_))
-            | EventKind::Modify(ModifyKind::Metadata(_))
-            | EventKind::Any
-    )
+    #[test]
+    fn quiet_watch_uses_the_thirty_second_fallback() {
+        let last_scan = Instant::now();
+        let mut event = None;
+        for (milliseconds, due) in [(29_999, false), (30_000, true)] {
+            let now = last_scan + Duration::from_millis(milliseconds);
+            assert_eq!(
+                take_scan_due(&mut event, now, fallback_due(now, last_scan)),
+                due
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_audio_formats_folder_removal_and_backend_rescan() {
+        for extension in ["mp3", "FLAC", "wav", "M4A", "ogg"] {
+            let event = Event::new(EventKind::Create(CreateKind::File))
+                .add_path(PathBuf::from(format!("track.{extension}")));
+            assert!(is_relevant(&event));
+        }
+        let cover =
+            Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from("cover.png"));
+        assert!(!is_relevant(&cover));
+        let folder =
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(PathBuf::from("vol.2"));
+        assert!(is_relevant(&folder));
+        let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert!(is_relevant(&rescan));
+    }
 }

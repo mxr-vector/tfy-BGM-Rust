@@ -1,5 +1,4 @@
-//! 单行文本框。实现来自 GPUI 0.2.2 的 `examples/input.rs`，保留中文输入法的 marked range。
-//! 官方示例没有现成控件，搜索和重命名都走这一份。
+//! 基于 GPUI `examples/input.rs` 的单行文本框，支持输入法组合文本。
 
 use std::ops::Range;
 
@@ -8,7 +7,7 @@ use gpui::{
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
     SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, fill, point, prelude::*,
-    px, relative, rgba,
+    px, relative,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -25,6 +24,7 @@ pub struct TextField {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_x: Pixels,
     is_selecting: bool,
 }
 
@@ -39,6 +39,7 @@ impl TextField {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_x: px(0.),
             is_selecting: false,
         }
     }
@@ -80,9 +81,17 @@ impl TextField {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
-    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn select_entire_text(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
+    }
+
+    pub fn has_marked_text(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_entire_text(cx);
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
@@ -181,7 +190,7 @@ impl TextField {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -365,11 +374,13 @@ impl EntityInputHandler for TextField {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                (bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x)
+                    .clamp(bounds.left(), bounds.right()),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                (bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x)
+                    .clamp(bounds.left(), bounds.right()),
                 bounds.bottom(),
             ),
         ))
@@ -386,7 +397,7 @@ impl EntityInputHandler for TextField {
         if last_layout.text != self.content {
             return Some(0);
         }
-        let utf8_index = last_layout.index_for_x(line_point.x)?;
+        let utf8_index = last_layout.index_for_x(line_point.x + self.scroll_x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -399,6 +410,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
 }
 
 impl gpui::IntoElement for TextElement {
@@ -449,7 +461,10 @@ impl Element for TextElement {
         let cursor = input.cursor_offset();
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), Hsla::from(rgba(0x71867a99)))
+            (
+                input.placeholder.clone(),
+                Hsla::from(crate::design::theme_color(crate::design::FAINT)),
+            )
         } else {
             (content, style.color)
         };
@@ -492,15 +507,25 @@ impl Element for TextElement {
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
         let cursor_pos = line.x_for_index(cursor);
+        let max_x = (bounds.size.width - px(2.)).max(px(0.));
+        let scroll_x = if input.content.is_empty() || !input.focus_handle.is_focused(window) {
+            px(0.)
+        } else {
+            input
+                .scroll_x
+                .clamp((cursor_pos - max_x).max(px(0.)), cursor_pos)
+                .min((line.width - max_x).max(px(0.)))
+        };
+        let origin_x = bounds.left() - scroll_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(origin_x + cursor_pos, bounds.top()),
                         gpui::size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
-                    gpui::rgb(0x19d98b),
+                    crate::design::theme_color(crate::design::ACCENT),
                 )),
             )
         } else {
@@ -508,15 +533,15 @@ impl Element for TextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            origin_x + line.x_for_index(selected_range.start),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            origin_x + line.x_for_index(selected_range.end),
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x19d98b55),
+                    Hsla::from(crate::design::theme_color(crate::design::ACCENT)).opacity(0.20),
                 )),
                 None,
             )
@@ -525,6 +550,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll_x,
         }
     }
 
@@ -548,8 +574,13 @@ impl Element for TextElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .ok();
+        line.paint(
+            point(bounds.left() - prepaint.scroll_x, bounds.top()),
+            window.line_height(),
+            window,
+            cx,
+        )
+        .ok();
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
@@ -558,6 +589,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.scroll_x = prepaint.scroll_x;
         });
     }
 }
@@ -591,6 +623,9 @@ impl gpui::Render for TextField {
                 gpui::div()
                     .h(px(28.))
                     .w_full()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
                     .child(TextElement { input: cx.entity() }),
             )
     }
