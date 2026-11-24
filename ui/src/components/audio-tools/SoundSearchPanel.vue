@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { guardLibraryPlayback } from '@/composables/useScheduler';
-import { searchLibraryBySound, soundSearchLoading } from '@/composables/useAudioIndex';
+import { audioIndexBusy, audioIndexStatus, searchLibraryBySound, soundSearchLoading } from '@/composables/useAudioIndex';
+import { useSoundRecording } from '@/composables/useSoundRecording';
 import { formatBytes, formatTime } from '@/lib/format';
 import type { SoundSearchResult } from '@/lib/types';
 import { playSong } from '@/stores/player';
@@ -9,10 +10,27 @@ import { state } from '@/stores/state';
 import Icon from '../Icon.vue';
 
 const result = ref<SoundSearchResult | null>(null);
+const limit = ref(10);
+const { requesting, recording, start, stop } = useSoundRecording((clip) => void search(clip));
+const canSearch = computed(() =>
+  audioIndexStatus.value?.enabled && audioIndexStatus.value.readyTracks > 0 &&
+  !audioIndexBusy.value && !soundSearchLoading.value,
+);
 
-async function chooseQuery(): Promise<void> {
-  const next = await searchLibraryBySound();
-  if (next) result.value = next;
+watch([() => state.library.root, () => audioIndexStatus.value?.enabled], () => {
+  result.value = null;
+});
+
+function normalizeLimit(): void {
+  const value = typeof limit.value === 'number' ? limit.value : 10;
+  limit.value = Math.min(50, Math.max(1, Math.round(value)));
+}
+
+async function search(clip?: Blob): Promise<void> {
+  normalizeLimit();
+  const root = state.library.root;
+  const next = await searchLibraryBySound(limit.value, clip);
+  if (next && state.library.root === root) result.value = next;
 }
 
 function play(track: SoundSearchResult['matches'][number]): void {
@@ -28,13 +46,22 @@ function play(track: SoundSearchResult['matches'][number]): void {
       <span class="search-hero-icon"><Icon name="search" /></span>
       <div>
         <h2>用声音查找曲库中的相似音频</h2>
-        <p>选择一段本地音频，系统将在已建索引的曲库中匹配相同或相似片段。查询文件不会上传。</p>
+        <p>可导入外部录音，或用麦克风录制 10–30 秒清晰的音乐片段。音频在本机识别。</p>
       </div>
-      <button type="button" :disabled="soundSearchLoading" @click="chooseQuery">
-        <Icon name="folder" /> {{ soundSearchLoading ? '正在分析…' : '选择查询音频' }}
-      </button>
+      <div class="search-actions">
+        <label>最多返回
+          <input v-model.number="limit" type="number" min="1" max="50" step="1" :disabled="recording || requesting || soundSearchLoading" @change="normalizeLimit" /> 首
+        </label>
+        <button type="button" :disabled="!canSearch || recording || requesting" @click="search()">
+          <Icon name="folder" /> 选择录音或音频
+        </button>
+        <button type="button" :disabled="requesting || (!recording && !canSearch)" @click="recording ? stop() : start()">
+          {{ recording ? '结束录音并识别' : requesting ? '等待麦克风权限…' : '麦克风录音' }}
+        </button>
+      </div>
     </div>
-    <div v-if="result" class="query-path"><span>查询文件</span><strong :title="result.queryPath">{{ result.queryPath }}</strong></div>
+    <p v-if="soundSearchLoading" class="query-path" role="status">正在识别音频…</p>
+    <div v-if="result" class="query-path"><span>查询来源 · {{ result.matches.length }} 首</span><strong :title="result.queryPath">{{ result.queryPath }}</strong></div>
     <div v-if="result && result.matches.length === 0" class="empty-state">
       <Icon name="search" /><strong>没有找到足够相似的音频</strong><span>可尝试更完整的片段，或先更新音频索引。</span>
     </div>
@@ -55,7 +82,7 @@ function play(track: SoundSearchResult['matches'][number]): void {
       </article>
     </div>
     <div v-else class="empty-state search-placeholder">
-      <Icon name="wave" /><strong>选择一段声音开始检索</strong><span>支持 MP3、M4A、FLAC、WAV、OGG，可匹配较长曲目中的局部片段。</span>
+      <Icon name="wave" /><strong>选择文件或录音开始检索</strong><span>建议录制背景噪声较少的音乐片段。</span>
     </div>
   </section>
 </template>
@@ -65,6 +92,9 @@ function play(track: SoundSearchResult['matches'][number]): void {
 .search-hero { display: flex; align-items: center; gap: 14px; padding: 18px; border: 1px solid rgba(25, 217, 139, 0.18); border-radius: 15px; background: linear-gradient(120deg, rgba(25, 217, 139, 0.09), rgba(255, 255, 255, 0.025)); }
 .search-hero-icon { display: grid; place-items: center; width: 46px; height: 46px; flex: none; border-radius: 15px; color: #9df7cf; background: rgba(25, 217, 139, 0.12); }
 .search-hero > div { flex: 1; min-width: 0; }
+.search-hero .search-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.search-actions label { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 12px; }
+.search-actions input { width: 56px; min-height: 36px; padding: 0 5px; border: 1px solid rgba(25, 217, 139, 0.25); border-radius: 8px; color: var(--text); background: rgba(0, 0, 0, 0.2); }
 .search-hero h2 { margin: 0 0 6px; color: var(--text); font-size: 16px; }
 .search-hero p { margin: 0; color: var(--text-3); font-size: 11px; line-height: 1.7; }
 .search-hero button, .match-row button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 14px; border-radius: 9px; color: #baf7dc; background: rgba(25, 217, 139, 0.13); }

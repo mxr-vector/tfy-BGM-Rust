@@ -244,60 +244,37 @@ pub fn remove_loop_point(state: State<'_, AppState>, key: String) -> CommandResu
 }
 
 #[tauri::command]
-pub async fn rescan_library(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<LibrarySnapshot> {
-    state.rescan(&app).map_err(describe)
+pub async fn rescan_library(app: AppHandle) -> CommandResult<LibrarySnapshot> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().rescan(&app).map_err(describe))
+        .await
+        .map_err(|error| format!("曲库扫描任务异常结束：{error}"))?
 }
 
 #[tauri::command]
-pub async fn choose_library_dir(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<Option<LibrarySnapshot>> {
+pub async fn choose_library_dir(app: AppHandle) -> CommandResult<Option<LibrarySnapshot>> {
     let picked = app
         .dialog()
         .file()
         .set_title("选择 BGM 曲库文件夹")
         .blocking_pick_folder();
-    let dir = match picked {
-        Some(file_path) => Some(
-            file_path
-                .into_path()
-                .map_err(|error| format!("所选目录无效：{error}"))?,
-        ),
-        None => None,
-    };
-    let Some(dir) = dir else {
+    let Some(picked) = picked else {
         return Ok(None);
     };
-    // 与 `install_root` 一致先规范化，避免同一目录因短路径 / 尾斜杠重复弹窗。
-    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-    let status = state.audio_index_status();
-    let already_indexed = status.enabled && status.root == bgm_core::audio_index::normalize_path(&dir);
-    let build_index = already_indexed
-        || app
-            .dialog()
-            .message("将为该目录建立音频索引，自动分析并记录 BPM、调性、响度、波形与本地音频指纹。索引仅存储在本机，并随文件新增、修改和删除同步维护。")
-            .title("建立音频索引")
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "建立索引".to_owned(),
-                "暂不建立".to_owned(),
-            ))
-            .blocking_show();
-    state
-        .choose_library_dir(&app, Some(dir), build_index)
-        .map_err(describe)
+    let dir = picked.into_path().map_err(|error| format!("所选目录无效：{error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().choose_library_dir(&app, dir).map(Some).map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("曲库切换任务异常结束：{error}"))?
 }
 
 #[tauri::command]
-pub async fn reset_library_dir(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> CommandResult<LibrarySnapshot> {
-    state.reset_library_dir(&app).map_err(describe)
+pub async fn reset_library_dir(app: AppHandle) -> CommandResult<LibrarySnapshot> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().reset_library_dir(&app).map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("曲库恢复任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -317,17 +294,53 @@ pub fn audio_index_status(state: State<'_, AppState>) -> AudioIndexStatus {
 pub async fn build_audio_index(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> CommandResult<AudioIndexStatus> {
-    let task_app = app.clone();
+) -> CommandResult<Option<AudioIndexStatus>> {
+    let root = state.root();
+    if !state.audio_index_status().enabled {
+        let confirmed = app
+            .dialog()
+            .message(format!(
+                "将使用 ffmpeg 分析下列曲库，并在本机保存索引，供以声搜声和查找重复项使用。此后索引会自动同步，曲库较大时可能耗时较长。\n\n{}",
+                root.display()
+            ))
+            .title("建立音频索引")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("建立索引".to_owned(), "取消".to_owned()))
+            .blocking_show();
+        if !confirmed {
+            return Ok(None);
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        let state = task_app.state::<AppState>();
-        state.build_audio_index(&task_app)?;
-        Ok::<_, anyhow::Error>(())
+        let state = app.state::<AppState>();
+        state.build_audio_index(&app, &root)?;
+        Ok::<_, anyhow::Error>(state.audio_index_status())
     })
     .await
     .map_err(|error| format!("音频索引任务异常结束：{error}"))?
-    .map_err(describe)?;
-    Ok(state.audio_index_status())
+    .map(Some)
+    .map_err(describe)
+}
+
+#[tauri::command]
+pub async fn disable_audio_index(app: AppHandle) -> CommandResult<Option<AudioIndexStatus>> {
+    let root = app.state::<AppState>().root();
+    let confirmed = app.dialog()
+        .message("停止为当前曲库自动同步，并删除本机的音频索引？音频文件不会被修改。")
+        .title("关闭音频索引")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("关闭并删除索引".to_owned(), "取消".to_owned()))
+        .blocking_show();
+    if !confirmed {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.disable_audio_index(&app, &root).map_err(describe)?;
+        Ok(Some(state.audio_index_status()))
+    })
+    .await
+    .map_err(|error| format!("关闭索引任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -347,7 +360,7 @@ pub async fn find_audio_duplicates(
     tauri::async_runtime::spawn_blocking(move || {
         task_app
             .state::<AppState>()
-            .duplicate_report(&task_app)
+            .duplicate_report()
             .map_err(describe)
     })
     .await
@@ -357,29 +370,58 @@ pub async fn find_audio_duplicates(
 #[tauri::command]
 pub async fn search_library_by_sound(
     app: AppHandle,
+    limit: Option<usize>,
 ) -> CommandResult<Option<bgm_core::audio_index::SoundSearchResult>> {
+    let limit = limit.unwrap_or(10).clamp(1, 50);
     let Some(file) = app
         .dialog()
         .file()
-        .set_title("选择用于以声搜声的本地音频")
-        .add_filter("音频（MP3 / M4A / FLAC / WAV / OGG）", &AUDIO_EXTENSIONS)
+        .set_title("选择录音或查询音频")
+        .add_filter("曲库音频", &AUDIO_EXTENSIONS)
+        .add_filter("其它录音格式", &["opus", "aac", "webm", "mp4", "amr", "3gp", "caf", "aiff", "wma"])
         .blocking_pick_file()
     else {
         return Ok(None);
     };
-    let path = file
-        .into_path()
-        .map_err(|error| format!("查询音频路径无效：{error}"))?;
-    let task_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        task_app
-            .state::<AppState>()
-            .search_by_sound(&task_app, path)
-            .map_err(describe)
+    let path = file.into_path().map_err(|error| format!("查询音频路径无效：{error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().search_by_sound(path, limit).map(Some).map_err(describe)
     })
     .await
-    .map_err(|error| format!("以声搜声任务异常结束：{error}"))??;
-    Ok(Some(result))
+    .map_err(|error| format!("以声搜声任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+pub async fn search_library_by_recording(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> CommandResult<bgm_core::audio_index::SoundSearchResult> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("麦克风录音必须使用二进制传输".to_owned());
+    };
+    if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return Err("麦克风录音为空或超过 2 MB".to_owned());
+    }
+    let limit = request.headers().get("x-sound-search-limit")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10).clamp(1, 50);
+    let bytes = bytes.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        use std::io::Write;
+        let mut clip = tempfile::NamedTempFile::new()
+            .map_err(|error| format!("无法创建临时录音文件：{error}"))?;
+        clip.write_all(&bytes)
+            .map_err(|error| format!("无法写入临时录音：{error}"))?;
+        let mut result = state
+            .search_by_sound(clip.path().to_path_buf(), limit)
+            .map_err(describe)?;
+        result.query_path = "麦克风录音".to_owned();
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("以声搜声任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -833,6 +875,42 @@ pub async fn export_subtitle(
         bytes,
         format: ext.to_owned(),
     }))
+}
+
+/// 仅桌面 IPC 使用，读取平台公开的歌单元数据。
+#[tauri::command]
+pub async fn parse_playlist_migration_source(
+    url: String,
+) -> CommandResult<crate::playlist_migration::Playlist> {
+    crate::playlist_migration::parse(&url).await
+}
+
+/// 预览文本原样写入 UTF-8 文件，取消保存不产生文件。
+#[tauri::command]
+pub async fn save_playlist_migration_text(
+    app: AppHandle,
+    text: String,
+) -> CommandResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = app
+            .dialog()
+            .file()
+            .set_title("保存歌单迁移文本")
+            .set_file_name("歌单迁移.txt")
+            .add_filter("TXT 文本", &["txt"]);
+        if let Ok(download_dir) = app.path().download_dir() {
+            dialog = dialog.set_directory(download_dir);
+        }
+        let Some(target) = dialog.blocking_save_file() else {
+            return Ok(None);
+        };
+        let target = target.into_path().map_err(|_| "保存路径无效".to_owned())?;
+        std::fs::write(&target, text.as_bytes())
+            .map_err(|error| format!("保存歌单文本失败：{error}"))?;
+        Ok(Some(target.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|_| "保存歌单文本任务未能完成".to_owned())?
 }
 
 /// 读取某曲目已生成的字幕；「桌面歌词」与字幕页据此显示歌词行。

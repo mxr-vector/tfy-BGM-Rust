@@ -10,7 +10,7 @@ const props = defineProps<{
   progress: AudioIndexProgress | null;
   percent: number;
 }>();
-const emit = defineEmits<{ build: [] }>();
+const emit = defineEmits<{ build: []; disable: [] }>();
 
 const stateLabel = computed(() => {
   if (props.busy) return '正在建立 / 更新索引';
@@ -34,9 +34,12 @@ const stateLabel = computed(() => {
         <span>{{ percent }}% · {{ progress.title }}</span>
       </div>
     </div>
-    <button type="button" :disabled="busy" @click="emit('build')">
-      <Icon name="refresh" /> {{ status?.enabled ? '更新索引' : '建立音频索引' }}
-    </button>
+    <div class="index-actions">
+      <button type="button" :disabled="busy" @click="emit('build')">
+        <Icon name="refresh" /> {{ status?.enabled ? '更新索引' : '建立音频索引' }}
+      </button>
+      <button v-if="status?.enabled" type="button" :disabled="busy" @click="emit('disable')">关闭并删除索引</button>
+    </div>
   </section>
 </template>
 
@@ -64,6 +67,7 @@ const stateLabel = computed(() => {
 .index-status-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
 .index-status-copy strong { color: var(--text); font-size: 13px; }
 .index-status-copy > span { overflow: hidden; color: var(--text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.index-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .index-status button, .empty-action {
   display: inline-flex;
   align-items: center;

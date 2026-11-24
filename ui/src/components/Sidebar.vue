@@ -61,6 +61,7 @@ function isBusy(): boolean {
         type="button"
         class="nav-item"
         :class="{ 'is-active': state.view === 'schedule' }"
+        :aria-current="state.view === 'schedule' ? 'page' : undefined"
         id="nav-schedule"
         title="按时间段自动切换节目歌曲与音量"
         @click="setView('schedule')"
@@ -69,20 +70,44 @@ function isBusy(): boolean {
         <span class="nav-label">节目单</span>
         <span class="nav-count" id="count-schedule">{{ state.schedule.length }}</span>
       </button>
-      <button
-        type="button"
-        class="nav-item"
-        :class="{ 'is-active': state.view === 'subtitles' }"
-        id="nav-subtitles"
-        title="为音乐库曲目生成 SRT / LRC 字幕"
-        @click="setView('subtitles')"
-      >
-        <Icon name="captions" class="nav-icon" />
-        <span class="nav-label">字幕生成</span>
-      </button>
 
       <div class="nav-section">
-        <span class="nav-section-label">曲库管理</span>
+        <div class="nav-section-heading">
+          <span class="nav-section-label">曲库管理</span>
+          <button
+            id="btn-rescan"
+            type="button"
+            class="nav-section-action"
+            title="重新扫描曲库目录并热加载配置"
+            aria-label="重新扫描"
+            :disabled="isBusy()"
+            @click="rescanLibrary"
+          >
+            <Icon name="refresh" />
+          </button>
+          <button
+            id="btn-open"
+            type="button"
+            class="nav-section-action"
+            title="在文件管理器中打开曲库文件夹"
+            aria-label="打开曲库文件夹"
+            :disabled="isBusy()"
+            @click="openLibraryDir"
+          >
+            <Icon name="external" />
+          </button>
+          <button
+            id="btn-choose"
+            type="button"
+            class="nav-section-action"
+            title="切换曲库目录"
+            aria-label="切换曲库目录"
+            :disabled="isBusy()"
+            @click="chooseLibrary"
+          >
+            <Icon name="folder" />
+          </button>
+        </div>
         <button
           type="button"
           class="nav-item is-sub"
@@ -108,35 +133,27 @@ function isBusy(): boolean {
         <button
           type="button"
           class="nav-item is-sub"
-          id="btn-rescan"
-          title="重新扫描曲库目录并热加载配置"
-          :disabled="isBusy()"
-          @click="rescanLibrary"
+          :class="{ 'is-active': state.view === 'playlist-migration' }"
+          :aria-current="state.view === 'playlist-migration' ? 'page' : undefined"
+          id="nav-playlist-migration"
+          title="歌单迁移"
+          @click="setView('playlist-migration')"
         >
-          <Icon name="refresh" class="nav-icon" />
-          <span class="nav-label">重新扫描</span>
+          <Icon name="list-music" class="nav-icon" />
+          <span class="nav-label">歌单迁移</span>
         </button>
         <button
           type="button"
           class="nav-item is-sub"
-          id="btn-choose"
-          title="选择其他曲库文件夹"
-          :disabled="isBusy()"
-          @click="chooseLibrary"
+          :class="{ 'is-active': state.view === 'subtitles' }"
+          :aria-current="state.view === 'subtitles' ? 'page' : undefined"
+          id="nav-subtitles"
+          title="为音乐库曲目生成 SRT / LRC 字幕"
+          aria-label="字幕生成"
+          @click="setView('subtitles')"
         >
-          <Icon name="folder" class="nav-icon" />
-          <span class="nav-label">切换曲库目录</span>
-        </button>
-        <button
-          type="button"
-          class="nav-item is-sub"
-          id="btn-open"
-          title="在文件管理器中打开曲库目录"
-          :disabled="isBusy()"
-          @click="openLibraryDir"
-        >
-          <Icon name="external" class="nav-icon" />
-          <span class="nav-label">打开曲库文件夹</span>
+          <Icon name="captions" class="nav-icon" />
+          <span class="nav-label">字幕生成</span>
         </button>
         <button
           v-show="state.library.source === 'custom'"

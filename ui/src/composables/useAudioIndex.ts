@@ -18,13 +18,15 @@ import { state } from '@/stores/state';
 
 export const audioIndexStatus = ref<AudioIndexStatus | null>(null);
 export const audioIndexProgress = ref<AudioIndexProgress | null>(null);
-export const audioIndexBusy = ref(false);
+const manualIndexBuild = ref(false);
+export const audioIndexBusy = computed(() => manualIndexBuild.value || audioIndexProgress.value !== null);
 export const duplicatesLoading = ref(false);
 export const soundSearchLoading = ref(false);
 
 const infoByPath = ref<Record<string, AudioIndexInfo>>({});
 let installed = false;
 let unlistenProgress: (() => void) | null = null;
+let unlistenUpdated: (() => void) | null = null;
 const scope = effectScope();
 
 export const progressPercent = computed(() => {
@@ -45,21 +47,35 @@ export async function refreshAudioIndexStatus(): Promise<AudioIndexStatus | null
 
 export async function buildAudioIndex(): Promise<boolean> {
     if (audioIndexBusy.value) return false;
-    audioIndexBusy.value = true;
-    audioIndexProgress.value = null;
+    manualIndexBuild.value = true;
     try {
-        audioIndexStatus.value = await invoke<AudioIndexStatus>(COMMANDS.buildAudioIndex);
-        // 重新分析后指纹与波形都可能变化，详情缓存必须整体失效。
+        const status = await invoke<AudioIndexStatus | null>(COMMANDS.buildAudioIndex);
+        if (!status?.enabled) return false;
+        audioIndexStatus.value = status;
         clearAudioIndexInfo();
-        toast(`音频索引已更新：${audioIndexStatus.value.readyTracks} 首可用`, 'success');
+        toast(`音频索引已更新：${status.readyTracks} 首可用`, 'success');
         return true;
     } catch (error) {
         toast(normalizeError(error), 'error');
         return false;
     } finally {
-        audioIndexBusy.value = false;
-        audioIndexProgress.value = null;
+        manualIndexBuild.value = false;
         await refreshAudioIndexStatus();
+    }
+}
+
+export async function disableAudioIndex(): Promise<boolean> {
+    if (audioIndexBusy.value) return false;
+    try {
+        const status = await invoke<AudioIndexStatus | null>(COMMANDS.disableAudioIndex);
+        if (!status) return false;
+        audioIndexStatus.value = status;
+        clearAudioIndexInfo();
+        toast('已关闭并删除音频索引', 'success');
+        return true;
+    } catch (error) {
+        toast(normalizeError(error), 'error');
+        return false;
     }
 }
 
@@ -100,7 +116,7 @@ export async function loadDuplicates(): Promise<DuplicateReport | null> {
     }
 }
 
-export async function searchLibraryBySound(): Promise<SoundSearchResult | null> {
+export async function searchLibraryBySound(limit: number, recording?: Blob): Promise<SoundSearchResult | null> {
     if (!audioIndexStatus.value) await refreshAudioIndexStatus();
     if (!audioIndexStatus.value?.enabled) {
         toast('请先为当前曲库建立音频索引', 'info');
@@ -108,7 +124,11 @@ export async function searchLibraryBySound(): Promise<SoundSearchResult | null> 
     }
     soundSearchLoading.value = true;
     try {
-        return await invoke<SoundSearchResult | null>(COMMANDS.searchLibraryBySound);
+        return recording
+            ? await invoke<SoundSearchResult>(COMMANDS.searchLibraryByRecording, await recording.arrayBuffer(), {
+                headers: { 'x-sound-search-limit': String(limit) },
+            })
+            : await invoke<SoundSearchResult | null>(COMMANDS.searchLibraryBySound, { limit });
     } catch (error) {
         toast(normalizeError(error), 'error');
         return null;
@@ -143,22 +163,24 @@ export async function deleteAudioDuplicates(paths: string[]): Promise<LibraryMut
 export async function installAudioIndex(): Promise<void> {
     if (installed) return;
     installed = true;
-    unlistenProgress = await listen<AudioIndexProgress>(EVENTS.audioIndexProgress, (progress) => {
+    unlistenProgress = await listen<AudioIndexProgress | null>(EVENTS.audioIndexProgress, (progress) => {
         audioIndexProgress.value = progress;
+    });
+    unlistenUpdated = await listen<string[]>(EVENTS.audioIndexUpdated, (warnings) => {
+        audioIndexProgress.value = null;
+        clearAudioIndexInfo();
+        void refreshAudioIndexStatus();
+        if (warnings.length === 1) toast(warnings[0], 'error');
+        else if (warnings.length > 1) toast(`音频索引有 ${warnings.length} 项提示：${warnings[0]}`, 'error');
     });
     scope.run(() => {
         watch(
-            () => state.library.root,
+            [() => state.library.root, () => state.library.scannedAtMs],
             () => {
-                // 换曲库目录后旧路径的详情全部失效；同一目录的重新扫描不必清缓存。
                 clearAudioIndexInfo();
                 void refreshAudioIndexStatus();
             },
             { immediate: true },
-        );
-        watch(
-            () => state.library.scannedAtMs,
-            () => void refreshAudioIndexStatus(),
         );
     });
 }
@@ -167,5 +189,7 @@ export function disposeAudioIndex(): void {
     scope.stop();
     unlistenProgress?.();
     unlistenProgress = null;
+    unlistenUpdated?.();
+    unlistenUpdated = null;
     installed = false;
 }

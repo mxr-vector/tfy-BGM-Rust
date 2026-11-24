@@ -800,6 +800,38 @@ select:focus-visible,
   padding-top: 4px;
 }
 
+.nav-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 11px;
+}
+
+.nav-section-heading .nav-section-label {
+  padding: 0 4px 0 0;
+  white-space: nowrap;
+}
+
+.nav-section-action {
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  height: 26px;
+  border-radius: var(--radius-btn);
+  color: var(--text-3);
+}
+
+.nav-section-action:not(:disabled):hover,
+.nav-section-action:focus-visible {
+  color: var(--accent-bright);
+  background: rgba(18, 61, 45, 0.62);
+}
+
+.nav-section-action [data-icon] {
+  width: 15px;
+  height: 15px;
+}
+
 .nav-item {
   position: relative;
   display: flex;
@@ -3934,14 +3966,16 @@ input[type="checkbox"]:indeterminate::after {
   }
 
   .nav-section {
-    width: 44px;
-    align-items: center;
-    margin-top: 8px;
+    display: contents;
   }
 
   .side-status,
-  .nav-section {
+  .nav-section > :not(#nav-subtitles) {
     display: none;
+  }
+
+  #nav-subtitles {
+    height: 42px;
   }
 
   .topbar {

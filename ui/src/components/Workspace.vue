@@ -8,6 +8,7 @@ import AudioToolsPage from './audio-tools/AudioToolsPage.vue';
 import BatchBar from './BatchBar.vue';
 import CategoryFilter from './CategoryFilter.vue';
 import HeroBanner from './HeroBanner.vue';
+import PlaylistMigrationPage from './playlist-migration/PlaylistMigrationPage.vue';
 import SchedulePage from './SchedulePage.vue';
 import SongTable from './SongTable.vue';
 import SubtitlePage from './SubtitlePage.vue';
@@ -36,6 +37,7 @@ const query = computed(() => state.search.trim());
     <SubtitlePage v-else-if="state.view === 'subtitles'" />
     <AudioToolsPage v-else-if="state.view === 'duplicates'" mode="duplicates" />
     <AudioToolsPage v-else-if="state.view === 'sound-search'" mode="search" />
+    <PlaylistMigrationPage v-else-if="state.view === 'playlist-migration'" />
     <template v-else>
       <HeroBanner />
       <CategoryFilter />

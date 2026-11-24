@@ -13,9 +13,14 @@ interface TauriEventPayload<T> {
   payload: T;
 }
 
+type InvokeArgs = Record<string, unknown> | ArrayBuffer;
+interface InvokeOptions {
+  headers: Record<string, string>;
+}
+
 interface TauriGlobal {
   core: {
-    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+    invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T>;
     convertFileSrc(path: string): string;
   };
   event?: {
@@ -40,11 +45,11 @@ const bridge = window.__TAURI__;
 
 export const isTauri = Boolean(bridge?.core?.invoke);
 
-export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   if (!bridge?.core?.invoke) {
     return Promise.reject(new Error('当前页面未运行在 Tauri 容器中，无法访问曲库。'));
   }
-  return bridge.core.invoke<T>(command, args);
+  return bridge.core.invoke<T>(command, args, options);
 }
 
 export function assetUrl(path: string): string {

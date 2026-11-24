@@ -6,6 +6,7 @@ import {
   audioIndexStatus,
   buildAudioIndex,
   deleteAudioDuplicates,
+  disableAudioIndex as disableAudioIndexAction,
   duplicatesLoading,
   loadDuplicates,
   progressPercent,
@@ -67,10 +68,19 @@ async function build(): Promise<void> {
   if (await buildAudioIndex() && props.mode === 'duplicates') await refreshDuplicates();
 }
 
+async function disable(): Promise<void> {
+  if (await disableAudioIndexAction()) {
+    report.value = null;
+    selected.value.clear();
+  }
+}
+
 watch(
-  () => audioIndexStatus.value?.enabled,
-  (enabled) => {
-    if (enabled && props.mode === 'duplicates' && !report.value) void refreshDuplicates();
+  [() => audioIndexStatus.value?.root, () => audioIndexStatus.value?.enabled],
+  ([, enabled]) => {
+    report.value = null;
+    selected.value.clear();
+    if (enabled && props.mode === 'duplicates') void refreshDuplicates();
   },
 );
 
@@ -96,6 +106,7 @@ onMounted(async () => {
       :progress="audioIndexProgress"
       :percent="progressPercent"
       @build="build"
+      @disable="disable"
     />
     <template v-if="mode === 'duplicates'">
       <div class="duplicates-toolbar">

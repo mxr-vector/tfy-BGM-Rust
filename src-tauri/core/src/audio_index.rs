@@ -583,10 +583,8 @@ impl AudioIndexStore {
             reused: plan.reused,
             ..IndexSyncReport::default()
         };
-        // 版本、启用状态与根目录也是索引的一部分，变化时同样需要落盘。
-        let mut changed = self.version != INDEX_VERSION || !self.enabled || plan.root_changed;
+        let mut changed = self.version != INDEX_VERSION || plan.root_changed;
         self.version = INDEX_VERSION;
-        self.enabled = true;
         if plan.root_changed {
             if !self.entries.is_empty() {
                 self.entries.clear();
@@ -648,28 +646,42 @@ pub fn analyze_plan(
     ffmpeg: Option<&Path>,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> PlanAnalysis {
+    analyze_plan_while(plan, ffmpeg, |current, total, title| {
+        progress(current, total, title);
+        true
+    })
+    .unwrap_or_default()
+}
+
+pub fn analyze_plan_while(
+    plan: &SyncPlan,
+    ffmpeg: Option<&Path>,
+    mut progress: impl FnMut(usize, usize, &str) -> bool,
+) -> Option<PlanAnalysis> {
     let total = plan.todo.len();
     if total == 0 {
-        return PlanAnalysis::default();
+        return Some(PlanAnalysis::default());
     }
     let Some(ffmpeg) = ffmpeg else {
-        return PlanAnalysis {
+        return Some(PlanAnalysis {
             results: Vec::new(),
             unavailable: true,
-        };
+        });
     };
     let mut results = Vec::with_capacity(total);
     for (index, candidate) in plan.todo.iter().enumerate() {
-        progress(index + 1, total, &candidate.title);
+        if !progress(index + 1, total, &candidate.title) {
+            return None;
+        }
         results.push(AnalysisOutcome {
             candidate: candidate.clone(),
             result: analyze_file(ffmpeg, candidate).map_err(|error| error.to_string()),
         });
     }
-    PlanAnalysis {
+    Some(PlanAnalysis {
         results,
         unavailable: false,
-    }
+    })
 }
 
 /// 在当前线程一次性完成计划、分析与写回；供单线程调用方与测试使用。
@@ -685,6 +697,8 @@ pub fn sync_index(
     let plan = store.plan_sync(root, categories, songs);
     let analysis = analyze_plan(&plan, ffmpeg, progress);
     let (mut report, changed) = store.apply_sync(plan, analysis);
+    let changed = changed || !store.enabled;
+    store.enabled = true;
     if changed {
         store.save(path)?;
     }
@@ -772,7 +786,9 @@ fn analyze_file(ffmpeg: &Path, candidate: &IndexCandidate) -> Result<IndexEntry,
 /// 以声搜声与「相似重复」会整体失效。raw 格式是逐个 4 字节小端 u32，可直接对齐。
 fn chromaprint(ffmpeg: &Path, source: &Path) -> Result<Vec<u32>, AudioIndexError> {
     let output = command(ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .args([
+            "-hide_banner", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file", "-i",
+        ])
         .arg(source)
         .args([
             "-vn",
@@ -1214,20 +1230,32 @@ pub fn search_by_fingerprint(
     let postings = build_postings(&usable);
     let normalized_query = normalize_path(Path::new(query_path));
     let mut votes: Vec<HashMap<i32, usize>> = vec![HashMap::new(); usable.len()];
-    for (query_frame, word) in query.iter().enumerate() {
-        if *word == 0 {
+    // Bound fuzzy lookups for long recordings; candidate alignments still use every frame.
+    let stride = query.len().div_ceil(256).max(1);
+    for (query_frame, &word) in query.iter().enumerate().step_by(stride) {
+        if word == 0 {
             continue;
         }
-        let Some(occurrences) = postings.get(word) else {
-            continue;
+        let mut vote = |nearby_word| {
+            let Some(occurrences) = postings.get(&nearby_word) else {
+                return;
+            };
+            if occurrences.len() > MAX_COMMON_POSTINGS {
+                return;
+            }
+            for &(track_index, candidate_frame) in occurrences {
+                *votes[track_index]
+                    .entry(candidate_frame as i32 - query_frame as i32)
+                    .or_default() += 1;
+            }
         };
-        if occurrences.len() > MAX_COMMON_POSTINGS {
-            continue;
-        }
-        for &(track_index, candidate_frame) in occurrences {
-            *votes[track_index]
-                .entry(candidate_frame as i32 - query_frame as i32)
-                .or_default() += 1;
+        vote(word);
+        for bit in 0..32 {
+            let one_flip = word ^ (1 << bit);
+            vote(one_flip);
+            for second_bit in 0..bit {
+                vote(one_flip ^ (1 << second_bit));
+            }
         }
     }
     let mut matches: Vec<SoundMatch> = votes
@@ -1238,10 +1266,35 @@ pub fn search_by_fingerprint(
             if entry.id == normalized_query {
                 return None;
             }
-            let (matched, offset, _) = consolidate_offsets(&offsets);
-            // 用较短一方做分母：既能找回「长曲里的一小段」，也能用长查询命中短样本。
+            let mut offsets: Vec<_> = offsets.into_iter().collect();
+            offsets.sort_unstable_by_key(|&(offset, votes)| {
+                (std::cmp::Reverse(votes), offset.abs(), offset)
+            });
+            let (matched, exact, offset) = offsets
+                .into_iter()
+                .take(8)
+                .map(|(offset, _)| {
+                    let query_start = (-offset).max(0) as usize;
+                    let entry_start = offset.max(0) as usize;
+                    let (matched, exact) = query[query_start..]
+                        .iter()
+                        .zip(&entry.fingerprint[entry_start..])
+                        .filter(|(left, right)| **left != 0 && **right != 0)
+                        .map(|(left, right)| (left ^ right).count_ones())
+                        .fold((0, 0), |(matched, exact), difference| {
+                            (
+                                matched + usize::from(difference <= 6),
+                                exact + usize::from(difference == 0),
+                            )
+                        });
+                    (matched, exact, offset)
+                })
+                .max_by_key(|&(matched, exact, offset)| {
+                    (matched, exact, std::cmp::Reverse(offset.abs()))
+                })?;
+            // 近似命中略低于精确命中，避免翻录片段挤掉原声结果。
             let denominator = query.len().min(entry.fingerprint.len()).max(1);
-            let score = matched as f64 / denominator as f64;
+            let score = (0.85 * matched as f64 + 0.15 * exact as f64) / denominator as f64;
             (matched >= 8 && score >= threshold).then(|| SoundMatch {
                 track: duplicate_track(entry),
                 score,
@@ -1358,6 +1411,22 @@ mod tests {
             result.matches[0].offset_seconds,
             99.0 * FINGERPRINT_FRAME_SECONDS
         );
+    }
+
+    #[test]
+    fn ranks_exact_matches_first_and_limits_noisy_clip_results() {
+        let query: Vec<_> = (1_u32..80).map(|i| i.wrapping_mul(0x9e37_79b9)).collect();
+        let noisy: Vec<_> = query.iter().map(|frame| frame ^ 0b11).collect();
+        let exact = entry("exact", query.clone());
+        let recorded = entry("recorded", noisy);
+        let unrelated = entry("unrelated", vec![1; 80]);
+        let tracks = [&unrelated, &recorded, &exact];
+        let result = search_by_fingerprint(&tracks, &query, "clip.webm", 2, 0.35);
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].track.id, "exact");
+        assert_eq!(result.matches[1].track.id, "recorded");
+        let limited = search_by_fingerprint(&tracks, &query, "clip.webm", 1, 0.35);
+        assert_eq!(limited.matches.len(), 1);
     }
 
     #[test]

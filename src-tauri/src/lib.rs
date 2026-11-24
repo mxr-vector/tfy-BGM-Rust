@@ -9,6 +9,7 @@ mod library_watch;
 mod lyrics;
 mod models;
 mod platform;
+mod playlist_migration;
 mod separation;
 mod settings;
 mod state;
@@ -39,7 +40,7 @@ pub fn run() {
 
     tauri::Builder::default()
         // WebView 只有在获得麦克风权限后才会暴露完整的输出设备列表。
-        // 应用本身不录音：前端拿到设备列表后立即停止音轨，仅用于多输出路由。
+        // 以声搜声也在用户主动开始录音时使用麦克风。
         .on_permission_request(|_, kind| match kind {
             PermissionKind::Microphone => PermissionResponse::Allow,
             // 「程序启动时自动播放」与 SMTC / MPRIS2 的静音媒体元素都需要自动播放权限。
@@ -63,16 +64,8 @@ pub fn run() {
             let api_config = state.api_config();
             let (autostart, minimize_to_tray, _) = state.desktop_prefs();
             app.manage(state);
-            // 已确认索引的曲库在后台补同步，不阻塞首屏；后续增删由监听增量维护。
-            let index_app = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let state = index_app.state::<AppState>();
-                if state.audio_index_status().enabled
-                    && let Err(error) = state.synchronize_audio_index(&index_app)
-                {
-                    eprintln!("[audio-index] 启动同步失败：{error:#}");
-                }
-            });
+            // 已启用的索引启动后在后台补同步，不阻塞首屏。
+            app.state::<AppState>().queue_audio_index_update(app.handle());
             // 桌面歌词窗口的开关与最新快照；歌词窗口启动时从此处拉取初始状态。
             app.manage(LyricsState::default());
 
@@ -121,9 +114,11 @@ pub fn run() {
             commands::open_library_dir,
             commands::audio_index_status,
             commands::build_audio_index,
+            commands::disable_audio_index,
             commands::audio_index_for_song,
             commands::find_audio_duplicates,
             commands::search_library_by_sound,
+            commands::search_library_by_recording,
             commands::delete_audio_duplicates,
             commands::models_info,
             commands::choose_models_dir,
@@ -138,6 +133,8 @@ pub fn run() {
             commands::separation_models,
             commands::generate_subtitles,
             commands::export_subtitle,
+            commands::parse_playlist_migration_source,
+            commands::save_playlist_migration_text,
             commands::subtitle_for_track,
             commands::list_subtitles,
             commands::delete_subtitle,
