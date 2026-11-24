@@ -330,17 +330,11 @@ pub fn scan(root: &Path) -> (Vec<AsrModel>, Vec<String>) {
     (models, warnings)
 }
 
-/// 按扫描结果删除模型，绝不直接信任调用方传入的路径。
+/// 按扫描结果解析并校验删除目标；与真正删除分开，便于运行时先卸载再移除文件。
 ///
-/// 目录模型连同 tokenizer 等附属文件一起删除；根目录下的单文件模型只删除该文件。
-/// 额外做 canonical 路径校验，防止模型目录或目标文件被替换为指向外部的符号链接。
-pub fn delete_scanned_model(root: &Path, id: &str) -> Result<String> {
-    let (model, target) = resolve_scanned_model(root, id)?;
-    delete_model_files(&model, &target)?;
-    Ok(model.path)
-}
-
-/// 解析并校验删除目标；与真正删除分开，便于运行时先卸载再移除文件。
+/// 目录模型返回目录本身，根目录下的单文件模型返回该文件；两者都做 canonical 校验，
+/// 防止模型目录或目标文件被替换为指向外部的符号链接。真正的删除由
+/// [`delete_model_files`] 完成。
 fn resolve_scanned_model(root: &Path, id: &str) -> Result<(AsrModel, PathBuf)> {
     let (models, _) = scan(root);
     let model = models
@@ -1476,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_scanned_model_removes_directory_and_attachments() {
+    fn remove_removes_directory_and_attachments() {
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("custom-model");
         fs::create_dir_all(model.join("tokenizer")).unwrap();
@@ -1484,29 +1478,34 @@ mod tests {
         fs::write(model.join("tokenizer/vocab.json"), b"{}").unwrap();
         fs::write(dir.path().join("keep.onnx"), b"keep").unwrap();
 
-        delete_scanned_model(dir.path(), "custom-model").unwrap();
+        ModelRuntime::default()
+            .remove(dir.path(), "custom-model")
+            .unwrap();
         assert!(!model.exists());
         assert!(dir.path().join("keep.onnx").exists());
     }
 
     #[test]
-    fn delete_scanned_model_removes_only_root_single_file() {
+    fn remove_removes_only_root_single_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("single.onnx"), b"x").unwrap();
         fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
 
-        delete_scanned_model(dir.path(), "file:single").unwrap();
+        ModelRuntime::default()
+            .remove(dir.path(), "file:single")
+            .unwrap();
         assert!(!dir.path().join("single.onnx").exists());
         assert!(dir.path().join("keep.txt").exists());
         assert!(dir.path().exists());
     }
 
     #[test]
-    fn delete_scanned_model_rejects_unknown_or_outside_paths() {
+    fn remove_rejects_unknown_or_outside_paths() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("single.onnx"), b"x").unwrap();
-        assert!(delete_scanned_model(dir.path(), "../outside").is_err());
-        assert!(delete_scanned_model(dir.path(), "file:missing").is_err());
+        let runtime = ModelRuntime::default();
+        assert!(runtime.remove(dir.path(), "../outside").is_err());
+        assert!(runtime.remove(dir.path(), "file:missing").is_err());
         assert!(dir.path().join("single.onnx").exists());
     }
 

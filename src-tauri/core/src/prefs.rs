@@ -71,6 +71,18 @@ pub fn is_wallpaper_path(path: &str) -> bool {
         })
 }
 
+/// 壁纸类型：`video` 走动态壁纸，其余一律按静态图片处理。
+///
+/// 视频壁纸在 Linux 上需要额外的本地媒体服务，平台实现与调用方都以此判断，
+/// 因此判定规则放在这里，避免多处各写一份扩展名比较。
+pub fn wallpaper_kind(path: &Path) -> &'static str {
+    let is_video = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if is_video { "video" } else { "image" }
+}
+
 /// 模型下载地址是否是可用的 http(s) 链接；不合法时回退内置地址。
 pub fn is_download_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();

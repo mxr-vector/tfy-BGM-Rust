@@ -12,25 +12,9 @@ import {
   getAudioBuffer,
   seekTo,
 } from '@/stores/audio-engine';
-import { closeDiagnostics, diagnosticsOpen } from '@/stores/diagnostics';
 import { clearLoopPoint, MIN_LOOP_SPAN, saveLoopPoint } from '@/stores/loops';
 import { categoryById, state } from '@/stores/state';
 import Icon from './Icon.vue';
-
-const props = withDefaults(
-  defineProps<{
-    embedded?: boolean;
-    active?: boolean;
-  }>(),
-  {
-    embedded: false,
-    active: true,
-  },
-);
-
-const panelActive = computed(() =>
-  props.embedded ? props.active : diagnosticsOpen.value,
-);
 
 const song = computed(() => state.currentSong);
 const category = computed(() => (song.value ? categoryById(song.value.category) : null));
@@ -248,7 +232,6 @@ function updateMeters(): void {
 
 function loop(): void {
   const tick = (time: number) => {
-    if (!panelActive.value) return;
     drawWave();
     drawSpectrum();
     if (time - lastMeter > 100) {
@@ -279,7 +262,7 @@ function runAnalysis(): void {
   analysing.value = true;
   // 让面板先完成一帧绘制，再做可能耗时数百毫秒的整曲分析。
   analysisTimer = window.setTimeout(() => {
-    if (!panelActive.value || getAudioBuffer() !== buffer) {
+    if (getAudioBuffer() !== buffer) {
       analysing.value = false;
       return;
     }
@@ -348,27 +331,14 @@ function seekFromWave(event: PointerEvent): void {
   seekTo(ratio * total);
 }
 
-function onKeydown(event: KeyboardEvent): void {
-  if (props.embedded || !panelActive.value || event.key !== 'Escape') return;
-  event.preventDefault();
-  event.stopPropagation();
-  closeDiagnostics();
-}
-
-watch(panelActive, async (open) => {
-  if (!open) {
-    stopLoop();
-    window.clearTimeout(analysisTimer);
-    observer?.disconnect();
-    return;
-  }
+// 面板只在「歌曲详情 · 诊断」标签激活时挂载，挂载即视为可见：
+// 这里一次性建立可视化循环与整曲分析，卸载时统一收尾。
+onMounted(async () => {
   syncLoopDraft();
   await nextTick();
-  if (!panelActive.value) return;
 
   void loadExportPresets();
 
-  observer?.disconnect();
   if ('ResizeObserver' in window) {
     observer ??= new ResizeObserver(() => {
       drawWave();
@@ -379,12 +349,11 @@ watch(panelActive, async (open) => {
   }
   loop();
   runAnalysis();
-}, { immediate: true });
+});
 
 watch(
   () => state.currentSong?.key,
   () => {
-    if (!panelActive.value) return;
     analysis.value = null;
     peaks = null;
     syncLoopDraft();
@@ -396,7 +365,6 @@ watch(
 watch(
   () => audioState.loadedPath,
   () => {
-    if (!panelActive.value) return;
     analysis.value = null;
     peaks = null;
     syncLoopDraft();
@@ -407,17 +375,12 @@ watch(
 watch(
   () => state.loopPoints,
   () => {
-    if (panelActive.value) syncLoopDraft();
+    syncLoopDraft();
   },
   { deep: true },
 );
 
-onMounted(() => {
-  document.addEventListener('keydown', onKeydown, true);
-});
-
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', onKeydown, true);
   stopLoop();
   window.clearTimeout(analysisTimer);
   observer?.disconnect();
@@ -426,204 +389,183 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <Teleport to="body" :disabled="embedded">
-    <div
-      v-if="panelActive"
-      :class="embedded ? 'diag-embedded' : 'diag-backdrop'"
-      @mousedown.self="!embedded && closeDiagnostics()"
-    >
-      <section
-        class="diag-panel"
-        :class="{ 'diag-panel--embedded': embedded }"
-        role="dialog"
-        :aria-modal="embedded ? undefined : true"
-        aria-label="音频诊断"
-      >
-        <header class="diag-header">
-          <div class="diag-heading">
-            <span class="diag-kicker" :style="{ color: accent }">
-              <Icon name="sparkles" /> TRACK DIAGNOSTICS
-            </span>
-            <h2 class="diag-title">{{ song?.title ?? '未在播放' }}</h2>
-            <span class="diag-sub">{{ subtitle }}</span>
-          </div>
-          <div class="diag-header-actions">
-            <span class="diag-verdict" :class="`is-${verdict.tone}`">{{ verdict.label }}</span>
-            <button
-              v-if="!embedded"
-              type="button"
-              class="diag-close"
-              title="关闭诊断"
-              @click="closeDiagnostics"
-            >
-              <Icon name="x" />
-            </button>
-          </div>
-        </header>
-
-        <div class="diag-body">
-          <div class="diag-visuals">
-            <div class="diag-canvas-block">
-              <div class="diag-block-head">
-                <span>整曲波形</span>
-                <span class="diag-block-hint">
-                  点击波形跳转 · 播放 {{ formatTime(audioState.currentTime) }} /
-                  {{ formatTime(duration) }}
-                </span>
-              </div>
-              <canvas
-                ref="waveCanvas"
-                class="diag-canvas diag-wave"
-                @pointerdown="seekFromWave"
-              ></canvas>
-            </div>
-
-            <div class="diag-canvas-block">
-              <div class="diag-block-head">
-                <span>实时频谱</span>
-                <span class="diag-block-hint">AnalyserNode · 72 bands · -90~-10 dBFS 映射</span>
-              </div>
-              <canvas ref="spectrumCanvas" class="diag-canvas diag-spectrum"></canvas>
-            </div>
-
-            <div class="diag-meters">
-              <div class="diag-meter">
-                <span class="meter-label">瞬时 LUFS</span>
-                <span class="meter-value" :class="{ 'is-hot': (momentary ?? -99) > -9 }">
-                  {{ formatValue(momentary, 1) }}
-                </span>
-                <span class="meter-hint">K-weighting · 400ms</span>
-              </div>
-              <div class="diag-meter">
-                <span class="meter-label">实时峰值</span>
-                <span class="meter-value" :class="{ 'is-hot': (livePeak ?? -99) > -1 }">
-                  {{ formatValue(livePeak, 1) }}<small> dBFS</small>
-                </span>
-                <span class="meter-hint">单声道下混 · 采样峰值</span>
-              </div>
-              <div class="diag-meter">
-                <span class="meter-label">最大跳变</span>
-                <span class="meter-value">{{ formatValue(analysis?.maxDelta, 3) }}</span>
-                <span class="meter-hint">整曲最大相邻采样差</span>
-              </div>
-            </div>
-          </div>
-
-          <aside class="diag-side">
-            <div v-if="analysing" class="diag-loading">
-              <span class="diag-spinner"></span> 正在分析整曲…
-            </div>
-            <div v-else-if="!analysis" class="diag-empty">
-              播放这首曲目后即可分析。音频需要先完成解码。
-            </div>
-            <template v-else>
-              <p class="diag-source-note">
-                <span>以下为源文件实测值（归一化前）</span>
-                <span v-if="!normalizationEnabled">· 导出仅复制原文件</span>
-                <span v-else-if="exportTarget">
-                  · 导出目标 {{ exportTarget.targetLufs }} LUFS · {{ exportTarget.label }}
-                </span>
-              </p>
-              <div class="diag-stats">
-                <div class="diag-stat">
-                  <span>综合响度</span>
-                  <strong>{{ formatValue(analysis.integratedLufs, 1) }}</strong>
-                  <small>LUFS · 源文件</small>
-                </div>
-                <div class="diag-stat">
-                  <span>采样峰值</span>
-                  <strong>{{ formatValue(analysis.peakDb, 1) }}</strong>
-                  <small>dBFS · 非真峰值</small>
-                </div>
-                <div class="diag-stat">
-                  <span>RMS</span>
-                  <strong>{{ formatValue(analysis.rmsDb, 1) }}</strong>
-                  <small>dB</small>
-                </div>
-                <div class="diag-stat">
-                  <span>相位相关</span>
-                  <strong>{{ formatValue(analysis.minCorrelation, 2) }}</strong>
-                  <small>最低 / 均值 {{ formatValue(analysis.averageCorrelation, 2) }}</small>
-                </div>
-                <div class="diag-stat">
-                  <span>削波采样</span>
-                  <strong :class="{ 'is-bad': analysis.clippedSamples > 0 }">
-                    {{ analysis.clippedSamples }}
-                  </strong>
-                  <small>{{ analysis.clipRuns }} 段连续</small>
-                </div>
-                <div class="diag-stat">
-                  <span>瞬态突变</span>
-                  <strong :class="{ 'is-warn': analysis.pops > 40 }">{{ analysis.pops }}</strong>
-                  <small>阈值 0.65</small>
-                </div>
-              </div>
-
-              <div class="diag-issues">
-                <h3>可用性结论</h3>
-                <p v-if="analysis.issues.length === 0" class="diag-ok">
-                  未发现明显问题，可以直接用于剪辑。
-                </p>
-                <ul v-else>
-                  <li v-for="issue in analysis.issues" :key="issue">
-                    <Icon name="alert" /> {{ issue }}
-                  </li>
-                </ul>
-                <p v-if="analysis.silence.length > 0" class="diag-silence">
-                  静音段：
-                  <span
-                    v-for="segment in analysis.silence.slice(0, 3)"
-                    :key="segment.start"
-                  >
-                    {{ formatTime(segment.start) }}–{{ formatTime(segment.end) }}
-                  </span>
-                  <span v-if="analysis.silence.length > 3"> 等 {{ analysis.silence.length }} 段</span>
-                </p>
-              </div>
-            </template>
-
-            <div class="diag-loop">
-              <div class="diag-loop-head">
-                <h3>循环区间</h3>
-                <span v-if="loopPoint" class="diag-loop-state">
-                  {{ loopPoint.enabled ? '已启用' : '已关闭' }}
-                </span>
-              </div>
-              <div class="diag-loop-values">
-                <label>
-                  <span>起点</span>
-                  <input v-model.number="loopStart" type="number" min="0" step="0.01" />
-                </label>
-                <label>
-                  <span>终点</span>
-                  <input v-model.number="loopEnd" type="number" min="0" step="0.01" />
-                </label>
-              </div>
-              <div class="diag-loop-actions">
-                <button type="button" @click="markStart">起点 = 当前</button>
-                <button type="button" @click="markEnd">终点 = 当前</button>
-                <button type="button" @click="markFullTrack">整曲循环</button>
-              </div>
-              <label class="diag-loop-toggle">
-                <input v-model="loopEnabled" type="checkbox" /> 启用无缝循环
-              </label>
-              <div class="diag-loop-actions">
-                <button type="button" class="is-primary" :disabled="!song" @click="applyLoop">
-                  保存循环点
-                </button>
-                <button
-                  v-if="loopPoint"
-                  type="button"
-                  class="is-danger"
-                  @click="removeLoop"
-                >
-                  清除
-                </button>
-              </div>
-            </div>
-          </aside>
+  <div class="diag-embedded">
+    <section class="diag-panel diag-panel--embedded" role="dialog" aria-label="音频诊断">
+      <header class="diag-header">
+        <div class="diag-heading">
+          <span class="diag-kicker" :style="{ color: accent }">
+            <Icon name="sparkles" /> TRACK DIAGNOSTICS
+          </span>
+          <h2 class="diag-title">{{ song?.title ?? '未在播放' }}</h2>
+          <span class="diag-sub">{{ subtitle }}</span>
         </div>
-      </section>
-    </div>
-  </Teleport>
+        <div class="diag-header-actions">
+          <span class="diag-verdict" :class="`is-${verdict.tone}`">{{ verdict.label }}</span>
+        </div>
+      </header>
+
+      <div class="diag-body">
+        <div class="diag-visuals">
+          <div class="diag-canvas-block">
+            <div class="diag-block-head">
+              <span>整曲波形</span>
+              <span class="diag-block-hint">
+                点击波形跳转 · 播放 {{ formatTime(audioState.currentTime) }} /
+                {{ formatTime(duration) }}
+              </span>
+            </div>
+            <canvas
+              ref="waveCanvas"
+              class="diag-canvas diag-wave"
+              @pointerdown="seekFromWave"
+            ></canvas>
+          </div>
+
+          <div class="diag-canvas-block">
+            <div class="diag-block-head">
+              <span>实时频谱</span>
+              <span class="diag-block-hint">AnalyserNode · 72 bands · -90~-10 dBFS 映射</span>
+            </div>
+            <canvas ref="spectrumCanvas" class="diag-canvas diag-spectrum"></canvas>
+          </div>
+
+          <div class="diag-meters">
+            <div class="diag-meter">
+              <span class="meter-label">瞬时 LUFS</span>
+              <span class="meter-value" :class="{ 'is-hot': (momentary ?? -99) > -9 }">
+                {{ formatValue(momentary, 1) }}
+              </span>
+              <span class="meter-hint">K-weighting · 400ms</span>
+            </div>
+            <div class="diag-meter">
+              <span class="meter-label">实时峰值</span>
+              <span class="meter-value" :class="{ 'is-hot': (livePeak ?? -99) > -1 }">
+                {{ formatValue(livePeak, 1) }}<small> dBFS</small>
+              </span>
+              <span class="meter-hint">单声道下混 · 采样峰值</span>
+            </div>
+            <div class="diag-meter">
+              <span class="meter-label">最大跳变</span>
+              <span class="meter-value">{{ formatValue(analysis?.maxDelta, 3) }}</span>
+              <span class="meter-hint">整曲最大相邻采样差</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="diag-side">
+          <div v-if="analysing" class="diag-loading">
+            <span class="diag-spinner"></span> 正在分析整曲…
+          </div>
+          <div v-else-if="!analysis" class="diag-empty">
+            播放这首曲目后即可分析。音频需要先完成解码。
+          </div>
+          <template v-else>
+            <p class="diag-source-note">
+              <span>以下为源文件实测值（归一化前）</span>
+              <span v-if="!normalizationEnabled">· 导出仅复制原文件</span>
+              <span v-else-if="exportTarget">
+                · 导出目标 {{ exportTarget.targetLufs }} LUFS · {{ exportTarget.label }}
+              </span>
+            </p>
+            <div class="diag-stats">
+              <div class="diag-stat">
+                <span>综合响度</span>
+                <strong>{{ formatValue(analysis.integratedLufs, 1) }}</strong>
+                <small>LUFS · 源文件</small>
+              </div>
+              <div class="diag-stat">
+                <span>采样峰值</span>
+                <strong>{{ formatValue(analysis.peakDb, 1) }}</strong>
+                <small>dBFS · 非真峰值</small>
+              </div>
+              <div class="diag-stat">
+                <span>RMS</span>
+                <strong>{{ formatValue(analysis.rmsDb, 1) }}</strong>
+                <small>dB</small>
+              </div>
+              <div class="diag-stat">
+                <span>相位相关</span>
+                <strong>{{ formatValue(analysis.minCorrelation, 2) }}</strong>
+                <small>最低 / 均值 {{ formatValue(analysis.averageCorrelation, 2) }}</small>
+              </div>
+              <div class="diag-stat">
+                <span>削波采样</span>
+                <strong :class="{ 'is-bad': analysis.clippedSamples > 0 }">
+                  {{ analysis.clippedSamples }}
+                </strong>
+                <small>{{ analysis.clipRuns }} 段连续</small>
+              </div>
+              <div class="diag-stat">
+                <span>瞬态突变</span>
+                <strong :class="{ 'is-warn': analysis.pops > 40 }">{{ analysis.pops }}</strong>
+                <small>阈值 0.65</small>
+              </div>
+            </div>
+
+            <div class="diag-issues">
+              <h3>可用性结论</h3>
+              <p v-if="analysis.issues.length === 0" class="diag-ok">
+                未发现明显问题，可以直接用于剪辑。
+              </p>
+              <ul v-else>
+                <li v-for="issue in analysis.issues" :key="issue">
+                  <Icon name="alert" /> {{ issue }}
+                </li>
+              </ul>
+              <p v-if="analysis.silence.length > 0" class="diag-silence">
+                静音段：
+                <span
+                  v-for="segment in analysis.silence.slice(0, 3)"
+                  :key="segment.start"
+                >
+                  {{ formatTime(segment.start) }}–{{ formatTime(segment.end) }}
+                </span>
+                <span v-if="analysis.silence.length > 3"> 等 {{ analysis.silence.length }} 段</span>
+              </p>
+            </div>
+          </template>
+
+          <div class="diag-loop">
+            <div class="diag-loop-head">
+              <h3>循环区间</h3>
+              <span v-if="loopPoint" class="diag-loop-state">
+                {{ loopPoint.enabled ? '已启用' : '已关闭' }}
+              </span>
+            </div>
+            <div class="diag-loop-values">
+              <label>
+                <span>起点</span>
+                <input v-model.number="loopStart" type="number" min="0" step="0.01" />
+              </label>
+              <label>
+                <span>终点</span>
+                <input v-model.number="loopEnd" type="number" min="0" step="0.01" />
+              </label>
+            </div>
+            <div class="diag-loop-actions">
+              <button type="button" @click="markStart">起点 = 当前</button>
+              <button type="button" @click="markEnd">终点 = 当前</button>
+              <button type="button" @click="markFullTrack">整曲循环</button>
+            </div>
+            <label class="diag-loop-toggle">
+              <input v-model="loopEnabled" type="checkbox" /> 启用无缝循环
+            </label>
+            <div class="diag-loop-actions">
+              <button type="button" class="is-primary" :disabled="!song" @click="applyLoop">
+                保存循环点
+              </button>
+              <button
+                v-if="loopPoint"
+                type="button"
+                class="is-danger"
+                @click="removeLoop"
+              >
+                清除
+              </button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
 </template>

@@ -43,7 +43,7 @@ fn scan() -> Vec<SystemFont> {
     let mut seen: HashSet<String> = HashSet::new();
 
     for path in font_files() {
-        if !seen.insert(path_key(&path)) {
+        if !seen.insert(crate::platform::path_key(&path)) {
             continue;
         }
         let Ok(data) = std::fs::read(&path) else {
@@ -182,118 +182,24 @@ fn classify(language_id: u16) -> Lang {
     }
 }
 
-/// 待解析的字体文件；注册表项与各平台常见字体目录合并去重。
+/// 待解析的字体文件；各平台的目录与注册表项由 `platform` 提供，这里只做合并去重。
 fn font_files() -> Vec<PathBuf> {
+    let sources = crate::platform::font_sources();
     let mut files = Vec::new();
     let mut seen_dirs: HashSet<String> = HashSet::new();
-    for dir in font_dirs() {
+    for dir in sources.dirs {
         // 不同来源可能指向同一目录（如 /usr/share/X11/fonts 是指向 fonts 的软链），只扫一次。
         let key = std::fs::canonicalize(&dir)
-            .map(|path| path_key(&path))
-            .unwrap_or_else(|_| path_key(&dir));
+            .map(|path| crate::platform::path_key(&path))
+            .unwrap_or_else(|_| crate::platform::path_key(&dir));
         if !seen_dirs.insert(key) {
             continue;
         }
         // 深度足以覆盖 /usr/share/fonts/truetype/<family>/<font>，并由 depth 兜住软链环。
         collect_dir(&dir, FONT_DIR_DEPTH, &mut files);
     }
-    #[cfg(windows)]
-    files.extend(registry_files());
-    files
-}
-
-/// 各平台常见字体目录；不存在的目录会被 `collect_dir` 忽略。
-///
-/// 用 `cfg!` 而不是 `#[cfg]`，保证所有分支在各平台都参与类型检查。
-fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if cfg!(windows) {
-        let fonts = std::env::var_os("WINDIR")
-            .map(PathBuf::from)
-            .map(|dir| dir.join("Fonts"))
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Fonts"));
-        dirs.push(fonts);
-        // 仅当前用户安装的字体（Windows 10 1809+ 的「为当前用户安装」）。
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            dirs.push(PathBuf::from(local).join(r"Microsoft\Windows\Fonts"));
-        }
-    }
-
-    if cfg!(target_os = "macos") {
-        for dir in [
-            "/System/Library/Fonts/Supplemental",
-            "/System/Library/Fonts",
-            "/Library/Fonts",
-        ] {
-            dirs.push(PathBuf::from(dir));
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            dirs.push(PathBuf::from(home).join("Library/Fonts"));
-        }
-    }
-
-    if cfg!(all(unix, not(target_os = "macos"))) {
-        // fontconfig 的规范默认目录；发行版/字体包通常在其下再分子目录。
-        for dir in ["/usr/share/fonts", "/usr/local/share/fonts"] {
-            dirs.push(PathBuf::from(dir));
-        }
-        // 再按 XDG_DATA_DIRS 展开，覆盖 NixOS、Flatpak 导出等自定义前缀。
-        if let Some(value) = std::env::var_os("XDG_DATA_DIRS") {
-            for dir in std::env::split_paths(&value) {
-                dirs.push(dir.join("fonts"));
-            }
-        }
-        // 老式 X11 字体目录，部分发行版仍在使用。
-        dirs.push(PathBuf::from("/usr/share/X11/fonts"));
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            dirs.push(home.join(".local/share/fonts"));
-            // fontconfig 仍然兼容的老目录。
-            dirs.push(home.join(".fonts"));
-        }
-        // 自定义 XDG_DATA_HOME 时，fontconfig 也会读取 <data>/fonts（默认即 ~/.local/share）。
-        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            dirs.push(PathBuf::from(data).join("fonts"));
-        }
-    }
-
-    dirs
-}
-
-/// Windows 注册表登记的字体文件：可能位于系统字体目录之外（如 Office 自带字体）。
-#[cfg(windows)]
-fn registry_files() -> Vec<PathBuf> {
-    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
-
-    const FONT_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
-    let fonts_dir = std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .map(|dir| dir.join("Fonts"))
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Fonts"));
-
-    let mut files = Vec::new();
-    for root in [LOCAL_MACHINE, CURRENT_USER] {
-        let Ok(key) = root.open(FONT_KEY) else {
-            continue;
-        };
-        let Ok(values) = key.values() else {
-            continue;
-        };
-        for (_, value) in values {
-            let raw = String::from_utf16_lossy(value.as_wide());
-            let raw = raw.trim_end_matches('\0').trim();
-            if raw.is_empty() {
-                continue;
-            }
-            let path = PathBuf::from(raw);
-            files.push(if path.is_absolute() {
-                path
-            } else {
-                fonts_dir.join(path)
-            });
-        }
-    }
+    // 目录之外的字体文件（Windows 注册表里指向其它位置的条目）。
+    files.extend(sources.files);
     files
 }
 
@@ -324,16 +230,6 @@ fn is_font_file(path: &Path) -> bool {
         .is_some_and(|ext| FONT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// 去重键：Windows 路径大小写不敏感。
-fn path_key(path: &Path) -> String {
-    let key = path.to_string_lossy().into_owned();
-    if cfg!(windows) {
-        key.to_lowercase()
-    } else {
-        key
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,30 +248,6 @@ mod tests {
                 && font.family.chars().count() <= MAX_FAMILY_LEN
                 && !font.family.starts_with('@')
         }));
-    }
-
-    #[test]
-    fn font_dirs_cover_platform_defaults() {
-        let dirs = font_dirs();
-        if cfg!(windows) {
-            assert!(
-                dirs.iter().any(|dir| dir.ends_with("Fonts")),
-                "缺少 Windows 系统字体目录"
-            );
-        }
-        if cfg!(all(unix, not(target_os = "macos"))) {
-            assert!(
-                dirs.iter().any(|dir| dir == Path::new("/usr/share/fonts")),
-                "缺少 Linux 字体目录"
-            );
-            assert!(
-                dirs.iter()
-                    .any(|dir| dir == Path::new("/usr/local/share/fonts"))
-            );
-        }
-        if cfg!(target_os = "macos") {
-            assert!(dirs.iter().any(|dir| dir == Path::new("/Library/Fonts")));
-        }
     }
 
     #[test]

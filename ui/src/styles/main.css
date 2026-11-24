@@ -5772,20 +5772,6 @@ input[type="checkbox"]:indeterminate::after {
    可视化诊断
    ============================================================ */
 
-.diag-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1260;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 28px;
-  background: rgba(2, 6, 4, 0.74);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  animation: fadeIn 0.16s ease;
-}
-
 .diag-panel {
   width: min(1180px, calc(var(--viewport-width, 100vw) - 56px));
   height: min(760px, calc(var(--viewport-height, 100dvh) - 56px));
@@ -5882,26 +5868,6 @@ input[type="checkbox"]:indeterminate::after {
 
 .diag-verdict.is-idle {
   color: var(--text-3);
-}
-
-.diag-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  color: var(--text-2);
-}
-
-.diag-close [data-icon] {
-  width: 15px;
-  height: 15px;
-}
-
-.diag-close:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
 }
 
 .diag-body {

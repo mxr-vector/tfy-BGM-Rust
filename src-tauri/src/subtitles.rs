@@ -19,7 +19,6 @@ use std::cmp::Ordering;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use bgm_core::Song;
@@ -430,19 +429,6 @@ fn migrated_stored(stored: &StoredSubtitle, to: &str, song: Option<&Song>) -> St
     next
 }
 
-/// Windows 绿色版不弹控制台窗口（与 `bgm_core::loudness` 的处理一致）。
-fn ffmpeg_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    command.stdout(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
 fn stderr_tail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let trimmed = text.trim();
@@ -470,7 +456,7 @@ fn normalize_to_wav(app: &AppHandle, source: &Path, key: &str) -> Result<PathBuf
     })?;
 
     let target = wav_path_for(app, key)?;
-    let output = ffmpeg_command(&ffmpeg)
+    let output = bgm_core::process::quiet_command(&ffmpeg)
         .args(["-hide_banner", "-nostdin", "-y", "-i"])
         .arg(source)
         .args([

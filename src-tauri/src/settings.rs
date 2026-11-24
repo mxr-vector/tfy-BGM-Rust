@@ -16,28 +16,11 @@ use tauri::{AppHandle, Manager};
 /// `AppHandle`，因此按 Tauri 的目录约定（系统配置目录 / 应用标识）定位 `prefs.json`。
 /// 读取失败一律视为「开启加速」，与内置默认值保持一致。
 pub fn startup_gpu_acceleration(identifier: &str) -> bool {
-    let Some(dir) = config_dir_hint(identifier) else {
+    let Some(dir) = crate::platform::config_dir(identifier) else {
         return true;
     };
     let (prefs, _) = Prefs::load(&dir.join(PREFS_FILE));
     prefs.gpu_acceleration
-}
-
-fn config_dir_hint(identifier: &str) -> Option<PathBuf> {
-    #[cfg(windows)]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-    });
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-
-    base.map(|dir| dir.join(identifier))
 }
 
 pub struct Settings {

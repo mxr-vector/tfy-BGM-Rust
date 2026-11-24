@@ -176,7 +176,7 @@ async function exportCurrentSubtitle(): Promise<void> {
           </button>
           <span>{{ decoded ? '源文件实测分析' : '等待当前音频解码' }}</span>
         </div>
-        <DiagnosticsPanel embedded active />
+        <DiagnosticsPanel />
       </section>
       <section v-else-if="currentTab === 'lyrics'" class="details-tab-panel" role="tabpanel">
         <SongDetailsLyrics :song-key="song.key" :subtitle="subtitle" />

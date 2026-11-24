@@ -179,7 +179,7 @@ impl AppState {
             config: self.config.read().clone(),
             schedule: self.schedule.read().clone(),
             loops: self.loops.read().clone(),
-            platform: crate::desktop::platform(),
+            platform: crate::platform::name(),
         }
     }
 

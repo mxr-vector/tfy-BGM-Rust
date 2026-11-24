@@ -13,7 +13,7 @@ use std::ffi::{CString, c_char, c_float};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -964,7 +964,7 @@ fn decode_input(source: &Path) -> Result<Vec<Vec<f32>>> {
         std::process::id(),
         now_ms()
     ));
-    let output = ffmpeg_command(&ffmpeg)
+    let output = bgm_core::process::quiet_command(&ffmpeg)
         .args(["-hide_banner", "-nostdin", "-y", "-i"])
         .arg(source)
         .args([
@@ -1032,18 +1032,6 @@ fn read_decoded(path: &Path) -> Result<Vec<Vec<f32>>> {
         bail!("音频解码失败：解码结果长度与文件大小不一致");
     }
     Ok(vec![left, right])
-}
-
-fn ffmpeg_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    command.stdout(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
 }
 
 fn stderr_tail(bytes: &[u8]) -> String {
@@ -1604,19 +1592,13 @@ fn execute_job(job: &WorkerJob) -> Result<u32> {
 
 fn run_worker_process(job_path: &Path) -> Result<std::process::Output> {
     let exe = std::env::current_exe().context("无法定位应用可执行文件")?;
-    let mut command = Command::new(&exe);
+    let mut command = bgm_core::process::command(&exe);
     command
         .arg(WORKER_ARG)
         .arg(job_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     command
         .output()
         .with_context(|| format!("无法启动人声分离子进程：{}", exe.display()))
@@ -1756,7 +1738,7 @@ mod tests {
 
         let asr_wav = temp.path().join("vocals-16k.wav");
         let ffmpeg = ffmpeg_path().expect("需要 ffmpeg");
-        let status = ffmpeg_command(&ffmpeg)
+        let status = bgm_core::process::quiet_command(&ffmpeg)
             .args(["-hide_banner", "-nostdin", "-y", "-i"])
             .arg(&vocals_path)
             .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])

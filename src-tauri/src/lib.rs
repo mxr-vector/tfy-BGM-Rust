@@ -8,6 +8,7 @@ mod library_root;
 mod library_watch;
 mod lyrics;
 mod models;
+mod platform;
 mod separation;
 mod settings;
 mod state;
@@ -34,7 +35,7 @@ pub fn run() {
     // GPU 加速只能在创建 WebView 之前决定，因此先按偏好设置渲染后端开关。
     let mut context = tauri::generate_context!();
     let gpu_acceleration = settings::startup_gpu_acceleration(&context.config().identifier);
-    desktop::apply_gpu_acceleration(&mut context, gpu_acceleration);
+    platform::apply_gpu_acceleration(&mut context, gpu_acceleration);
 
     tauri::Builder::default()
         // WebView 只有在获得麦克风权限后才会暴露完整的输出设备列表。
@@ -50,7 +51,7 @@ pub fn run() {
         .setup(|app| {
             // Linux 的 WebKitGTK 无法通过 asset:// 播放视频，先启动本地 Range 媒体服务，
             // 再初始化偏好，确保首屏恢复的自定义视频壁纸也能拿到 HTTP 地址。
-            app.manage(wallpapers::WallpaperMediaServer::start());
+            app.manage(platform::WallpaperMediaServer::start());
             let state = AppState::initialize(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title(&state.window_title());

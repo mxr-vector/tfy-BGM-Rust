@@ -226,7 +226,7 @@ fn ffmpeg_candidates() -> Vec<PathBuf> {
     if let Some(raw) = std::env::var_os("TFY_FFMPEG") {
         let path = PathBuf::from(raw);
         candidates.push(if path.is_dir() {
-            path.join(ffmpeg_program())
+            path.join(crate::process::FFMPEG)
         } else {
             path
         });
@@ -235,18 +235,10 @@ fn ffmpeg_candidates() -> Vec<PathBuf> {
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
     {
-        candidates.push(dir.join(ffmpeg_program()));
+        candidates.push(dir.join(crate::process::FFMPEG));
     }
-    candidates.push(PathBuf::from(ffmpeg_program()));
+    candidates.push(PathBuf::from(crate::process::FFMPEG));
     candidates
-}
-
-fn ffmpeg_program() -> &'static str {
-    if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    }
 }
 
 fn can_run(program: &Path) -> bool {
@@ -259,15 +251,7 @@ fn can_run(program: &Path) -> bool {
 }
 
 fn build_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // 绿色版不弹控制台窗口。
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
+    crate::process::command(program)
 }
 
 fn tail(bytes: &[u8]) -> String {

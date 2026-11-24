@@ -22,10 +22,11 @@ use crate::desktop::{self, DesktopState};
 use crate::fonts;
 use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, LyricsState};
 use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
+use crate::platform::WallpaperMediaServer;
 use crate::separation::{self, SeparationCatalog};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::subtitles;
-use crate::wallpapers::{self, WallpaperAsset, WallpaperMediaServer, WallpaperPick};
+use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -161,7 +162,8 @@ pub fn builtin_wallpapers(app: AppHandle) -> Vec<WallpaperAsset> {
     wallpapers::builtin_catalog(&app)
 }
 
-/// Linux 视频壁纸的本地 HTTP 地址；其它平台继续使用 asset 协议。
+/// 视频壁纸的本地播放地址：Linux 返回本机 HTTP 流，其它平台返回 `None`，
+/// 前端据此退回 `asset://` 协议。
 #[tauri::command]
 pub fn wallpaper_media_url(
     media: State<'_, WallpaperMediaServer>,
@@ -171,18 +173,7 @@ pub fn wallpaper_media_url(
     if wallpapers::kind_of(path) != "video" || !wallpapers::is_supported(path) {
         return Err("仅支持 MP4 视频壁纸".to_owned());
     }
-    #[cfg(target_os = "linux")]
-    {
-        media
-            .url_for(path)
-            .map(Some)
-            .ok_or_else(|| "视频壁纸服务不可用或文件尚未授权".to_owned())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (media, path);
-        Ok(None)
-    }
+    media.url_for(path).map_err(describe)
 }
 
 /// 选择本地自定义壁纸，只接受 jpg / png / webp / mp4。

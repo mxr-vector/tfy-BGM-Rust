@@ -23,6 +23,7 @@ use tauri::{
 };
 
 use crate::desktop::DesktopState;
+use crate::platform::is_native_wayland;
 use crate::state::AppState;
 
 /// 歌词窗口 label；需与 `capabilities/default.json` 中的 windows 列表一致。
@@ -45,21 +46,6 @@ const LYRICS_SETTINGS_WIDTH: f64 = 380.0;
 const LYRICS_SETTINGS_HEIGHT: f64 = 460.0;
 /// 设置悬浮窗与歌词条之间的间距。
 const LYRICS_SETTINGS_GAP: f64 = 8.0;
-
-/// 是否运行在原生 Wayland 后端；XWayland 仍走普通窗口逻辑。
-#[cfg(target_os = "linux")]
-fn is_native_wayland() -> bool {
-    let has_wayland_display =
-        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
-    let backend = std::env::var("GDK_BACKEND").unwrap_or_default();
-    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    has_wayland_display && backend != "x11" && (backend == "wayland" || session == "wayland")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_native_wayland() -> bool {
-    false
-}
 
 /// 窗口默认 / 允许的**逻辑像素**尺寸；与前端 `LYRICS_SIZE_LIMITS` 保持一致。
 pub const LYRICS_DEFAULT_WIDTH: f64 = 760.0;

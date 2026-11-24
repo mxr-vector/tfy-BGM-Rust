@@ -1,15 +1,12 @@
-//! 桌面集成：开机自动启动、最小化到托盘与 GPU 加速开关。
+//! 桌面集成：托盘图标与最小化行为。
 //!
-//! 这三项都属于「基本系统配置 · 常规」，偏好保存在 `prefs.json`：
-//! - 开机自动启动：Windows 写注册表 Run 项，Linux 写 `~/.config/autostart`，
-//!   macOS 写 LaunchAgent；开关立即生效，不需要重启应用；
+//! 开机自动启动与 GPU 渲染后端属于平台专有逻辑，分别由
+//! `platform::set_autostart` 与 `platform::apply_gpu_acceleration` 提供，
+//! 本模块只负责托管托盘状态与窗口事件：
 //! - 最小化托盘：启用后窗口最小化或系统关闭（Alt+F4 / 任务栏）时隐藏到托盘，
 //!   托盘图标左键恢复窗口；
-//! - GPU 加速：WebView 的渲染后端只能在创建前确定，因此开关写盘后需要重启应用，
-//!   启动阶段由 [`apply_gpu_acceleration`] 读取并注入对应的环境变量。
+//! - 窗口销毁：主窗口真正关闭时一并关闭歌词浮窗，让进程正常退出。
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +16,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Manager, WindowEvent};
 
 const TRAY_ID: &str = "tfy-bgm-tray";
-const AUTOSTART_KEY: &str = "tfy-bgm";
 
 /// 桌面集成的运行时开关，由偏好写入，窗口事件与托盘回调读取。
 pub struct DesktopState {
@@ -52,21 +48,8 @@ impl DesktopState {
     }
 }
 
-/// 当前操作系统标识，随 `bootstrap` 下发，界面据此显示平台特有配置。
-pub fn platform() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "other"
-    }
-}
-
 /// 应用启动时应用一次桌面集成配置：注册窗口事件、按需创建托盘图标，
-/// 并把注册表 / autostart 文件里的入口与偏好对齐（可执行文件路径变化后自动更新）。
+/// 并把开机启动入口与偏好对齐（可执行文件路径变化后自动更新）。
 pub fn install(app: &AppHandle, autostart: bool, minimize_to_tray: bool) -> Result<()> {
     attach_window_events(app);
     let tray = sync_tray(app, minimize_to_tray);
@@ -76,7 +59,7 @@ pub fn install(app: &AppHandle, autostart: bool, minimize_to_tray: bool) -> Resu
             .minimize_to_tray
             .store(false, Ordering::Relaxed);
     }
-    tray.and(set_autostart(autostart))
+    tray.and(crate::platform::set_autostart(autostart))
 }
 
 /// 界面保存「常规」设置后调用；任一步失败都会回滚托盘状态，避免界面显示与实际行为不一致。
@@ -97,7 +80,7 @@ pub fn apply(
         rollback_tray(app, state, previous);
         return Err(error);
     }
-    if let Err(error) = set_autostart(autostart) {
+    if let Err(error) = crate::platform::set_autostart(autostart) {
         rollback_tray(app, state, previous);
         return Err(error);
     }
@@ -222,133 +205,4 @@ fn show_main_window(app: &AppHandle) {
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_focus();
-}
-
-// ---------------- 开机自动启动 ----------------
-
-fn set_autostart(enabled: bool) -> Result<()> {
-    let exe = std::env::current_exe().context("无法定位应用可执行文件")?;
-    platform_autostart(enabled, &exe)
-}
-
-#[cfg(windows)]
-fn platform_autostart(enabled: bool, exe: &std::path::Path) -> Result<()> {
-    use windows_registry::CURRENT_USER;
-
-    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let key = CURRENT_USER
-        .create(RUN_KEY)
-        .map_err(|error| anyhow::anyhow!("无法打开开机启动注册表项：{error}"))?;
-    if enabled {
-        let command = format!("\"{}\"", exe.display());
-        key.set_string(AUTOSTART_KEY, command)
-            .map_err(|error| anyhow::anyhow!("写入开机启动注册表项失败：{error}"))?;
-    } else {
-        // 值不存在时删除会返回错误，直接忽略。
-        let _ = key.remove_value(AUTOSTART_KEY);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn platform_autostart(enabled: bool, exe: &std::path::Path) -> Result<()> {
-    let path = autostart_dir()
-        .context("无法定位 autostart 目录：缺少 XDG_CONFIG_HOME 与 HOME")?
-        .join(format!("{AUTOSTART_KEY}.desktop"));
-    if !enabled {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => anyhow::bail!("关闭开机自动启动失败：{error}"),
-        };
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).context("创建 autostart 目录失败")?;
-    }
-    let content = format!(
-        "[Desktop Entry]\nType=Application\nName=听风吟 · BGM\nExec=\"{}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-        exe.display()
-    );
-    std::fs::write(&path, content).context("写入 autostart 桌面项失败")
-}
-
-#[cfg(target_os = "macos")]
-fn platform_autostart(enabled: bool, exe: &std::path::Path) -> Result<()> {
-    let path = launch_agent_path().context("无法定位 LaunchAgents 目录")?;
-    if !enabled {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => anyhow::bail!("关闭开机自动启动失败：{error}"),
-        };
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).context("创建 LaunchAgents 目录失败")?;
-    }
-    let content = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.yuanjie.tfybgm</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>{}</string>\n  </array>\n  <key>RunAtLoad</key>\n  <true/>\n</dict>\n</plist>\n",
-        exe.display()
-    );
-    std::fs::write(&path, content).context("写入 LaunchAgent 文件失败")
-}
-
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn platform_autostart(_enabled: bool, _exe: &std::path::Path) -> Result<()> {
-    anyhow::bail!("当前平台不支持开机自动启动")
-}
-
-#[cfg(target_os = "linux")]
-fn autostart_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|base| base.join("autostart"))
-}
-
-#[cfg(target_os = "macos")]
-fn launch_agent_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/LaunchAgents"))
-        .map(|dir| dir.join("com.yuanjie.tfybgm.plist"))
-}
-
-// ---------------- GPU 加速 ----------------
-
-/// 在创建 WebView 之前设置渲染后端开关；关闭加速时向窗口配置追加对应参数。
-///
-/// wry 创建 WebView2 环境时总会显式写入 additional browser arguments，环境变量会被忽略，
-/// 因此这里改的是 `Context` 里的窗口配置（必须发生在 `Builder::run` 之前）。
-pub fn apply_gpu_acceleration<R: tauri::Runtime>(context: &mut tauri::Context<R>, enabled: bool) {
-    #[cfg(windows)]
-    {
-        if enabled {
-            return;
-        }
-        // wry 的默认参数；显式写入 additionalBrowserArgs 后需要一并保留。
-        const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
-        for window in context.config_mut().app.windows.iter_mut() {
-            let args = window
-                .additional_browser_args
-                .get_or_insert_with(|| DEFAULT_ARGS.to_owned());
-            if args.contains("--disable-gpu") {
-                continue;
-            }
-            if !args.is_empty() {
-                args.push(' ');
-            }
-            args.push_str("--disable-gpu");
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = context;
-        if !enabled {
-            unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = context;
-        let _ = enabled;
-    }
 }

@@ -12,6 +12,7 @@ pub mod ops;
 pub mod paths;
 pub mod persist;
 pub mod prefs;
+pub mod process;
 pub mod schedule;
 pub mod tags;
 
