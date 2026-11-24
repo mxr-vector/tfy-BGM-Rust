@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { closeModal, modalState } from '@/lib/modal';
+import AppSelect from './AppSelect.vue';
 import Icon from './Icon.vue';
 
 const values = reactive<Record<string, string>>({});
@@ -32,7 +33,9 @@ watch(
     }
 
     await nextTick();
-    const first = panel.value?.querySelector<HTMLElement>('input, select');
+    const first = panel.value?.querySelector<HTMLElement>(
+      'input:not([type="hidden"]), .app-select-trigger',
+    );
     if (first) {
       first.focus();
       if (first instanceof HTMLInputElement) first.select();
@@ -61,6 +64,8 @@ function submit(): void {
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape' || !modalState.current) return;
+  // 下拉已 Teleport 到弹窗外，Esc 先交给下拉关闭，避免连同整个弹窗一起退出。
+  if (event.target instanceof Element && event.target.closest('.app-dropdown')) return;
   event.preventDefault();
   event.stopPropagation();
   closeModal(null);
@@ -106,20 +111,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown, true));
               class="modal-field"
             >
               <span class="modal-label">{{ field.label }}</span>
-              <select
+              <AppSelect
                 v-if="field.type === 'select'"
                 v-model="values[field.name]"
                 class="modal-select"
                 :name="field.name"
-              >
-                <option
-                  v-for="option in field.options ?? []"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
+                :label="field.label"
+                :options="field.options ?? []"
+              />
               <input
                 v-else-if="field.type === 'color'"
                 v-model="values[field.name]"

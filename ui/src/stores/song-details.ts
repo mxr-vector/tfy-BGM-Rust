@@ -15,3 +15,8 @@ export function openSongDetails(tab: SongDetailsTab = 'details'): void {
 export function closeSongDetails(): void {
   songDetailsOpen.value = false;
 }
+
+export function toggleSongDetails(): void {
+  if (!state.currentSong) return;
+  songDetailsOpen.value = !songDetailsOpen.value;
+}

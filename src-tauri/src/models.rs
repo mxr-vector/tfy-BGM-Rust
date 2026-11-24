@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -330,6 +330,86 @@ pub fn scan(root: &Path) -> (Vec<AsrModel>, Vec<String>) {
     (models, warnings)
 }
 
+/// 按扫描结果删除模型，绝不直接信任调用方传入的路径。
+///
+/// 目录模型连同 tokenizer 等附属文件一起删除；根目录下的单文件模型只删除该文件。
+/// 额外做 canonical 路径校验，防止模型目录或目标文件被替换为指向外部的符号链接。
+pub fn delete_scanned_model(root: &Path, id: &str) -> Result<String> {
+    let (model, target) = resolve_scanned_model(root, id)?;
+    delete_model_files(&model, &target)?;
+    Ok(model.path)
+}
+
+/// 解析并校验删除目标；与真正删除分开，便于运行时先卸载再移除文件。
+fn resolve_scanned_model(root: &Path, id: &str) -> Result<(AsrModel, PathBuf)> {
+    let (models, _) = scan(root);
+    let model = models
+        .into_iter()
+        .find(|model| model.id == id)
+        .ok_or_else(|| anyhow!("模型不存在或已被删除：{id}"))?;
+    let canonical_root =
+        fs::canonicalize(root).with_context(|| format!("模型目录不存在：{}", root.display()))?;
+    let target = if model.id.starts_with("file:") {
+        root.join(&model.files[0])
+    } else {
+        PathBuf::from(&model.path)
+    };
+    let canonical_target =
+        fs::canonicalize(&target).with_context(|| format!("模型不存在：{}", target.display()))?;
+    if canonical_target == canonical_root || !canonical_target.starts_with(&canonical_root) {
+        bail!("模型必须位于当前模型目录下：{}", root.display());
+    }
+    Ok((model, target))
+}
+
+fn delete_model_files(model: &AsrModel, target: &Path) -> Result<()> {
+    if model.id.starts_with("file:") {
+        fs::remove_file(target)
+            .with_context(|| format!("删除模型文件失败：{}", target.display()))?;
+    } else {
+        fs::remove_dir_all(target)
+            .with_context(|| format!("删除模型目录失败：{}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// 删除前记录模型文件清单；失败时据此判断能否安全恢复已卸载的模型句柄。
+fn snapshot_model_files(model: &AsrModel, target: &Path) -> Result<BTreeMap<PathBuf, u64>> {
+    let mut files = BTreeMap::new();
+    if model.id.starts_with("file:") {
+        let metadata = fs::metadata(target)
+            .with_context(|| format!("无法读取模型文件：{}", target.display()))?;
+        if !metadata.is_file() {
+            bail!("模型目标不是文件：{}", target.display());
+        }
+        files.insert(target.to_path_buf(), metadata.len());
+    } else {
+        collect_file_sizes(target, &mut files)?;
+    }
+    Ok(files)
+}
+
+fn collect_file_sizes(dir: &Path, files: &mut BTreeMap<PathBuf, u64>) -> Result<()> {
+    let entries =
+        fs::read_dir(dir).with_context(|| format!("无法读取模型目录：{}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("无法读取模型目录项：{}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("无法读取模型文件类型：{}", path.display()))?;
+        if file_type.is_dir() {
+            collect_file_sizes(&path, files)?;
+        } else {
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("无法读取模型文件：{}", path.display()))?;
+            files.insert(path, metadata.len());
+        }
+    }
+    Ok(())
+}
+
 /// 默认模型的安装状态；目录存在但构件不全时同样视为未安装，下载会续传缺失文件。
 pub fn default_model(root: &Path) -> DefaultModel {
     let dir = root.join(DEFAULT_MODEL_NAME);
@@ -357,6 +437,12 @@ pub struct ModelRuntime {
     cancelled: Arc<AtomicBool>,
     /// 同一时刻只允许一个加载任务，防止下载完成后的自动加载与手动加载重复触发。
     loading: Arc<AtomicBool>,
+    /// 删除任务进行中；阻止新的加载 / 下载与正在删除的模型竞争。
+    deleting: Arc<AtomicBool>,
+    /// 加载、下载与删除共享的状态切换锁，避免检查和设置任务标志之间发生竞态。
+    operation: Arc<Mutex<()>>,
+    /// 正在使用已加载模型的 ASR / 字幕任务数；删除、释放或重新加载前必须协调。
+    inference_tasks: Arc<AtomicUsize>,
     /// 最近一次加载状态，供 `ModelsInfo` 与状态事件读取。
     status: Arc<Mutex<ModelLoadStatus>>,
 }
@@ -366,10 +452,30 @@ struct Loaded {
     recognizer: OfflineRecognizer,
 }
 
+/// ASR 推理或字幕生成任务对当前模型的占用；`Drop` 时自动释放。
+pub struct ModelTaskGuard {
+    tasks: Arc<AtomicUsize>,
+}
+
+impl Drop for ModelTaskGuard {
+    fn drop(&mut self) {
+        self.tasks.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// `Drop` 时复位加载标志；即使 `load_inner` panic，后续加载也不会被永久拒绝。
 struct LoadFlag<'a>(&'a AtomicBool);
 
 impl Drop for LoadFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// `Drop` 时复位删除标志，文件删除失败也不会永久阻止后续加载。
+struct DeleteFlag<'a>(&'a AtomicBool);
+
+impl Drop for DeleteFlag<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -413,12 +519,37 @@ impl ModelRuntime {
         self.loading.load(Ordering::SeqCst)
     }
 
-    pub fn unload(&self) -> bool {
+    /// 登记一次模型任务占用，阻止删除、释放或重新加载与任务竞争。
+    pub fn reserve_model_task(&self) -> Result<ModelTaskGuard> {
+        let _operation = self.operation.lock();
+        if self.loading.load(Ordering::SeqCst) {
+            bail!("模型正在加载中，请等待加载完成后再识别");
+        }
+        if self.deleting.load(Ordering::SeqCst) {
+            bail!("模型正在删除中，请稍后再识别");
+        }
+        self.inference_tasks.fetch_add(1, Ordering::SeqCst);
+        Ok(ModelTaskGuard {
+            tasks: Arc::clone(&self.inference_tasks),
+        })
+    }
+
+    pub fn unload(&self) -> Result<bool> {
+        let _operation = self.operation.lock();
+        if self.loading.load(Ordering::SeqCst) {
+            bail!("模型正在加载中，请等待加载完成后再释放");
+        }
+        if self.deleting.load(Ordering::SeqCst) {
+            bail!("模型正在删除中，请稍后再释放");
+        }
+        if self.inference_tasks.load(Ordering::SeqCst) > 0 {
+            bail!("ASR 识别或字幕生成正在进行，请等待完成后再释放模型");
+        }
         let removed = self.loaded.lock().take().is_some();
         if removed {
             self.set_load_status(ModelLoadStatus::default());
         }
-        removed
+        Ok(removed)
     }
 
     /// 请求中断正在进行的下载；返回是否有下载任务在运行。
@@ -436,12 +567,21 @@ impl ModelRuntime {
     /// 全程维护 `loading` 原子标志与 `status` 状态：并发的第二个加载请求直接被拒绝，
     /// 成功 / 失败都会写入可展示的状态（失败保留完整错误链），供界面重试。
     pub fn load(&self, root: &Path, dir: &Path) -> Result<LoadedModel> {
-        if self
-            .loading
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
         {
-            bail!("已有模型加载任务正在进行");
+            let _operation = self.operation.lock();
+            if self.deleting.load(Ordering::SeqCst) {
+                bail!("模型正在删除中，请稍后再加载");
+            }
+            if self.inference_tasks.load(Ordering::SeqCst) > 0 {
+                bail!("ASR 识别或字幕生成正在进行，请等待完成后再加载模型");
+            }
+            if self
+                .loading
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                bail!("已有模型加载任务正在进行");
+            }
         }
         // 抢占成功后由 guard 负责复位，正常返回与 panic 展开都会释放标志。
         let _flag = LoadFlag(&self.loading);
@@ -506,6 +646,7 @@ impl ModelRuntime {
     /// 只在取模型句柄时短暂持锁，解码在锁外进行，避免识别期间阻塞
     /// `models_info` / 加载 / 释放等命令。
     pub fn transcribe(&self, wav: &Path) -> Result<String> {
+        let _model_task = self.reserve_model_task()?;
         let loaded = {
             let guard = self.loaded.lock();
             guard.as_ref().cloned()
@@ -543,6 +684,7 @@ impl ModelRuntime {
     ) -> Result<Vec<crate::subtitles::SubtitleSegment>> {
         use crate::subtitles::SubtitleSegment;
 
+        let _model_task = self.reserve_model_task()?;
         let loaded = {
             let guard = self.loaded.lock();
             guard.as_ref().cloned()
@@ -591,16 +733,89 @@ impl ModelRuntime {
         Ok(segments)
     }
 
+    /// 删除当前模型目录中扫描到的指定 ASR 模型；已加载时自动释放并卸载。
+    pub fn remove(&self, root: &Path, id: &str) -> Result<String> {
+        self.remove_with(root, id, delete_model_files)
+    }
+
+    fn remove_with(
+        &self,
+        root: &Path,
+        id: &str,
+        delete: impl FnOnce(&AsrModel, &Path) -> Result<()>,
+    ) -> Result<String> {
+        let _operation = self.operation.lock();
+        if self.loading.load(Ordering::SeqCst) {
+            bail!("模型正在加载中，请等待加载完成后再删除");
+        }
+        if self.downloading.load(Ordering::SeqCst) {
+            bail!("模型正在下载中，请等待下载完成后再删除");
+        }
+        if self.inference_tasks.load(Ordering::SeqCst) > 0 {
+            bail!("ASR 识别或字幕生成正在进行，请等待完成后再删除模型");
+        }
+        if self.deleting.swap(true, Ordering::SeqCst) {
+            bail!("已有模型删除任务正在进行");
+        }
+        let _flag = DeleteFlag(&self.deleting);
+        // 先校验目标并记录文件清单，避免无效 id 或删除失败破坏当前模型状态。
+        let (model, target) = resolve_scanned_model(root, id)?;
+        let files_before = snapshot_model_files(&model, &target)?;
+        let previous_loaded = self.loaded.lock().as_ref().cloned();
+        let previous_status = self.load_status();
+        let matches_loaded = previous_loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.model.path == model.path);
+        let unloaded = matches_loaded && self.loaded.lock().take().is_some();
+        let status_matches = previous_status.path.as_deref() == Some(model.path.as_str());
+        if unloaded || status_matches {
+            self.set_load_status(ModelLoadStatus::default());
+        }
+
+        if let Err(error) = delete(&model, &target) {
+            let intact =
+                snapshot_model_files(&model, &target).is_ok_and(|current| current == files_before);
+            if intact {
+                if matches_loaded {
+                    *self.loaded.lock() = previous_loaded;
+                }
+                if unloaded || status_matches {
+                    self.set_load_status(previous_status);
+                }
+            } else if unloaded || status_matches {
+                self.set_load_status(ModelLoadStatus {
+                    phase: LoadPhase::Failed,
+                    path: Some(model.path.clone()),
+                    error: Some(format!("模型文件已部分删除，需重新下载后再加载：{error:#}")),
+                });
+            }
+            return Err(error);
+        }
+
+        let path = model.path;
+        // 删除失败加载记录的指向，避免状态条继续提示重试一个已经不存在的模型。
+        if self.load_status().path.as_deref() == Some(path.as_str()) {
+            self.set_load_status(ModelLoadStatus::default());
+        }
+        Ok(path)
+    }
+
     /// 下载默认模型（0.6B-int8）；同一时间只允许一个下载任务。
     pub fn download(&self, app: &AppHandle, root: &Path, url: &str) -> Result<()> {
         // 先清掉上一次的取消标记，再抢下载标志，避免取消请求把新任务立刻中断。
         self.cancelled.store(false, Ordering::SeqCst);
-        if self
-            .downloading
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
         {
-            bail!("已有模型下载任务正在进行");
+            let _operation = self.operation.lock();
+            if self.deleting.load(Ordering::SeqCst) {
+                bail!("模型正在删除中，请稍后再下载");
+            }
+            if self
+                .downloading
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                bail!("已有模型下载任务正在进行");
+            }
         }
         let result = download_files(app, root, url, &self.cancelled);
         self.downloading.store(false, Ordering::SeqCst);
@@ -1258,6 +1473,131 @@ mod tests {
         assert!(!single.loadable);
         // 单文件模型不逐项提示缺失构件，界面按「不支持加载」处理。
         assert!(single.missing.is_empty());
+    }
+
+    #[test]
+    fn delete_scanned_model_removes_directory_and_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("custom-model");
+        fs::create_dir_all(model.join("tokenizer")).unwrap();
+        fs::write(model.join("encoder.int8.onnx"), b"x").unwrap();
+        fs::write(model.join("tokenizer/vocab.json"), b"{}").unwrap();
+        fs::write(dir.path().join("keep.onnx"), b"keep").unwrap();
+
+        delete_scanned_model(dir.path(), "custom-model").unwrap();
+        assert!(!model.exists());
+        assert!(dir.path().join("keep.onnx").exists());
+    }
+
+    #[test]
+    fn delete_scanned_model_removes_only_root_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("single.onnx"), b"x").unwrap();
+        fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+
+        delete_scanned_model(dir.path(), "file:single").unwrap();
+        assert!(!dir.path().join("single.onnx").exists());
+        assert!(dir.path().join("keep.txt").exists());
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn delete_scanned_model_rejects_unknown_or_outside_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("single.onnx"), b"x").unwrap();
+        assert!(delete_scanned_model(dir.path(), "../outside").is_err());
+        assert!(delete_scanned_model(dir.path(), "file:missing").is_err());
+        assert!(dir.path().join("single.onnx").exists());
+    }
+
+    #[test]
+    fn remove_rejects_loading_or_downloading_models() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("custom-model")).unwrap();
+        fs::write(dir.path().join("custom-model/encoder.int8.onnx"), b"x").unwrap();
+        let runtime = ModelRuntime::default();
+
+        runtime.loading.store(true, Ordering::SeqCst);
+        assert!(runtime.remove(dir.path(), "custom-model").is_err());
+        runtime.loading.store(false, Ordering::SeqCst);
+        runtime.downloading.store(true, Ordering::SeqCst);
+        assert!(runtime.remove(dir.path(), "custom-model").is_err());
+        runtime.downloading.store(false, Ordering::SeqCst);
+        assert!(dir.path().join("custom-model").exists());
+    }
+
+    #[test]
+    fn remove_rejects_active_model_tasks_and_recovers_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("custom-model");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("encoder.int8.onnx"), b"x").unwrap();
+        let runtime = ModelRuntime::default();
+
+        let task = runtime.reserve_model_task().unwrap();
+        assert!(runtime.remove(dir.path(), "custom-model").is_err());
+        assert!(runtime.unload().is_err());
+        assert!(runtime.load(dir.path(), &model).is_err());
+        assert!(model.exists());
+
+        drop(task);
+        runtime.remove(dir.path(), "custom-model").unwrap();
+        assert!(!model.exists());
+    }
+
+    #[test]
+    fn remove_failure_restores_status_when_files_are_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("custom-model");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("encoder.int8.onnx"), b"x").unwrap();
+        let runtime = ModelRuntime::default();
+        let path = model.to_string_lossy().into_owned();
+        runtime.set_load_status(ModelLoadStatus {
+            phase: LoadPhase::Failed,
+            path: Some(path.clone()),
+            error: Some("原始加载错误".to_owned()),
+        });
+
+        let error = runtime
+            .remove_with(dir.path(), "custom-model", |_, _| {
+                Err(anyhow!("模拟删除失败"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("模拟删除失败"));
+        assert!(model.exists());
+        let status = runtime.load_status();
+        assert_eq!(status.phase, LoadPhase::Failed);
+        assert_eq!(status.path.as_deref(), Some(path.as_str()));
+        assert_eq!(status.error.as_deref(), Some("原始加载错误"));
+    }
+
+    #[test]
+    fn remove_partial_failure_marks_model_as_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("custom-model");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("encoder.int8.onnx"), b"x").unwrap();
+        let runtime = ModelRuntime::default();
+        runtime.set_load_status(ModelLoadStatus {
+            phase: LoadPhase::Success,
+            path: Some(model.to_string_lossy().into_owned()),
+            error: None,
+        });
+
+        let error = runtime
+            .remove_with(dir.path(), "custom-model", |_, target| {
+                fs::remove_file(target.join("encoder.int8.onnx"))?;
+                Err(anyhow!("模拟部分删除失败"))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("模拟部分删除失败"));
+        assert!(!model.join("encoder.int8.onnx").exists());
+        let status = runtime.load_status();
+        assert_eq!(status.phase, LoadPhase::Failed);
+        assert!(status.error.unwrap().contains("模型文件已部分删除"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ export const COMMANDS = {
   deleteTracks: 'delete_tracks',
   builtinWallpapers: 'builtin_wallpapers',
   chooseWallpaperFile: 'choose_wallpaper_file',
+  wallpaperMediaUrl: 'wallpaper_media_url',
   apiInfo: 'api_info',
   apiEndpoints: 'api_endpoints',
   updateApiConfig: 'update_api_config',
@@ -41,6 +42,7 @@ export const COMMANDS = {
   downloadAsrModel: 'download_asr_model',
   loadAsrModel: 'load_asr_model',
   unloadAsrModel: 'unload_asr_model',
+  deleteAsrModel: 'delete_asr_model',
   cancelAsrDownload: 'cancel_asr_download',
   transcribeWav: 'transcribe_wav',
   separationModels: 'separation_models',
@@ -91,8 +93,8 @@ export const PLAY_MODES = {
 
 export const PLAY_MODE_CYCLE: readonly PlayMode[] = [
   PLAY_MODES.sequence,
-  PLAY_MODES.repeatOne,
   PLAY_MODES.shuffle,
+  PLAY_MODES.repeatOne,
 ];
 
 export const SORT_KEYS = {

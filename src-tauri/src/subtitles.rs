@@ -557,6 +557,8 @@ where
             AUDIO_EXTENSIONS.join(" / ")
         )
     })?;
+    // 从人声分离开始占用模型，避免删除或释放模型导致后半段字幕任务失败。
+    let _model_task = runtime.reserve_model_task()?;
     if runtime.loaded().is_none() {
         bail!("尚未加载 ASR 模型，请先在「设置 → 模型」中完成模型加载");
     }
@@ -1057,8 +1059,10 @@ mod tests {
         let srt = format_srt(&sample());
         assert_eq!(
             srt,
-            "1\n00:00:00,000 --> 00:00:10,000\n第一句歌词\n\n\
-             2\n00:00:10,000 --> 00:00:20,500\n第二句歌词\n\n"
+            concat!(
+                "1\n00:00:00,000 --> 00:00:10,000\n第一句歌词\n\n",
+                "2\n00:00:10,000 --> 00:00:20,500\n第二句歌词\n\n",
+            )
         );
     }
 

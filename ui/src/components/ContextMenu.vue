@@ -77,7 +77,7 @@ onBeforeUnmount(() => {
     <div
       v-if="contextMenuState.open"
       ref="menu"
-      class="context-menu"
+      class="context-menu app-menu-surface app-menu-list"
       role="menu"
       :style="{ left: `${contextMenuState.x}px`, top: `${contextMenuState.y}px` }"
       @click.stop
@@ -87,13 +87,13 @@ onBeforeUnmount(() => {
         <button
           v-else
           type="button"
-          class="context-menu-item"
+          class="app-menu-option context-menu-item"
           :class="{ 'is-danger': entry.danger }"
           role="menuitem"
           @click="activate(entry)"
         >
           <Icon v-if="entry.icon" :name="entry.icon" />
-          <span>{{ entry.label }}</span>
+          <span class="app-menu-option-label">{{ entry.label }}</span>
         </button>
       </template>
     </div>

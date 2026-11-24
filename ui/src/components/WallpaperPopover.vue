@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { useWindowState } from '@/composables/useWindowState';
+import { computed, ref, watch } from 'vue';
 import {
   availableWallpaperOptions,
   builtins,
@@ -16,13 +15,10 @@ import { assetUrl } from '@/lib/tauri';
 import { setWallpaper, setWallpaperBlur, setWallpaperFit, setWallpaperOpacity } from '@/stores/prefs';
 import { state } from '@/stores/state';
 import type { WallpaperAsset } from '@/lib/types';
+import AppDropdown from './AppDropdown.vue';
 import Icon from './Icon.vue';
 
-const panel = ref<HTMLElement | null>(null);
-const position = ref({ left: 12, top: 72 });
-const { viewportWidth, viewportHeight } = useWindowState();
 const customImageFailed = ref(false);
-let resizeObserver: ResizeObserver | null = null;
 
 const savedCustom = computed(() => state.prefs?.customWallpaper ?? null);
 const savedKind = computed(() => kindOf(savedCustom.value));
@@ -33,23 +29,6 @@ const builtinMap = computed(
 
 function assetFor(id: string): WallpaperAsset | undefined {
   return builtinMap.value.get(id);
-}
-
-function positionPanel(): void {
-  const anchor = popoverAnchor.value;
-  if (!anchor) return;
-  const rect = anchor.getBoundingClientRect();
-  const width = panel.value?.offsetWidth ?? 356;
-  const left = Math.min(
-    Math.max(12, rect.right - width),
-    viewportWidth.value - width - 12,
-  );
-  const height = panel.value?.offsetHeight ?? 0;
-  const maxTop = Math.max(12, viewportHeight.value - height - 12);
-  position.value = {
-    left: Math.max(12, left),
-    top: Math.min(Math.max(12, rect.bottom + 10), maxTop),
-  };
 }
 
 function selectWallpaper(id: string): void {
@@ -73,61 +52,24 @@ function onBlurInput(event: Event): void {
   setWallpaperBlur(Number((event.target as HTMLInputElement).value));
 }
 
-watch(
-  () => popoverOpen.value,
-  async (open) => {
-    resizeObserver?.disconnect();
-    if (!open) return;
-    customImageFailed.value = false;
-    await nextTick();
-    positionPanel();
-    if (!panel.value || typeof ResizeObserver === 'undefined') return;
-    resizeObserver ??= new ResizeObserver(() => {
-      if (popoverOpen.value) positionPanel();
-    });
-    resizeObserver.observe(panel.value);
-  },
-);
-
-watch([viewportWidth, viewportHeight], () => {
-  if (!popoverOpen.value) return;
-  void nextTick(positionPanel);
-});
-
-function onDocumentClick(): void {
-  if (popoverOpen.value) closeWallpaperPopover();
-}
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !popoverOpen.value) return;
-  event.stopPropagation();
-  closeWallpaperPopover();
-}
-
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick);
-  document.addEventListener('keydown', onKeydown, true);
-});
-
-onBeforeUnmount(() => {
-  resizeObserver?.disconnect();
-  document.removeEventListener('click', onDocumentClick);
-  document.removeEventListener('keydown', onKeydown, true);
+watch(popoverOpen, (open) => {
+  // 自定义预览图在每次重新打开时重置失败状态，避免沿用上一次的破图标记。
+  if (open) customImageFailed.value = false;
 });
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="popoverOpen"
-      ref="panel"
-      class="wallpaper-popover"
-      id="wallpaper-popover"
-      role="dialog"
-      aria-label="界面壁纸"
-      :style="{ left: `${position.left}px`, top: `${position.top}px` }"
-      @click.stop
-    >
+  <AppDropdown
+    :open="popoverOpen"
+    :anchor="popoverAnchor"
+    align="end"
+    :width="356"
+    panel-class="wallpaper-popover"
+    panel-id="wallpaper-popover"
+    role="dialog"
+    label="界面壁纸"
+    @close="closeWallpaperPopover"
+  >
       <div class="wallpaper-pop-head">
         <div class="wallpaper-pop-title">
           <strong>界面壁纸</strong>
@@ -297,6 +239,5 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-    </div>
-  </Teleport>
+  </AppDropdown>
 </template>

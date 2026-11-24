@@ -2,11 +2,14 @@
 import { computed } from 'vue';
 import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { playerConfig } from '@/lib/config';
+import { PLAY_MODES } from '@/lib/constants';
 import { clamp, formatTime, withAlpha } from '@/lib/format';
 import { audioState } from '@/stores/audio-engine';
-import { closeSongDetails } from '@/stores/song-details';
+import { toggleSongDetails } from '@/stores/song-details';
 import {
+  cyclePlayMode,
   formatRate,
+  modeMeta,
   nextTrack,
   playSong,
   prevTrack,
@@ -44,6 +47,7 @@ const isFavorite = computed(() =>
 );
 const rates = computed(() => playerConfig().rates);
 const currentRate = computed(() => state.prefs?.playbackRate ?? 1);
+const mode = computed(() => modeMeta(state.prefs?.playMode ?? PLAY_MODES.sequence));
 
 function onPlayClick(): void {
   if (!song.value) {
@@ -92,6 +96,18 @@ function onVolumeInput(event: Event): void {
 
     <div class="details-player-center">
       <div class="details-transport">
+        <button
+          type="button"
+          class="details-mode-btn"
+          :class="{
+            'is-active': (state.prefs?.playMode ?? PLAY_MODES.sequence) !== PLAY_MODES.sequence,
+          }"
+          :title="mode.title"
+          :aria-label="mode.title"
+          @click="cyclePlayMode"
+        >
+          <Icon :name="mode.icon" />
+        </button>
         <button type="button" title="上一首" @click="prevTrack()">
           <Icon name="skip-back" />
         </button>
@@ -157,7 +173,8 @@ function onVolumeInput(event: Event): void {
         class="is-active"
         title="收起歌曲详情"
         aria-label="收起歌曲详情"
-        @click="closeSongDetails"
+        aria-pressed="true"
+        @click="toggleSongDetails()"
       >
         <Icon name="music" />
       </button>
@@ -299,6 +316,11 @@ function onVolumeInput(event: Event): void {
 .details-transport .details-play-btn:hover {
   color: #04150e;
   background: linear-gradient(180deg, #a4ffdd, #25e79a);
+}
+
+.details-transport .details-mode-btn.is-active {
+  color: var(--accent-bright);
+  background: rgba(25, 217, 139, 0.12);
 }
 
 .details-transport .details-rate-btn {

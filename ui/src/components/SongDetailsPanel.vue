@@ -9,7 +9,6 @@ import { categoryById, state } from '@/stores/state';
 import Icon from './Icon.vue';
 import SongDetailsContent from './SongDetailsContent.vue';
 import SongDetailsPlayerBar from './SongDetailsPlayerBar.vue';
-import WindowControls from './WindowControls.vue';
 
 const { viewportHeight } = useWindowState();
 const closeButton = ref<HTMLButtonElement | null>(null);
@@ -39,9 +38,16 @@ const vinylStyle = computed(() => ({
 }));
 
 watch(songDetailsOpen, async (open) => {
-  if (!open) return;
   await nextTick();
-  closeButton.value?.focus();
+  if (open !== songDetailsOpen.value) return;
+  if (open) {
+    closeButton.value?.focus();
+    return;
+  }
+  document
+    .querySelector<HTMLElement>('#now-cover-icon')
+    ?.closest<HTMLElement>('[role="button"]')
+    ?.focus();
 });
 
 watch(
@@ -67,21 +73,24 @@ watch(
           ref="closeButton"
           type="button"
           class="details-collapse"
+          title="返回播放器"
+          aria-label="返回播放器"
           data-tauri-drag-region="false"
           @click="closeSongDetails"
         >
-          <span class="details-collapse-icon"><Icon name="win-restore" /></span>
+          <span class="details-collapse-icon"><Icon name="chevron-down" /></span>
           <span>收起播放页</span>
-          <Icon name="chevron-down" />
         </button>
-        <div class="details-topbar-actions" data-tauri-drag-region="false">
-          <button type="button" class="details-queue" @click="toggleDrawer">
-            <Icon name="list-music" />
-            <span>播放队列</span>
-            <strong>{{ queuePosition || '—' }} / {{ state.queue.length }}</strong>
-          </button>
-          <WindowControls id-prefix="details-win" />
-        </div>
+        <button
+          type="button"
+          class="details-queue"
+          data-tauri-drag-region="false"
+          @click="toggleDrawer"
+        >
+          <Icon name="list-music" />
+          <span>播放队列</span>
+          <strong>{{ queuePosition || '—' }} / {{ state.queue.length }}</strong>
+        </button>
       </header>
 
       <main class="song-details-main">
@@ -162,33 +171,41 @@ watch(
 }
 
 .details-collapse {
-  height: 35px;
-  padding: 0 12px 0 7px;
-  border: 1px solid rgba(255, 255, 255, 0.11);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.055);
+  height: 36px;
+  padding: 0 14px 0 6px;
+  gap: 8px;
+  border: 1px solid var(--details-accent-faint);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.song-details-topbar .details-collapse:hover {
+  border-color: color-mix(in srgb, var(--details-accent) 36%, transparent);
+  background: var(--details-accent-faint);
 }
 
 .details-collapse-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 23px;
-  height: 23px;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.07);
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: var(--details-accent);
+  background: color-mix(in srgb, var(--details-accent) 15%, transparent);
+  transition: transform 160ms ease, background-color 160ms ease;
+}
+
+.details-collapse:hover .details-collapse-icon {
+  transform: translateY(2px);
+  background: color-mix(in srgb, var(--details-accent) 24%, transparent);
 }
 
 .details-collapse [data-icon] {
-  width: 14px;
-  height: 14px;
-}
-
-.details-collapse > [data-icon]:last-child {
-  width: 12px;
-  height: 12px;
-  margin-left: 2px;
-  opacity: 0.55;
+  width: 15px;
+  height: 15px;
 }
 
 .details-queue {
@@ -207,16 +224,6 @@ watch(
   font-size: 10.5px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-}
-
-.details-topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.details-topbar-actions .window-controls {
-  margin-left: 3px;
 }
 
 .song-details-main {
@@ -526,9 +533,16 @@ watch(
 
 @media (prefers-reduced-motion: reduce) {
   .song-details-layer,
+  .details-collapse,
+  .details-collapse-icon,
   .details-vinyl-record,
   .details-playing-indicator i {
     animation: none;
+  }
+
+  .details-collapse,
+  .details-collapse-icon {
+    transition: none;
   }
 }
 </style>

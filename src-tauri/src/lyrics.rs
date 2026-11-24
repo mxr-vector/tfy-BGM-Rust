@@ -1,4 +1,4 @@
-//! 「桌面歌词」：独立透明始终置顶窗口 + 主窗口播放状态同步。
+//! 「桌面歌词」：独立透明悬浮窗口 + 主窗口播放状态同步。
 //!
 //! Rust 侧持有权威状态（开关与最新快照），负责创建 / 关闭歌词窗口；主窗口把
 //! 当前曲目、播放状态、进度与歌词行推给 Rust，Rust 广播给歌词窗口渲染。
@@ -6,7 +6,11 @@
 //!
 //! 置顶不是一次性的 builder 标志：全屏应用抢焦点、虚拟桌面切换都可能把 topmost
 //! 窗口降级。因此创建后二次确认、窗口失焦时重新声明，并暴露 `enforce_top_most`
-//! 供歌词窗口定时巡检，保证「始终处于最顶层」。
+//! 供歌词窗口定时巡检。
+//!
+//! Wayland 下不再使用 gtk-layer-shell：实测 WebKitGTK 在 layer surface 上不会提交
+//! 任何 buffer（窗口完全空白）。歌词窗与设置窗因此都是普通 xdg 窗口：内容能正常
+//! 渲染，但合成器不允许客户端定位或强制置顶，窗口位置与 Z 序由桌面环境决定。
 
 use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
@@ -41,6 +45,21 @@ const LYRICS_SETTINGS_WIDTH: f64 = 380.0;
 const LYRICS_SETTINGS_HEIGHT: f64 = 460.0;
 /// 设置悬浮窗与歌词条之间的间距。
 const LYRICS_SETTINGS_GAP: f64 = 8.0;
+
+/// 是否运行在原生 Wayland 后端；XWayland 仍走普通窗口逻辑。
+#[cfg(target_os = "linux")]
+fn is_native_wayland() -> bool {
+    let has_wayland_display =
+        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
+    let backend = std::env::var("GDK_BACKEND").unwrap_or_default();
+    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    has_wayland_display && backend != "x11" && (backend == "wayland" || session == "wayland")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_native_wayland() -> bool {
+    false
+}
 
 /// 窗口默认 / 允许的**逻辑像素**尺寸；与前端 `LYRICS_SIZE_LIMITS` 保持一致。
 pub const LYRICS_DEFAULT_WIDTH: f64 = 760.0;
@@ -324,6 +343,10 @@ fn place_settings(app: &AppHandle, settings: &WebviewWindow) -> Result<()> {
     let lyrics = app
         .get_webview_window(LYRICS_WINDOW_LABEL)
         .context("桌面歌词窗口尚未创建")?;
+    // Wayland 不允许客户端定位顶层窗口，位置交给合成器决定。
+    if is_native_wayland() {
+        return Ok(());
+    }
     let monitor = match lyrics.current_monitor()? {
         Some(monitor) => monitor,
         None => app
@@ -376,6 +399,10 @@ fn emit_hover(app: &AppHandle, hovered: bool) {
 /// 鼠标穿透开启后 WebView 收不到 `mousemove`，因此悬停检测必须在 Rust 侧
 /// 用系统光标位置完成：光标进入热区时临时取消穿透并广播 hover，前端显示
 /// 「解锁」入口；光标离开窗口一小段时间后恢复穿透。
+///
+/// Wayland 不允许客户端读取顶层窗口的全局位置，穿透后无法判断光标是否进入歌词条，
+/// 会导致「解锁」入口永远不出现。因此 Wayland 下不做鼠标穿透，锁定只隐藏背景 /
+/// 控件，仍可通过页面自身的悬停显示解锁按钮。
 pub fn set_lock(
     app: &AppHandle,
     state: &LyricsState,
@@ -413,10 +440,16 @@ pub fn set_lock(
     }
 
     if locked {
-        // 平台不支持穿透时保持正常交互即可，仍由轮询 + DOM 悬停兜底解锁。
-        let _ = window.set_ignore_cursor_events(true);
-        state.set_monitor_active(true);
-        start_lock_monitor(app.clone(), generation);
+        if is_native_wayland() {
+            // 普通 Wayland 窗口无法可靠定位，保持可交互，悬停由页面 DOM 兜底解锁。
+            state.set_monitor_active(false);
+            let _ = window.set_ignore_cursor_events(false);
+        } else {
+            // 平台不支持穿透时保持正常交互即可，仍由轮询 + DOM 悬停兜底解锁。
+            let _ = window.set_ignore_cursor_events(true);
+            state.set_monitor_active(true);
+            start_lock_monitor(app.clone(), generation);
+        }
     } else {
         state.set_monitor_active(false);
         let _ = window.set_ignore_cursor_events(false);
@@ -538,6 +571,8 @@ fn emit_control(app: &AppHandle, enabled: bool) {
 ///
 /// 全屏应用、虚拟桌面切换等场景可能把 topmost 窗口降级，歌词窗口会定时巡检调用，
 /// Rust 侧在窗口失焦时也会主动调用一次。仅调整 Z 序，不抢焦点、不改尺寸。
+///
+/// KDE Wayland 会忽略 keep-above 请求：窗口仍能正常显示歌词，只是不保证置顶。
 pub fn enforce_top_most(app: &AppHandle) -> bool {
     let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) else {
         return false;
@@ -607,6 +642,10 @@ pub fn place_at_bottom(app: &AppHandle, width: f64, height: f64) -> Result<()> {
     let window = app
         .get_webview_window(LYRICS_WINDOW_LABEL)
         .context("桌面歌词窗口尚未创建")?;
+    // Wayland 不允许客户端定位顶层窗口：位置由合成器决定，避免无效的 set_position。
+    if is_native_wayland() {
+        return Ok(());
+    }
     let monitor = match window.current_monitor()? {
         Some(monitor) => monitor,
         None => app
@@ -631,10 +670,10 @@ pub fn place_at_bottom(app: &AppHandle, width: f64, height: f64) -> Result<()> {
 }
 
 fn ensure_window(app: &AppHandle) -> Result<()> {
-    if app.get_webview_window(LYRICS_WINDOW_LABEL).is_some() {
-        // 不再无条件 show：可见性由页面加载完成回调保证，避免把尚未加载好的
-        // 空白窗口重新显示成一片看不见的点击拦截层。
+    if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
+        // 页面加载完成回调负责首次显示；这里只处理窗口已存在时的重复开启。
         enforce_top_most(app);
+        let _ = window.show();
         return Ok(());
     }
 
@@ -657,7 +696,7 @@ fn ensure_window(app: &AppHandle) -> Result<()> {
     .visible_on_all_workspaces(true)
     .skip_taskbar(true)
     .shadow(false)
-    // 创建时不抢焦点，也不立即显示：页面加载完成后再 show，避免空白窗口拦截点击。
+    // 不抢焦点；先隐藏创建，页面加载完成后再显示。
     .focused(false)
     .visible(false)
     .on_page_load(|window, payload| {
@@ -672,6 +711,7 @@ fn ensure_window(app: &AppHandle) -> Result<()> {
     .context("创建桌面歌词窗口失败")?;
 
     // 默认位置贴屏幕底部居中；页面恢复已保存尺寸时会再次校正位置。
+    // Wayland 下无法由客户端定位窗口，"贴底"一步会自动跳过。
     place_at_bottom(app, LYRICS_DEFAULT_WIDTH, LYRICS_DEFAULT_HEIGHT)?;
 
     // builder 的标志只是初始状态，创建后再确认一次，覆盖首次显示时的 Z 序竞争。

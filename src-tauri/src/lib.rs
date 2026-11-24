@@ -48,6 +48,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Linux 的 WebKitGTK 无法通过 asset:// 播放视频，先启动本地 Range 媒体服务，
+            // 再初始化偏好，确保首屏恢复的自定义视频壁纸也能拿到 HTTP 地址。
+            app.manage(wallpapers::WallpaperMediaServer::start());
             let state = AppState::initialize(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title(&state.window_title());
@@ -95,6 +98,7 @@ pub fn run() {
             commands::system_fonts,
             commands::builtin_wallpapers,
             commands::choose_wallpaper_file,
+            commands::wallpaper_media_url,
             commands::open_config_file,
             commands::save_prefs,
             commands::save_schedule,
@@ -111,6 +115,7 @@ pub fn run() {
             commands::download_asr_model,
             commands::load_asr_model,
             commands::unload_asr_model,
+            commands::delete_asr_model,
             commands::cancel_asr_download,
             commands::transcribe_wav,
             commands::separation_models,

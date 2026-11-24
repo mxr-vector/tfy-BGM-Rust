@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import {
   closePlayerPopover,
   playerPopover,
@@ -22,13 +22,12 @@ import {
   toggleOutputMute,
 } from '@/stores/outputs';
 import { state } from '@/stores/state';
+import AppDropdown from './AppDropdown.vue';
 import Icon from './Icon.vue';
 
 const open = computed(() => playerPopover.value === 'output');
 const rows = computed(() => outputRows.value);
 const crossfade = computed(() => state.prefs?.crossfadeSeconds ?? 0);
-const wrapper = ref<HTMLElement | null>(null);
-const panel = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 
 const CROSSFADE_OPTIONS = [0, 0.5, 1, 2, 3, 5] as const;
@@ -56,14 +55,11 @@ function toggleOpen(): void {
   void refreshDevices().then(() => applyOutputRoutes());
   void refreshApiInfo();
   void nextTick(() => {
-    panel.value?.querySelector<HTMLElement>('.output-row')?.focus();
+    document
+      .getElementById('output-popover')
+      ?.querySelector<HTMLElement>('.output-row')
+      ?.focus();
   });
-}
-
-function close(focusTrigger = false): void {
-  if (!open.value) return;
-  closePlayerPopover('output');
-  if (focusTrigger) trigger.value?.focus();
 }
 
 function onVolumeInput(deviceId: string, event: Event): void {
@@ -111,33 +107,10 @@ async function copyApiBase(): Promise<void> {
   }
 }
 
-function onDocumentClick(event: MouseEvent): void {
-  if (!open.value) return;
-  const target = event.target as Node | null;
-  if (target && wrapper.value?.contains(target)) return;
-  close();
-}
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !open.value) return;
-  event.preventDefault();
-  event.stopPropagation();
-  close(true);
-}
-
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick);
-  document.addEventListener('keydown', onKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocumentClick);
-  document.removeEventListener('keydown', onKeydown);
-});
 </script>
 
 <template>
-  <div ref="wrapper" class="output-wrap">
+  <div class="output-wrap">
     <button
       ref="trigger"
       type="button"
@@ -148,20 +121,25 @@ onBeforeUnmount(() => {
       aria-label="播放输出设置"
       aria-haspopup="dialog"
       :aria-expanded="open"
+      :aria-controls="open ? 'output-popover' : undefined"
       @click.stop="toggleOpen"
     >
       <Icon name="headphones" />
       <span v-if="activeCount > 1" class="output-badge" aria-hidden="true">{{ activeCount }}</span>
     </button>
 
-    <div
-      v-if="open"
-      ref="panel"
-      class="output-popover"
-      id="output-popover"
+    <AppDropdown
+      :open="open"
+      :anchor="trigger"
+      side="top"
+      align="end"
+      :width="328"
+      :max-height="520"
+      panel-class="output-popover"
+      panel-id="output-popover"
       role="dialog"
-      aria-label="播放输出设置"
-      @click.stop
+      label="播放输出设置"
+      @close="closePlayerPopover('output')"
     >
       <div class="output-pop-head">
         <div class="output-pop-title">
@@ -310,6 +288,6 @@ onBeforeUnmount(() => {
           }}
         </span>
       </div>
-    </div>
+    </AppDropdown>
   </div>
 </template>

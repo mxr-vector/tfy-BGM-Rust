@@ -185,8 +185,8 @@ export async function installDesktopLyrics(): Promise<void> {
   // 模型可用后恢复上次开启的桌面歌词（启动自动加载完成时同理会触发）；
   // 模型被卸载后开关自动关闭，避免出现「模型已卸载但开关仍显示开启」。
   watch(
-    desktopLyricsAvailable,
-    (available) => {
+    [desktopLyricsAvailable, () => state.prefs?.desktopLyricsEnabled],
+    ([available]) => {
       if (!available && desktopLyricsEnabled.value) {
         void setEnabled(false, false);
         return;

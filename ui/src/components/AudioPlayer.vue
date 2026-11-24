@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import {
   closePlayerPopover,
   playerPopover,
@@ -17,7 +17,7 @@ import {
   desktopLyricsHint,
   toggleDesktopLyrics,
 } from '@/stores/desktop-lyrics';
-import { openSongDetails } from '@/stores/song-details';
+import { songDetailsOpen, toggleSongDetails } from '@/stores/song-details';
 import { loopPointFor, openLoopEditor } from '@/stores/loops';
 import {
   cyclePlayMode,
@@ -39,6 +39,7 @@ import {
   togglePlay,
 } from '@/stores/player';
 import { categoryById, state, visibleSongs } from '@/stores/state';
+import AppDropdown from './AppDropdown.vue';
 import ExportSettingsPopover from './ExportSettingsPopover.vue';
 import Icon from './Icon.vue';
 import MarqueeText from './MarqueeText.vue';
@@ -186,29 +187,6 @@ function onRateMenuKeydown(event: KeyboardEvent): void {
   }
 }
 
-function onDocumentClick(event: MouseEvent): void {
-  if (!rateOpen.value) return;
-  const target = event.target as Node | null;
-  if (target && rateMenu.value?.contains(target)) return;
-  closeRateMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !rateOpen.value) return;
-  event.preventDefault();
-  event.stopPropagation();
-  closeRateMenu(true);
-}
-
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick);
-  document.addEventListener('keydown', onDocumentKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocumentClick);
-  document.removeEventListener('keydown', onDocumentKeydown);
-});
 </script>
 
 <template>
@@ -267,12 +245,15 @@ onBeforeUnmount(() => {
           <div class="track-cover" id="now-cover" :style="coverStyle">
             <div
               class="track-cover-hit"
-              :class="{ 'is-clickable': Boolean(song) }"
+              :class="{ 'is-clickable': Boolean(song), 'is-open': songDetailsOpen }"
               role="button"
               :tabindex="song ? 0 : -1"
-              :title="song ? '点击查看歌曲详情' : ''"
-              @click="openSongDetails()"
-              @keydown.enter.prevent="openSongDetails()"
+              :title="song ? (songDetailsOpen ? '收起歌曲详情' : '展开歌曲详情') : ''"
+              :aria-label="song ? (songDetailsOpen ? '收起歌曲详情' : '展开歌曲详情') : ''"
+              :aria-expanded="songDetailsOpen"
+              @click="toggleSongDetails()"
+              @keydown.enter.prevent="toggleSongDetails()"
+              @keydown.space.prevent="toggleSongDetails()"
             >
               <span class="cover-icon" id="now-cover-icon">
                 <Icon :name="song ? (category?.icon || 'music') : 'disc'" />
@@ -374,35 +355,45 @@ onBeforeUnmount(() => {
                 :title="`播放速度：${formatRate(currentRate)}，点击选择`"
                 aria-haspopup="listbox"
                 :aria-expanded="rateOpen"
+                :aria-controls="rateOpen ? 'rate-menu' : undefined"
                 @click.stop="toggleRateMenu"
               >
                 <span>{{ formatRate(currentRate) }}</span>
                 <Icon name="chevron-down" class="speed-caret" />
               </button>
-              <div
-                v-if="rateOpen"
-                ref="rateMenu"
-                class="rate-menu"
-                id="rate-menu"
-                role="listbox"
-                aria-label="播放速度"
-                @click.stop
-                @keydown="onRateMenuKeydown"
+              <AppDropdown
+                :open="rateOpen"
+                :anchor="rateButton"
+                side="top"
+                align="center"
+                :width="120"
+                :max-height="280"
+                label="播放速度"
+                @close="closeRateMenu"
               >
-                <button
-                  v-for="rate in rates"
-                  :key="rate"
-                  type="button"
-                  class="rate-item"
-                  :class="{ 'is-active': Math.abs(rate - currentRate) < 0.001 }"
-                  role="option"
-                  :aria-selected="Math.abs(rate - currentRate) < 0.001"
-                  @click="chooseRate(rate)"
+                <div
+                  id="rate-menu"
+                  ref="rateMenu"
+                  class="app-menu-list"
+                  role="listbox"
+                  aria-label="播放速度"
+                  @keydown="onRateMenuKeydown"
                 >
-                  <span>{{ formatRate(rate) }}</span>
-                  <Icon name="check" class="rate-check" />
-                </button>
-              </div>
+                  <button
+                    v-for="rate in rates"
+                    :key="rate"
+                    type="button"
+                    class="app-menu-option rate-item"
+                    :class="{ 'is-active': Math.abs(rate - currentRate) < 0.001 }"
+                    role="option"
+                    :aria-selected="Math.abs(rate - currentRate) < 0.001"
+                    @click="chooseRate(rate)"
+                  >
+                    <span class="app-menu-option-label">{{ formatRate(rate) }}</span>
+                    <Icon name="check" class="app-menu-check" />
+                  </button>
+                </div>
+              </AppDropdown>
             </div>
           </div>
           <div class="time-display">

@@ -25,7 +25,7 @@ use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
 use crate::separation::{self, SeparationCatalog};
 use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
 use crate::subtitles;
-use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
+use crate::wallpapers::{self, WallpaperAsset, WallpaperMediaServer, WallpaperPick};
 
 type CommandResult<T> = Result<T, String>;
 
@@ -159,6 +159,30 @@ pub async fn system_fonts() -> CommandResult<Vec<fonts::SystemFont>> {
 #[tauri::command]
 pub fn builtin_wallpapers(app: AppHandle) -> Vec<WallpaperAsset> {
     wallpapers::builtin_catalog(&app)
+}
+
+/// Linux 视频壁纸的本地 HTTP 地址；其它平台继续使用 asset 协议。
+#[tauri::command]
+pub fn wallpaper_media_url(
+    media: State<'_, WallpaperMediaServer>,
+    path: String,
+) -> CommandResult<Option<String>> {
+    let path = Path::new(&path);
+    if wallpapers::kind_of(path) != "video" || !wallpapers::is_supported(path) {
+        return Err("仅支持 MP4 视频壁纸".to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        media
+            .url_for(path)
+            .map(Some)
+            .ok_or_else(|| "视频壁纸服务不可用或文件尚未授权".to_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (media, path);
+        Ok(None)
+    }
 }
 
 /// 选择本地自定义壁纸，只接受 jpg / png / webp / mp4。
@@ -535,9 +559,31 @@ pub async fn unload_asr_model(
     if runtime.is_loading() {
         return Err("模型正在加载中，请等待加载完成后再释放".to_owned());
     }
-    runtime.unload();
+    runtime.unload().map_err(describe)?;
     // 显式释放表示下次启动不再自动恢复，否则「释放模型」只在本次进程内有效。
     state.remember_loaded_model(None);
+    emit_load_status(&app, &runtime.load_status());
+    Ok(state.models_info())
+}
+
+/// 删除指定 ASR 模型；若它正在内存中使用，先自动释放并卸载。
+#[tauri::command]
+pub async fn delete_asr_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<ModelsInfo> {
+    let runtime = state.model_runtime();
+    let root = state.models_root();
+    let task_runtime = runtime.clone();
+    let task_id = id.clone();
+    tauri::async_runtime::spawn_blocking(move || task_runtime.remove(&root, &task_id))
+        .await
+        .map_err(|error| format!("删除任务异常结束：{error}"))?
+        .map_err(describe)?;
+    if state.last_asr_model().as_deref() == Some(id.as_str()) {
+        state.remember_loaded_model(None);
+    }
     emit_load_status(&app, &runtime.load_status());
     Ok(state.models_info())
 }

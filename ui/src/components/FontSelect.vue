@@ -5,8 +5,9 @@
  * 并支持方向键、Home / End、Esc 与点击外部关闭。
  */
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, ref, useId, watch } from 'vue';
 import { resolveFontOption, type FontOption } from '@/lib/fonts';
+import AppDropdown from './AppDropdown.vue';
 import Icon from './Icon.vue';
 
 const props = defineProps<{
@@ -21,7 +22,7 @@ const emit = defineEmits<{
 
 const open = ref(false);
 const query = ref('');
-const wrap = ref<HTMLElement | null>(null);
+const panelId = useId();
 const menu = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const search = ref<HTMLInputElement | null>(null);
@@ -202,17 +203,6 @@ function clearQuery(): void {
   search.value?.focus();
 }
 
-function onDocumentClick(event: MouseEvent): void {
-  if (!open.value) return;
-  const target = event.target as Node | null;
-  if (target && wrap.value?.contains(target)) return;
-  closeMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (open.value && event.key === 'Escape') closeMenu(true);
-}
-
 watch(
   () => props.modelValue,
   () => closeMenu(),
@@ -225,26 +215,18 @@ watch(query, () => {
   });
 });
 
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick);
-  document.addEventListener('keydown', onDocumentKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocumentClick);
-  document.removeEventListener('keydown', onDocumentKeydown);
-});
 </script>
 
 <template>
-  <div ref="wrap" class="font-select">
+  <div class="font-select">
     <button
       ref="trigger"
       type="button"
-      class="font-select-trigger"
+      class="app-select-trigger font-select-trigger"
       :class="{ 'is-open': open }"
       aria-haspopup="listbox"
       :aria-expanded="open"
+      :aria-controls="open ? panelId : undefined"
       aria-label="字体选择"
       :title="current.label"
       @click.stop="toggleMenu"
@@ -257,7 +239,17 @@ onBeforeUnmount(() => {
       <Icon name="chevron-down" class="font-select-caret" />
     </button>
 
-    <div v-if="open" class="font-select-menu">
+    <AppDropdown
+      :open="open"
+      :anchor="trigger"
+      align="end"
+      :width="380"
+      :max-height="380"
+      role="dialog"
+      label="字体选择"
+      flex
+      @close="closeMenu"
+    >
       <div class="font-select-search">
         <Icon name="search" class="font-select-search-icon" />
         <input
@@ -286,6 +278,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div
+        :id="panelId"
         ref="menu"
         class="font-select-list"
         role="listbox"
@@ -296,7 +289,7 @@ onBeforeUnmount(() => {
           v-for="result in results"
           :key="result.option.id"
           type="button"
-          class="font-select-option"
+          class="app-menu-option font-select-option"
           :class="{ 'is-active': result.option.id === current.id }"
           role="option"
           :aria-selected="result.option.id === current.id"
@@ -319,7 +312,7 @@ onBeforeUnmount(() => {
           <span class="font-select-preview" :style="{ fontFamily: result.option.previewStack }">
             听风吟 BGM · 0123
           </span>
-          <Icon name="check" class="font-select-check" />
+          <Icon name="check" class="app-menu-check font-select-check" />
         </button>
         <p v-if="results.length === 0" class="font-select-empty">
           <template v-if="loading">正在读取系统字体…</template>
@@ -342,6 +335,6 @@ onBeforeUnmount(() => {
           重新扫描
         </button>
       </div>
-    </div>
+    </AppDropdown>
   </div>
 </template>

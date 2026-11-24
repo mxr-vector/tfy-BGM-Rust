@@ -65,6 +65,7 @@ import {
   subtitleRecords,
   updateDraftText,
 } from '@/stores/subtitles';
+import AppSelect from './AppSelect.vue';
 import Icon from './Icon.vue';
 
 const modelHint = computed(() => {
@@ -289,13 +290,18 @@ const hasRecordFilter = computed(
   () => recordQuery.value.trim().length > 0 || recordFilter.value !== 'all',
 );
 
-/** `<select>` 的 v-model 产出普通字符串，这里收敛回联合类型。 */
+/** 自绘下拉的 v-model 产出普通字符串，这里收敛回联合类型。 */
 const recordFilterModel = computed<string>({
   get: () => recordFilter.value,
   set: (value) => {
     recordFilter.value = value as SubtitleRecordFilter;
   },
 });
+const recordFilterOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'generated', label: '已生成' },
+  { value: 'pending', label: '待生成' },
+];
 
 /** 编辑器提示：即时校验优先，其次展示后端保存错误 / 模式切换提示。 */
 const editorMessage = computed(() => editValidation.value ?? editError.value);
@@ -411,15 +417,15 @@ function onDraftTextInput(event: Event): void {
                 <Icon name="x" />
               </button>
             </label>
-            <select
+            <AppSelect
               v-model="recordFilterModel"
-              class="subtitle-record-filter"
-              aria-label="记录状态筛选"
-            >
-              <option value="all">全部状态</option>
-              <option value="generated">已生成</option>
-              <option value="pending">待生成</option>
-            </select>
+              trigger-class="subtitle-record-filter"
+              label="记录状态筛选"
+              :options="recordFilterOptions"
+              :menu-width="132"
+              :min-menu-width="132"
+              align="end"
+            />
           </div>
 
           <p v-if="subtitleRecords.length === 0" class="subtitle-empty">
@@ -1421,18 +1427,20 @@ function onDraftTextInput(event: Event): void {
   padding: 6px 9px;
 }
 .subtitle-record-filter {
-  flex: none;
-  max-width: 108px;
-  padding: 7px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.18);
+  width: 108px;
+  min-height: 29px;
+  height: 29px;
+  padding: 0 8px;
+  border-radius: var(--radius-tag);
+  background: var(--bg-panel);
   color: var(--text-2);
   font-size: 12px;
-  outline: 0;
-  cursor: pointer;
 }
-.subtitle-record-filter option { background: #10201a; color: var(--text); }
+
+.subtitle-record-filter .app-select-caret {
+  width: 12px;
+  height: 12px;
+}
 .subtitle-record-edited { color: var(--accent-bright); }
 
 /* 预览头部与编辑入口 */

@@ -23,6 +23,7 @@ export const modelsInfo = ref<ModelsInfo | null>(null);
 export const modelsLoading = ref(false);
 export const downloading = ref(false);
 export const loadTarget = ref<string | null>(null);
+export const deletingModelId = ref<string | null>(null);
 export const downloadProgress = ref<ModelDownloadProgress | null>(null);
 export const transcribing = ref(false);
 /** 最近一次 WAV 识别结果；`null` 表示尚未识别。 */
@@ -43,9 +44,12 @@ export const autoLoading = computed(
   () => downloading.value && loadStatus.value.phase === 'loading',
 );
 
-/** 是否有模型加载任务在跑（自动或手动），用于禁用加载按钮。 */
+/** 是否有模型加载 / 删除任务在跑，用于禁用模型操作按钮。 */
 export const modelBusy = computed(
-  () => loadStatus.value.phase === 'loading' || loadTarget.value !== null,
+  () =>
+    loadStatus.value.phase === 'loading' ||
+    loadTarget.value !== null ||
+    deletingModelId.value !== null,
 );
 
 /** 已下载 / 总字节数；未知总量时返回 0。 */
@@ -250,6 +254,20 @@ export async function unloadAsrModel(): Promise<void> {
     toast('已释放 ASR 模型', 'success');
   } catch (error) {
     toast(`释放模型失败：${normalizeError(error)}`, 'error');
+  }
+}
+
+/** 删除 ASR 模型；后端会在目标已加载时自动释放并卸载。 */
+export async function deleteAsrModel(model: AsrModel): Promise<void> {
+  if (modelBusy.value || downloading.value) return;
+  deletingModelId.value = model.id;
+  try {
+    apply(await invoke<ModelsInfo>(COMMANDS.deleteAsrModel, { id: model.id }));
+    toast(`已删除 ${model.name}`, 'success');
+  } catch (error) {
+    toast(`删除 ASR 模型失败：${normalizeError(error)}`, 'error');
+  } finally {
+    deletingModelId.value = null;
   }
 }
 

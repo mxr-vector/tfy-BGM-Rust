@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import {
   closePlayerPopover,
   playerPopover,
@@ -12,13 +12,12 @@ import { toast } from '@/lib/toast';
 import type { ExportInfo } from '@/lib/types';
 import { setExportSettings } from '@/stores/prefs';
 import { state } from '@/stores/state';
+import AppDropdown from './AppDropdown.vue';
 import Icon from './Icon.vue';
 
 const open = computed(() => playerPopover.value === 'export');
 const loading = ref(false);
 const info = ref<ExportInfo | null>(null);
-const wrapper = ref<HTMLElement | null>(null);
-const panel = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 
 const enabled = computed(() => state.prefs?.loudnessNormalization ?? true);
@@ -53,18 +52,15 @@ async function loadInfo(): Promise<void> {
   }
 }
 
-function close(focusTrigger = false): void {
-  if (!open.value) return;
-  closePlayerPopover('export');
-  if (focusTrigger) trigger.value?.focus();
-}
-
 function toggleOpen(): void {
   togglePlayerPopover('export');
   if (!open.value) return;
   void loadInfo();
   void nextTick(() => {
-    panel.value?.querySelector<HTMLElement>('.export-toggle')?.focus();
+    document
+      .getElementById('export-popover')
+      ?.querySelector<HTMLElement>('.export-toggle')
+      ?.focus();
   });
 }
 
@@ -81,33 +77,10 @@ function chooseScene(id: string): void {
   setExportSettings(true, id);
 }
 
-function onDocumentClick(event: MouseEvent): void {
-  if (!open.value) return;
-  const target = event.target as Node | null;
-  if (target && wrapper.value?.contains(target)) return;
-  close();
-}
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !open.value) return;
-  event.preventDefault();
-  event.stopPropagation();
-  close(true);
-}
-
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick);
-  document.addEventListener('keydown', onKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocumentClick);
-  document.removeEventListener('keydown', onKeydown);
-});
 </script>
 
 <template>
-  <div ref="wrapper" class="export-wrap">
+  <div class="export-wrap">
     <button
       ref="trigger"
       type="button"
@@ -118,19 +91,24 @@ onBeforeUnmount(() => {
       aria-label="导出设置"
       aria-haspopup="dialog"
       :aria-expanded="open"
+      :aria-controls="open ? 'export-popover' : undefined"
       @click.stop="toggleOpen"
     >
       <Icon name="sliders" />
     </button>
 
-    <div
-      v-if="open"
-      ref="panel"
-      class="export-popover"
-      id="export-popover"
+    <AppDropdown
+      :open="open"
+      :anchor="trigger"
+      side="top"
+      align="end"
+      :width="300"
+      :max-height="440"
+      panel-class="export-popover"
+      panel-id="export-popover"
       role="dialog"
-      aria-label="导出设置"
-      @click.stop
+      label="导出设置"
+      @close="closePlayerPopover('export')"
     >
       <div class="export-pop-head">
         <div class="export-pop-title">
@@ -216,6 +194,6 @@ onBeforeUnmount(() => {
           }}
         </span>
       </div>
-    </div>
+    </AppDropdown>
   </div>
 </template>

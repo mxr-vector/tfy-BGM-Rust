@@ -47,6 +47,12 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # 读取字体文件的 name 表，得到系统字体的真实族名（含中文名），只依赖 std。
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux 视频壁纸通过本地 HTTP Range 流喂给 WebKitGTK，避免 asset 协议无法播放媒体。
+tokio-util = { version = "0.7", features = ["io"] }
+# 本地壁纸媒体地址使用不可预测的随机令牌，避免其它本机进程枚举文件。
+getrandom = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 # 开机自动启动：写入 HKCU 的 Run 项，不需要额外安装器。
 windows-registry = "0.6"

@@ -11,15 +11,18 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { cachedFonts, fontOptions, loadSystemFonts, type FontOption } from '@/lib/fonts';
 import { formatBytes, normalizeError } from '@/lib/format';
+import { showModal } from '@/lib/modal';
 import { toast } from '@/lib/toast';
 import { wakeLockSupported } from '@/composables/useSystemIntegration';
-import type { CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
+import type { AsrModel, CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
 import { apiStatus, refreshApiInfo } from '@/stores/api';
 import {
   autoLoading,
   cancelDownload,
   chooseModelsDir,
   clearTranscript,
+  deleteAsrModel,
+  deletingModelId,
   downloadDefaultModel,
   downloadPercent,
   downloadProgress,
@@ -187,6 +190,26 @@ const loadStatusIcon = computed(() => {
       return 'chip';
   }
 });
+
+/** 删除模型前确认一次；确认后后端会自动卸载正在使用的目标模型。 */
+async function confirmDeleteModel(model: AsrModel): Promise<void> {
+  const confirmed = await showModal({
+    title: '删除 ASR 模型',
+    description: `确定删除「${model.name}」（${formatBytes(model.sizeBytes)}）吗？模型文件将永久删除，无法恢复。若正在使用，会自动释放并卸载。`,
+    confirmText: '删除',
+    danger: true,
+  });
+  if (confirmed === null) return;
+  const reconfirmed = await showModal({
+    title: '再次确认删除',
+    description: `即将永久删除「${model.name}」及其全部附属文件，此操作无法撤销。请确认不是误操作。`,
+    confirmText: '确认删除',
+    cancelText: '返回',
+    danger: true,
+  });
+  if (reconfirmed === null) return;
+  await deleteAsrModel(model);
+}
 
 function selectTab(tab: SettingsTab): void {
   settingsTab.value = tab;
@@ -824,22 +847,41 @@ watch(settingsOpen, async (open) => {
                         </span>
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      class="settings-btn"
-                      :disabled="!model.loadable || modelBusy"
-                      @click="loadAsrModel(model)"
-                    >
-                      {{
-                        loadingModelPath === model.path
-                          ? '加载中…'
-                          : loadedModel?.path === model.path
-                            ? '重新加载'
-                            : model.loadable
-                              ? '加载'
-                              : '不可加载'
-                      }}
-                    </button>
+                    <div class="settings-model-actions">
+                      <button
+                        type="button"
+                        class="settings-btn"
+                        :disabled="!model.loadable || modelBusy"
+                        @click="loadAsrModel(model)"
+                      >
+                        {{
+                          loadingModelPath === model.path
+                            ? '加载中…'
+                            : loadedModel?.path === model.path
+                              ? '重新加载'
+                              : model.loadable
+                                ? '加载'
+                                : '不可加载'
+                        }}
+                      </button>
+                      <button
+                        type="button"
+                        class="settings-btn is-danger"
+                        :disabled="modelBusy || modelDownloading || transcribing"
+                        :title="
+                          transcribing
+                            ? '识别进行中，暂不能删除模型'
+                            : modelBusy || modelDownloading
+                              ? '模型任务进行中，暂不能删除'
+                              : loadedModel?.path === model.path
+                                ? '删除模型并自动卸载'
+                                : '删除模型文件'
+                        "
+                        @click="confirmDeleteModel(model)"
+                      >
+                        {{ deletingModelId === model.id ? '删除中…' : '删除' }}
+                      </button>
+                    </div>
                   </article>
                   <p v-if="modelsLoading && models.length === 0" class="settings-hint">
                     正在扫描模型目录…
@@ -1109,5 +1151,10 @@ watch(settingsOpen, async (open) => {
 }
 .model-load-retry {
   margin-left: auto;
+}
+.settings-model-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
 }
 </style>

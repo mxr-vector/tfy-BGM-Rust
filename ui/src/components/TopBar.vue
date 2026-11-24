@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import { config } from '@/lib/config';
 import { SORT_KEYS } from '@/lib/constants';
 import type { SortBy } from '@/lib/types';
@@ -13,6 +13,7 @@ import {
   toggleWallpaperPopover,
   wallpaperView,
 } from '@/composables/useWallpaper';
+import AppDropdown from './AppDropdown.vue';
 import Icon from './Icon.vue';
 import WindowControls from './WindowControls.vue';
 
@@ -98,22 +99,6 @@ function toggleWallpaper(): void {
   if (wallpaperTrigger.value) toggleWallpaperPopover(wallpaperTrigger.value);
 }
 
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && sortOpen.value) {
-    closeSortMenu();
-    sortButton.value?.focus();
-  }
-}
-
-onMounted(() => {
-  document.addEventListener('click', closeSortMenu);
-  document.addEventListener('keydown', onDocumentKeydown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', closeSortMenu);
-  document.removeEventListener('keydown', onDocumentKeydown);
-});
 </script>
 
 <template>
@@ -185,6 +170,7 @@ onBeforeUnmount(() => {
           id="btn-sort"
           aria-haspopup="listbox"
           :aria-expanded="sortOpen"
+          :aria-controls="sortOpen ? 'sort-menu' : undefined"
           title="切换排序方式"
           @click.stop="toggleSortMenu"
         >
@@ -192,42 +178,50 @@ onBeforeUnmount(() => {
           <span class="sort-value" id="sort-value">{{ sortLabel }}</span>
           <Icon name="chevron-down" class="sort-caret" />
         </button>
-        <div
-          v-if="sortOpen"
-          ref="sortMenu"
-          class="sort-menu"
-          id="sort-menu"
-          role="listbox"
-          @click.stop
-          @keydown="onSortMenuKeydown"
+        <AppDropdown
+          :open="sortOpen"
+          :anchor="sortButton"
+          align="end"
+          :width="180"
+          label="排序方式"
+          @close="closeSortMenu"
         >
-          <button
-            type="button"
-            class="sort-menu-item"
-            :class="{ 'is-active': state.sortBy === SORT_KEYS.recommended }"
-            data-sort="default"
-            role="option"
-            :aria-selected="state.sortBy === SORT_KEYS.recommended"
-            @click="chooseSort(SORT_KEYS.recommended)"
+          <div
+            id="sort-menu"
+            ref="sortMenu"
+            class="app-menu-list"
+            role="listbox"
+            aria-label="排序方式"
+            @keydown="onSortMenuKeydown"
           >
-            <Icon name="sparkles" class="sort-menu-icon" />
-            <span class="sort-menu-label">默认推荐</span>
-            <Icon name="check" class="sort-menu-check" />
-          </button>
-          <button
-            type="button"
-            class="sort-menu-item"
-            :class="{ 'is-active': state.sortBy === SORT_KEYS.name }"
-            data-sort="name"
-            role="option"
-            :aria-selected="state.sortBy === SORT_KEYS.name"
-            @click="chooseSort(SORT_KEYS.name)"
-          >
-            <Icon name="sort-az" class="sort-menu-icon" />
-            <span class="sort-menu-label">按曲名 A–Z</span>
-            <Icon name="check" class="sort-menu-check" />
-          </button>
-        </div>
+            <button
+              type="button"
+              class="app-menu-option sort-menu-item"
+              :class="{ 'is-active': state.sortBy === SORT_KEYS.recommended }"
+              data-sort="default"
+              role="option"
+              :aria-selected="state.sortBy === SORT_KEYS.recommended"
+              @click="chooseSort(SORT_KEYS.recommended)"
+            >
+              <Icon name="sparkles" />
+              <span class="app-menu-option-label">默认推荐</span>
+              <Icon name="check" class="app-menu-check" />
+            </button>
+            <button
+              type="button"
+              class="app-menu-option sort-menu-item"
+              :class="{ 'is-active': state.sortBy === SORT_KEYS.name }"
+              data-sort="name"
+              role="option"
+              :aria-selected="state.sortBy === SORT_KEYS.name"
+              @click="chooseSort(SORT_KEYS.name)"
+            >
+              <Icon name="sort-az" />
+              <span class="app-menu-option-label">按曲名 A–Z</span>
+              <Icon name="check" class="app-menu-check" />
+            </button>
+          </div>
+        </AppDropdown>
       </div>
       <span class="top-divider" aria-hidden="true"></span>
       <button
@@ -240,6 +234,7 @@ onBeforeUnmount(() => {
         aria-label="界面壁纸"
         aria-haspopup="dialog"
         :aria-expanded="popoverOpen"
+        :aria-controls="popoverOpen ? 'wallpaper-popover' : undefined"
         @click.stop="toggleWallpaper"
       >
         <Icon name="palette" />

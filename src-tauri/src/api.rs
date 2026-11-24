@@ -1658,7 +1658,9 @@ async fn models_unload(State(api): State<ApiBridge>, headers: HeaderMap) -> ApiR
     if runtime.is_loading() {
         return Err(ApiError::conflict("模型正在加载中，请等待加载完成后再释放"));
     }
-    let unloaded = runtime.unload();
+    let unloaded = runtime
+        .unload()
+        .map_err(|error| ApiError::conflict(format!("{error:#}")))?;
     // 与界面「释放模型」一致：下次启动不再自动恢复。
     state.remember_loaded_model(None);
     let _ = app.emit(LOAD_STATUS_EVENT, runtime.load_status());
