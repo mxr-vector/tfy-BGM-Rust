@@ -17,6 +17,21 @@ import { clearLoopPoint, MIN_LOOP_SPAN, saveLoopPoint } from '@/stores/loops';
 import { categoryById, state } from '@/stores/state';
 import Icon from './Icon.vue';
 
+const props = withDefaults(
+  defineProps<{
+    embedded?: boolean;
+    active?: boolean;
+  }>(),
+  {
+    embedded: false,
+    active: true,
+  },
+);
+
+const panelActive = computed(() =>
+  props.embedded ? props.active : diagnosticsOpen.value,
+);
+
 const song = computed(() => state.currentSong);
 const category = computed(() => (song.value ? categoryById(song.value.category) : null));
 const accent = computed(() => category.value?.color ?? DEFAULT_ACCENT);
@@ -233,7 +248,7 @@ function updateMeters(): void {
 
 function loop(): void {
   const tick = (time: number) => {
-    if (!diagnosticsOpen.value) return;
+    if (!panelActive.value) return;
     drawWave();
     drawSpectrum();
     if (time - lastMeter > 100) {
@@ -264,7 +279,7 @@ function runAnalysis(): void {
   analysing.value = true;
   // 让面板先完成一帧绘制，再做可能耗时数百毫秒的整曲分析。
   analysisTimer = window.setTimeout(() => {
-    if (getAudioBuffer() !== buffer) {
+    if (!panelActive.value || getAudioBuffer() !== buffer) {
       analysing.value = false;
       return;
     }
@@ -334,21 +349,22 @@ function seekFromWave(event: PointerEvent): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
-  if (!diagnosticsOpen.value || event.key !== 'Escape') return;
+  if (props.embedded || !panelActive.value || event.key !== 'Escape') return;
   event.preventDefault();
   event.stopPropagation();
   closeDiagnostics();
 }
 
-watch(diagnosticsOpen, async (open) => {
+watch(panelActive, async (open) => {
   if (!open) {
     stopLoop();
+    window.clearTimeout(analysisTimer);
     observer?.disconnect();
     return;
   }
   syncLoopDraft();
   await nextTick();
-  if (!diagnosticsOpen.value) return;
+  if (!panelActive.value) return;
 
   void loadExportPresets();
 
@@ -363,12 +379,12 @@ watch(diagnosticsOpen, async (open) => {
   }
   loop();
   runAnalysis();
-});
+}, { immediate: true });
 
 watch(
   () => state.currentSong?.key,
   () => {
-    if (!diagnosticsOpen.value) return;
+    if (!panelActive.value) return;
     analysis.value = null;
     peaks = null;
     syncLoopDraft();
@@ -380,7 +396,7 @@ watch(
 watch(
   () => audioState.loadedPath,
   () => {
-    if (!diagnosticsOpen.value) return;
+    if (!panelActive.value) return;
     analysis.value = null;
     peaks = null;
     syncLoopDraft();
@@ -391,7 +407,7 @@ watch(
 watch(
   () => state.loopPoints,
   () => {
-    if (diagnosticsOpen.value) syncLoopDraft();
+    if (panelActive.value) syncLoopDraft();
   },
   { deep: true },
 );
@@ -410,13 +426,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="embedded">
     <div
-      v-if="diagnosticsOpen"
-      class="diag-backdrop"
-      @mousedown.self="closeDiagnostics"
+      v-if="panelActive"
+      :class="embedded ? 'diag-embedded' : 'diag-backdrop'"
+      @mousedown.self="!embedded && closeDiagnostics()"
     >
-      <section class="diag-panel" role="dialog" aria-modal="true" aria-label="可视化诊断">
+      <section
+        class="diag-panel"
+        :class="{ 'diag-panel--embedded': embedded }"
+        role="dialog"
+        :aria-modal="embedded ? undefined : true"
+        aria-label="音频诊断"
+      >
         <header class="diag-header">
           <div class="diag-heading">
             <span class="diag-kicker" :style="{ color: accent }">
@@ -427,7 +449,13 @@ onBeforeUnmount(() => {
           </div>
           <div class="diag-header-actions">
             <span class="diag-verdict" :class="`is-${verdict.tone}`">{{ verdict.label }}</span>
-            <button type="button" class="diag-close" title="关闭诊断" @click="closeDiagnostics">
+            <button
+              v-if="!embedded"
+              type="button"
+              class="diag-close"
+              title="关闭诊断"
+              @click="closeDiagnostics"
+            >
               <Icon name="x" />
             </button>
           </div>

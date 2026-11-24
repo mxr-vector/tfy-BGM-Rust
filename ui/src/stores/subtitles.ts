@@ -488,9 +488,11 @@ export async function generateSubtitles(
   }
 }
 
-/** 导出 SRT / LRC；默认文件名由后端按曲目名生成。 */
-export async function exportSubtitle(format: 'srt' | 'lrc'): Promise<void> {
-  const key = selectedKey.value;
+/** 按明确曲目 key 导出 SRT / LRC；详情页等入口无需改动字幕页当前选中项。 */
+export async function exportSubtitleForTrack(
+  key: string,
+  format: 'srt' | 'lrc',
+): Promise<void> {
   if (!key || exportingFormat.value || editing.value) return;
   exportingFormat.value = format;
   try {
@@ -505,6 +507,13 @@ export async function exportSubtitle(format: 'srt' | 'lrc'): Promise<void> {
   } finally {
     exportingFormat.value = null;
   }
+}
+
+/** 导出字幕页当前选中曲目的 SRT / LRC；默认文件名由后端按曲目名生成。 */
+export async function exportSubtitle(format: 'srt' | 'lrc'): Promise<void> {
+  const key = selectedKey.value;
+  if (!key) return;
+  await exportSubtitleForTrack(key, format);
 }
 
 export function clearSubtitleResult(): void {

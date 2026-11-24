@@ -12,6 +12,7 @@ import {
   toggleMute,
   togglePlay,
 } from '@/stores/player';
+import { closeSongDetails, songDetailsOpen } from '@/stores/song-details';
 import { state, visibleSongs } from '@/stores/state';
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -33,6 +34,7 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   const target = event.target;
 
   if (event.key === '/' && !isTypingTarget(target)) {
+    if (songDetailsOpen.value) return;
     event.preventDefault();
     focusSearch();
     return;
@@ -83,6 +85,9 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
       if (drawerOpen.value) {
         event.preventDefault();
         closeDrawer();
+      } else if (songDetailsOpen.value) {
+        event.preventDefault();
+        closeSongDetails();
       } else if (state.selected.size > 0) {
         event.preventDefault();
         clearSelection();

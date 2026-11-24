@@ -9,6 +9,7 @@ import { installApiBridge } from '@/stores/api';
 import { installDesktopLyrics } from '@/stores/desktop-lyrics';
 import { installSubtitles } from '@/stores/subtitles';
 import { installGlobalHotkeys } from '@/composables/useGlobalHotkeys';
+import { useWindowState } from '@/composables/useWindowState';
 import { installScheduler } from '@/composables/useScheduler';
 import { autoplayOnStartIfEnabled, installSystemIntegration } from '@/composables/useSystemIntegration';
 import { loadBuiltins, wallpaperView } from '@/composables/useWallpaper';
@@ -18,7 +19,7 @@ import { installOutputs } from '@/stores/outputs';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 import ClosePrompt from '@/components/ClosePrompt.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
-import DiagnosticsPanel from '@/components/DiagnosticsPanel.vue';
+import SongDetailsPanel from '@/components/SongDetailsPanel.vue';
 import Icon from '@/components/Icon.vue';
 import ModalHost from '@/components/ModalHost.vue';
 import QueueDrawer from '@/components/QueueDrawer.vue';
@@ -29,6 +30,8 @@ import TopBar from '@/components/TopBar.vue';
 import WallpaperLayer from '@/components/WallpaperLayer.vue';
 import WallpaperPopover from '@/components/WallpaperPopover.vue';
 import Workspace from '@/components/Workspace.vue';
+
+useWindowState();
 
 const fatal = ref<{ title: string; message: string } | null>(null);
 const focused = ref(true);
@@ -137,7 +140,7 @@ onBeforeUnmount(() => {
   </div>
 
   <WallpaperPopover />
-  <DiagnosticsPanel />
+  <SongDetailsPanel />
   <SettingsDialog />
   <ClosePrompt />
   <ModalHost />

@@ -17,7 +17,7 @@ import {
   desktopLyricsHint,
   toggleDesktopLyrics,
 } from '@/stores/desktop-lyrics';
-import { openDiagnostics } from '@/stores/diagnostics';
+import { openSongDetails } from '@/stores/song-details';
 import { loopPointFor, openLoopEditor } from '@/stores/loops';
 import {
   cyclePlayMode,
@@ -270,9 +270,9 @@ onBeforeUnmount(() => {
               :class="{ 'is-clickable': Boolean(song) }"
               role="button"
               :tabindex="song ? 0 : -1"
-              :title="song ? '点击查看可视化诊断' : ''"
-              @click="openDiagnostics"
-              @keydown.enter.prevent="openDiagnostics"
+              :title="song ? '点击查看歌曲详情' : ''"
+              @click="openSongDetails()"
+              @keydown.enter.prevent="openSongDetails()"
             >
               <span class="cover-icon" id="now-cover-icon">
                 <Icon :name="song ? (category?.icon || 'music') : 'disc'" />

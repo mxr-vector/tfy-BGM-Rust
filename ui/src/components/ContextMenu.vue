@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useWindowState } from '@/composables/useWindowState';
 import {
   closeContextMenu,
   contextMenuState,
@@ -8,6 +9,7 @@ import {
 import Icon from './Icon.vue';
 
 const menu = ref<HTMLElement | null>(null);
+const { viewportWidth, viewportHeight } = useWindowState();
 
 function activate(entry: ContextMenuEntry): void {
   closeContextMenu();
@@ -26,8 +28,19 @@ function onKeydown(event: KeyboardEvent): void {
   closeContextMenu();
 }
 
-function onScroll(): void {
+function onScroll(event: Event): void {
+  // 菜单自身内容溢出时允许滚动，只有背景滚动才关闭菜单。
+  if (event.target instanceof Node && menu.value?.contains(event.target)) return;
   closeContextMenu();
+}
+
+function clampPosition(): void {
+  const rect = menu.value?.getBoundingClientRect();
+  if (!rect) return;
+  const maxX = Math.max(8, viewportWidth.value - rect.width - 8);
+  const maxY = Math.max(8, viewportHeight.value - rect.height - 8);
+  contextMenuState.x = Math.min(Math.max(8, contextMenuState.x), maxX);
+  contextMenuState.y = Math.min(Math.max(8, contextMenuState.y), maxY);
 }
 
 watch(
@@ -35,16 +48,14 @@ watch(
   async (open) => {
     if (!open) return;
     await nextTick();
-    const rect = menu.value?.getBoundingClientRect();
-    if (!rect) return;
-    if (contextMenuState.x + rect.width > window.innerWidth - 8) {
-      contextMenuState.x = Math.max(8, contextMenuState.x - rect.width);
-    }
-    if (contextMenuState.y + rect.height > window.innerHeight - 8) {
-      contextMenuState.y = Math.max(8, contextMenuState.y - rect.height);
-    }
+    clampPosition();
   },
 );
+
+watch([viewportWidth, viewportHeight], () => {
+  if (!contextMenuState.open) return;
+  void nextTick(clampPosition);
+});
 
 onMounted(() => {
   document.addEventListener('pointerdown', onPointerDown, true);

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useWindowState } from '@/composables/useWindowState';
 import {
   availableWallpaperOptions,
   builtins,
@@ -19,7 +20,9 @@ import Icon from './Icon.vue';
 
 const panel = ref<HTMLElement | null>(null);
 const position = ref({ left: 12, top: 72 });
+const { viewportWidth, viewportHeight } = useWindowState();
 const customImageFailed = ref(false);
+let resizeObserver: ResizeObserver | null = null;
 
 const savedCustom = computed(() => state.prefs?.customWallpaper ?? null);
 const savedKind = computed(() => kindOf(savedCustom.value));
@@ -39,9 +42,14 @@ function positionPanel(): void {
   const width = panel.value?.offsetWidth ?? 356;
   const left = Math.min(
     Math.max(12, rect.right - width),
-    window.innerWidth - width - 12,
+    viewportWidth.value - width - 12,
   );
-  position.value = { left: Math.max(12, left), top: rect.bottom + 10 };
+  const height = panel.value?.offsetHeight ?? 0;
+  const maxTop = Math.max(12, viewportHeight.value - height - 12);
+  position.value = {
+    left: Math.max(12, left),
+    top: Math.min(Math.max(12, rect.bottom + 10), maxTop),
+  };
 }
 
 function selectWallpaper(id: string): void {
@@ -68,16 +76,23 @@ function onBlurInput(event: Event): void {
 watch(
   () => popoverOpen.value,
   async (open) => {
+    resizeObserver?.disconnect();
     if (!open) return;
     customImageFailed.value = false;
     await nextTick();
     positionPanel();
+    if (!panel.value || typeof ResizeObserver === 'undefined') return;
+    resizeObserver ??= new ResizeObserver(() => {
+      if (popoverOpen.value) positionPanel();
+    });
+    resizeObserver.observe(panel.value);
   },
 );
 
-function onWindowResize(): void {
-  if (popoverOpen.value) positionPanel();
-}
+watch([viewportWidth, viewportHeight], () => {
+  if (!popoverOpen.value) return;
+  void nextTick(positionPanel);
+});
 
 function onDocumentClick(): void {
   if (popoverOpen.value) closeWallpaperPopover();
@@ -90,13 +105,12 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onMounted(() => {
-  window.addEventListener('resize', onWindowResize);
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onKeydown, true);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', onWindowResize);
+  resizeObserver?.disconnect();
   document.removeEventListener('click', onDocumentClick);
   document.removeEventListener('keydown', onKeydown, true);
 });
