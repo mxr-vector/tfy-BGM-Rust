@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use bgm_core::audio_index::{
+    self, AudioIndexInfo, AudioIndexStore, DuplicateReport, SoundSearchResult,
+};
 use bgm_core::categories::Categories;
 use bgm_core::export::ExportSettings;
 use bgm_core::ops::{self, BatchOutcome, BatchReport, KeyChange};
@@ -20,7 +23,7 @@ use bgm_core::{
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::library_root;
 use crate::library_watch::LibraryWatcher;
@@ -29,6 +32,30 @@ use crate::settings::Settings;
 
 /// 曲库目录发生外部变化时发给前端的事件名。
 pub const LIBRARY_CHANGED_EVENT: &str = "library-changed";
+pub const AUDIO_INDEX_PROGRESS_EVENT: &str = "audio-index-progress";
+/// 判为重复所需的最小对齐覆盖率：同源副本通常接近 1.0，误判空间很小。
+const DUPLICATE_THRESHOLD: f64 = 0.85;
+/// 以声搜声的命中下限：允许「翻录 / 片段」这类指纹有少量差异的匹配。
+const SEARCH_THRESHOLD: f64 = 0.35;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioIndexStatus {
+    pub enabled: bool,
+    pub root: String,
+    pub indexed_tracks: usize,
+    pub ready_tracks: usize,
+    pub failed_tracks: usize,
+    pub size_bytes: u64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioIndexProgress {
+    pub current: usize,
+    pub total: usize,
+    pub title: String,
+}
 
 pub struct AppState {
     prefs_path: PathBuf,
@@ -36,6 +63,10 @@ pub struct AppState {
     config_path: PathBuf,
     schedule_path: PathBuf,
     loops_path: PathBuf,
+    audio_index_path: PathBuf,
+    /// 索引用 `Arc` 快照持有：读方（状态查询、歌曲详情）拿到指针即可放锁，
+    /// 写方在锁内只做一次指针交换，解码分析全部在锁外完成。
+    audio_index: RwLock<Arc<AudioIndexStore>>,
     prefs: RwLock<Prefs>,
     categories: RwLock<Categories>,
     config: RwLock<AppConfig>,
@@ -132,6 +163,20 @@ impl AppState {
             ));
         }
         warnings.append(&mut root_warnings);
+        let audio_index_path = app
+            .path()
+            .app_config_dir()?
+            .join(bgm_core::paths::AUDIO_INDEX_FILE);
+        let (audio_index, index_warning) = match AudioIndexStore::load(&audio_index_path) {
+            Ok(store) => (store, None),
+            Err(error) => (
+                AudioIndexStore::default(),
+                Some(format!("音频索引加载失败：{error}")),
+            ),
+        };
+        if let Some(warning) = index_warning {
+            warnings.push(warning);
+        }
 
         let meta_cache = MetaCache::default();
         let mut library = scan_library_cached(&root, source, &categories.items, &meta_cache);
@@ -155,6 +200,8 @@ impl AppState {
             config_path,
             schedule_path,
             loops_path,
+            audio_index_path,
+            audio_index: RwLock::new(Arc::new(audio_index)),
             prefs: RwLock::new(prefs),
             categories: RwLock::new(categories),
             config: RwLock::new(config),
@@ -285,6 +332,7 @@ impl AppState {
         &self,
         app: &AppHandle,
         dir: Option<PathBuf>,
+        build_index: bool,
     ) -> Result<Option<LibrarySnapshot>> {
         let _guard = self.ops_lock.lock();
         let Some(dir) = dir else {
@@ -295,7 +343,11 @@ impl AppState {
         }
         let root = fs::canonicalize(&dir).unwrap_or(dir);
         self.persist_library_dir(Some(root.to_string_lossy().into_owned()))?;
-        let snapshot = self.install_root(app, root, LibrarySource::Custom, Vec::new())?;
+        let mut snapshot = self.install_root(app, root, LibrarySource::Custom, Vec::new())?;
+        if build_index {
+            let report = self.enable_audio_index_locked(app)?;
+            snapshot.warnings.extend(report.warnings);
+        }
         Ok(Some(snapshot))
     }
 
@@ -549,13 +601,12 @@ impl AppState {
         };
         let categories = self.category_items();
         let mut next = scan_library_cached(&root, source, &categories, &self.meta_cache);
-        if same_content(&previous, &next) {
-            return None;
-        }
-
+        let content_changed = !same_content(&previous, &next);
         let diff = diff_songs(&previous.songs, &next.songs);
-        next.warnings
-            .extend(self.sync_track_metadata(&diff.moved, &diff.removed));
+        if content_changed {
+            next.warnings
+                .extend(self.sync_track_metadata(&diff.moved, &diff.removed));
+        }
         // 外部重命名 / 移动音频文件时，字幕记录跟着 key 一起迁移。
         let migrations = key_migrations(&diff.moved);
         if !migrations.is_empty() {
@@ -563,16 +614,224 @@ impl AppState {
             next.warnings.extend(warnings);
         }
 
-        *self.runtime.write() = Runtime {
-            root,
-            source,
-            library: next.clone(),
+        if content_changed {
+            *self.runtime.write() = Runtime {
+                root,
+                source,
+                library: next.clone(),
+            };
+        }
+        let index_report = match self.sync_audio_index(app) {
+            Ok(report) => report,
+            Err(error) => {
+                next.warnings.push(format!("音频索引同步失败：{error:#}"));
+                audio_index::IndexSyncReport::default()
+            }
         };
+        // 纯校验（没有新增、变化或删除）不算曲库变化，避免每 30 秒推一次无意义快照。
+        if !content_changed && !index_report.changed {
+            return None;
+        }
         Some(LibraryChange {
             library: next,
             added: diff.added,
             removed: diff.removed,
             moved: diff.moved,
+        })
+    }
+
+    /// 当前索引快照（`Arc` 克隆，持有期间不阻塞任何写入，也无需长时间占读锁）。
+    fn audio_index_snapshot(&self) -> Arc<AudioIndexStore> {
+        self.audio_index.read().clone()
+    }
+
+    pub fn audio_index_status(&self) -> AudioIndexStatus {
+        let store = self.audio_index_snapshot();
+        let root = self.runtime.read().root.clone();
+        let enabled = store.enabled && store.root == audio_index::normalize_path(&root);
+        AudioIndexStatus {
+            enabled,
+            root: store.root.clone(),
+            indexed_tracks: store.entries.len(),
+            ready_tracks: store
+                .entries
+                .values()
+                .filter(|entry| entry.error.is_none())
+                .count(),
+            failed_tracks: store
+                .entries
+                .values()
+                .filter(|entry| entry.error.is_some())
+                .count(),
+            size_bytes: store.entries.values().map(|entry| entry.size_bytes).sum(),
+        }
+    }
+
+    pub fn audio_index_info(&self, key: &str, path: &str) -> Option<AudioIndexInfo> {
+        if !self.audio_index_status().enabled {
+            return None;
+        }
+        self.audio_index_snapshot().info_for_song(key, path)
+    }
+
+    /// 调用方持有 `ops_lock`；索引未启用时不做任何文件解码。
+    fn sync_audio_index(&self, app: &AppHandle) -> Result<audio_index::IndexSyncReport> {
+        let snapshot = self.audio_index_snapshot();
+        let (root, songs) = {
+            let runtime = self.runtime.read();
+            (runtime.root.clone(), runtime.library.songs.clone())
+        };
+        if !snapshot.enabled || snapshot.root != audio_index::normalize_path(&root) {
+            return Ok(audio_index::IndexSyncReport::default());
+        }
+        let categories = self.category_items();
+        // 计划阶段只做 stat 与签名比较，耗时以毫秒计；解码分析阶段完全不持锁，
+        // 因此界面线程查询状态时不会被几十分钟的首次建库卡住。
+        let plan = snapshot.plan_sync(&root, &categories, &songs);
+        let ffmpeg = bgm_core::loudness::ffmpeg_path();
+        let analysis = audio_index::analyze_plan(&plan, ffmpeg.as_deref(), |current, total, title| {
+            let _ = app.emit(
+                AUDIO_INDEX_PROGRESS_EVENT,
+                AudioIndexProgress {
+                    current,
+                    total,
+                    title: title.to_owned(),
+                },
+            );
+        });
+
+        let mut next = (*snapshot).clone();
+        let (mut report, changed) = next.apply_sync(plan, analysis);
+        if changed {
+            next.save(&self.audio_index_path)?;
+            *self.audio_index.write() = Arc::new(next);
+        }
+        report.changed = changed;
+        Ok(report)
+    }
+
+    pub fn synchronize_audio_index(&self, app: &AppHandle) -> Result<audio_index::IndexSyncReport> {
+        let _guard = self.ops_lock.lock();
+        self.sync_audio_index(app)
+    }
+
+    pub fn build_audio_index(&self, app: &AppHandle) -> Result<audio_index::IndexSyncReport> {
+        let _guard = self.ops_lock.lock();
+        self.enable_audio_index_locked(app)
+    }
+
+    fn enable_audio_index_locked(&self, app: &AppHandle) -> Result<audio_index::IndexSyncReport> {
+        let root = self.root();
+        let mut next = (*self.audio_index_snapshot()).clone();
+        next.enabled = true;
+        next.root = audio_index::normalize_path(&root);
+        // 用户手动点「更新索引」意味着「现在再试一次」，不受失败退避限制。
+        next.retry_failed();
+        next.save(&self.audio_index_path)?;
+        *self.audio_index.write() = Arc::new(next);
+        self.sync_audio_index(app)
+    }
+
+    pub fn duplicate_report(&self, app: &AppHandle) -> Result<DuplicateReport> {
+        let _guard = self.ops_lock.lock();
+        self.sync_audio_index(app)?;
+        let store = self.audio_index_snapshot();
+        let entries: Vec<&audio_index::IndexEntry> = store.entries.values().collect();
+        Ok(audio_index::find_duplicates(&entries, DUPLICATE_THRESHOLD))
+    }
+
+    pub fn search_by_sound(
+        &self,
+        app: &AppHandle,
+        query_path: PathBuf,
+    ) -> Result<SoundSearchResult> {
+        if !query_path.is_file() {
+            bail!("查询音频不存在：{}", query_path.display());
+        }
+        let _guard = self.ops_lock.lock();
+        self.sync_audio_index(app)?;
+        let ffmpeg = bgm_core::loudness::ffmpeg_path()
+            .ok_or_else(|| anyhow::anyhow!("未找到 ffmpeg，无法分析查询音频"))?;
+        let fingerprint = audio_index::analyze_query_fingerprint(&ffmpeg, &query_path)?;
+        let store = self.audio_index_snapshot();
+        let entries: Vec<&audio_index::IndexEntry> = store.entries.values().collect();
+        Ok(audio_index::search_by_fingerprint(
+            &entries,
+            &fingerprint,
+            &query_path.to_string_lossy(),
+            50,
+            SEARCH_THRESHOLD,
+        ))
+    }
+
+    pub fn delete_indexed_files(
+        &self,
+        app: &AppHandle,
+        paths: Vec<PathBuf>,
+    ) -> Result<LibraryMutation> {
+        if paths.is_empty() {
+            bail!("未选择任何重复文件");
+        }
+        let _guard = self.ops_lock.lock();
+        let accepted = {
+            let store = self.audio_index_snapshot();
+            let entries: Vec<&audio_index::IndexEntry> = store.entries.values().collect();
+            let duplicates = audio_index::find_duplicates(&entries, DUPLICATE_THRESHOLD);
+            let duplicate_paths: HashSet<&str> = duplicates
+                .groups
+                .iter()
+                .flat_map(|group| group.tracks.iter().map(|track| track.path.as_str()))
+                .collect();
+            let mut accepted = Vec::with_capacity(paths.len());
+            for path in paths {
+                let id = audio_index::normalize_path(&path);
+                if !store.entries.contains_key(&id) || !duplicate_paths.contains(id.as_str()) {
+                    bail!("文件不在当前重复指纹列表中，拒绝删除：{}", path.display());
+                }
+                accepted.push(path);
+            }
+            // 同一次操作不能删光一个重复分组：至少留一个副本，否则等于整段音频消失。
+            let selected: HashSet<String> = accepted
+                .iter()
+                .map(|path| audio_index::normalize_path(path))
+                .collect();
+            for group in &duplicates.groups {
+                if group
+                    .tracks
+                    .iter()
+                    .all(|track| selected.contains(&track.path))
+                {
+                    let sample = group
+                        .tracks
+                        .first()
+                        .map(|track| track.file_name.as_str())
+                        .unwrap_or("未命名");
+                    bail!(
+                        "重复分组「{sample}」的 {} 个副本全部被选中，请至少保留 1 个文件",
+                        group.tracks.len()
+                    );
+                }
+            }
+            accepted
+        };
+        let outcome = ops::trash_indexed_files(&self.root(), &self.category_items(), &accepted);
+        let removed = {
+            let store = self.audio_index_snapshot();
+            accepted
+                .iter()
+                .filter(|path| !path.exists())
+                .filter_map(|path| store.entries.get(&audio_index::normalize_path(path)))
+                .filter_map(|entry| entry.key.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut warnings = self.sync_track_metadata(&[], &removed);
+        let mut library = self.refresh_library(app)?;
+        library.warnings.append(&mut warnings);
+        Ok(LibraryMutation {
+            library,
+            changes: Vec::new(),
+            removed,
+            report: outcome.report,
         })
     }
 
@@ -862,6 +1121,12 @@ impl AppState {
             source,
             library: library.clone(),
         };
+        // 索引启用时顺手补齐增删；未启用时这一步立即返回，不做任何解码。
+        if let Err(error) = self.sync_audio_index(app) {
+            library
+                .warnings
+                .push(format!("音频索引同步失败：{error:#}"));
+        }
         Ok(library)
     }
 }

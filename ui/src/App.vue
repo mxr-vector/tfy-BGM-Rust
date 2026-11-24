@@ -5,6 +5,7 @@ import { COMMANDS, EVENTS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
 import { invoke, isTauri, getCurrentWindow, listen } from '@/lib/tauri';
 import type { Bootstrap, LibraryChange } from '@/lib/types';
+import { installAudioIndex } from '@/composables/useAudioIndex';
 import { installApiBridge } from '@/stores/api';
 import { installDesktopLyrics } from '@/stores/desktop-lyrics';
 import { installSubtitles } from '@/stores/subtitles';
@@ -84,6 +85,7 @@ applyDocumentCopy();
 void loadBuiltins();
 installOutputs();
 installSystemIntegration();
+void installAudioIndex();
 void installApiBridge();
 
 onMounted(async () => {

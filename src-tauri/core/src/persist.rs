@@ -19,6 +19,15 @@ where
     write_atomic(path, &bytes)
 }
 
+/// 紧凑 JSON：用于体积敏感、人不需要阅读的缓存（如音频索引）。
+pub fn write_json_compact<T>(path: &Path, value: &T) -> Result<(), PersistError>
+where
+    T: Serialize + ?Sized,
+{
+    let bytes = serde_json::to_vec(value)?;
+    write_atomic(path, &bytes)
+}
+
 /// 原子写入字节：先写 `<path>.tmp`，再重命名覆盖目标。
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
     let parent = path

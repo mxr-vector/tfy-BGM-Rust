@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { formatTime } from '@/lib/format';
-import type { LoopPoint, Song, StoredSubtitle } from '@/lib/types';
+import type { AudioIndexInfo, LoopPoint, Song, StoredSubtitle } from '@/lib/types';
 import Icon from './Icon.vue';
+import WaveformPreview from './WaveformPreview.vue';
 
 const props = defineProps<{
   song: Song;
@@ -10,6 +11,7 @@ const props = defineProps<{
   subtitle: StoredSubtitle | null;
   loopPoint: LoopPoint | null;
   decoded: boolean;
+  indexedInfo: AudioIndexInfo | null;
 }>();
 
 const extension = computed(() => {
@@ -17,14 +19,27 @@ const extension = computed(() => {
   return dot >= 0 ? props.song.fileName.slice(dot + 1).toUpperCase() : '音频';
 });
 
-const facts = computed(() => [
-  { label: '分类', value: props.song.category || '未分类' },
-  { label: '艺术家', value: props.song.artist || '未标注' },
-  { label: '专辑', value: props.song.album || '未标注' },
-  { label: '时长', value: props.duration > 0 ? formatTime(props.duration) : '—' },
-  { label: '格式', value: extension.value },
-  { label: '音频状态', value: props.decoded ? '已解码，可分析' : '等待音频解码' },
-]);
+const facts = computed(() => {
+  const rows = [
+    { label: '分类', value: props.song.category || '未分类' },
+    { label: '艺术家', value: props.song.artist || '未标注' },
+    { label: '专辑', value: props.song.album || '未标注' },
+    { label: '时长', value: props.duration > 0 ? formatTime(props.duration) : '—' },
+    { label: '格式', value: extension.value },
+  ];
+  // 只有该曲目确实进了索引时才补充音频特征，避免没建索引的曲库满屏「未索引」。
+  const indexed = props.indexedInfo;
+  if (indexed) {
+    rows.push(
+      { label: 'BPM', value: indexed.bpm != null ? indexed.bpm.toFixed(1) : '—' },
+      { label: '调性', value: indexed.musicalKey ?? '—' },
+      { label: '综合响度', value: indexed.integratedLufs != null ? `${indexed.integratedLufs.toFixed(1)} LUFS` : '—' },
+      { label: '真峰值', value: indexed.truePeakDb != null ? `${indexed.truePeakDb.toFixed(1)} dBTP` : '—' },
+    );
+  }
+  rows.push({ label: '音频状态', value: props.decoded ? '已解码，可分析' : '等待音频解码' });
+  return rows;
+});
 
 const loopLabel = computed(() => {
   const point = props.loopPoint;
@@ -49,6 +64,10 @@ const loopLabel = computed(() => {
           <dd :title="fact.value">{{ fact.value }}</dd>
         </div>
       </dl>
+      <div v-if="indexedInfo?.waveform.length" class="overview-waveform">
+        <span>索引波形 · 本地缓存</span>
+        <WaveformPreview :waveform="indexedInfo.waveform" />
+      </div>
     </section>
 
     <section class="overview-card">
@@ -169,6 +188,9 @@ const loopLabel = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.overview-waveform { margin-top: 15px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.overview-waveform > span { display: block; margin-bottom: 7px; color: var(--text-3); font-size: 10px; }
 
 .overview-status-row {
   display: flex;

@@ -24,7 +24,9 @@ use crate::lyrics::{self, LyricsBootstrap, LyricsControl, LyricsSnapshot, Lyrics
 use crate::models::{self, LoadPhase, ModelLoadStatus, ModelRuntime, ModelsInfo};
 use crate::platform::WallpaperMediaServer;
 use crate::separation::{self, SeparationCatalog};
-use crate::state::{AppState, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation};
+use crate::state::{
+    AppState, AudioIndexStatus, Bootstrap, CategoryOutcome, ConfigReload, LibraryMutation,
+};
 use crate::subtitles;
 use crate::wallpapers::{self, WallpaperAsset, WallpaperPick};
 
@@ -267,7 +269,27 @@ pub async fn choose_library_dir(
         ),
         None => None,
     };
-    state.choose_library_dir(&app, dir).map_err(describe)
+    let Some(dir) = dir else {
+        return Ok(None);
+    };
+    // 与 `install_root` 一致先规范化，避免同一目录因短路径 / 尾斜杠重复弹窗。
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let status = state.audio_index_status();
+    let already_indexed = status.enabled && status.root == bgm_core::audio_index::normalize_path(&dir);
+    let build_index = already_indexed
+        || app
+            .dialog()
+            .message("将为该目录建立音频索引，自动分析并记录 BPM、调性、响度、波形与本地音频指纹。索引仅存储在本机，并随文件新增、修改和删除同步维护。")
+            .title("建立音频索引")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "建立索引".to_owned(),
+                "暂不建立".to_owned(),
+            ))
+            .blocking_show();
+    state
+        .choose_library_dir(&app, Some(dir), build_index)
+        .map_err(describe)
 }
 
 #[tauri::command]
@@ -284,6 +306,117 @@ pub fn open_library_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRe
     app.opener()
         .open_path(root, None::<&str>)
         .map_err(|error| format!("打开曲库目录失败：{error}"))
+}
+
+#[tauri::command]
+pub fn audio_index_status(state: State<'_, AppState>) -> AudioIndexStatus {
+    state.audio_index_status()
+}
+
+#[tauri::command]
+pub async fn build_audio_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AudioIndexStatus> {
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = task_app.state::<AppState>();
+        state.build_audio_index(&task_app)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|error| format!("音频索引任务异常结束：{error}"))?
+    .map_err(describe)?;
+    Ok(state.audio_index_status())
+}
+
+#[tauri::command]
+pub fn audio_index_for_song(
+    key: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Option<bgm_core::audio_index::AudioIndexInfo> {
+    state.audio_index_info(&key, &path)
+}
+
+#[tauri::command]
+pub async fn find_audio_duplicates(
+    app: AppHandle,
+) -> CommandResult<bgm_core::audio_index::DuplicateReport> {
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        task_app
+            .state::<AppState>()
+            .duplicate_report(&task_app)
+            .map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("指纹去重任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+pub async fn search_library_by_sound(
+    app: AppHandle,
+) -> CommandResult<Option<bgm_core::audio_index::SoundSearchResult>> {
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("选择用于以声搜声的本地音频")
+        .add_filter("音频（MP3 / M4A / FLAC / WAV / OGG）", &AUDIO_EXTENSIONS)
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = file
+        .into_path()
+        .map_err(|error| format!("查询音频路径无效：{error}"))?;
+    let task_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        task_app
+            .state::<AppState>()
+            .search_by_sound(&task_app, path)
+            .map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("以声搜声任务异常结束：{error}"))??;
+    Ok(Some(result))
+}
+
+#[tauri::command]
+pub async fn delete_audio_duplicates(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> CommandResult<Option<LibraryMutation>> {
+    if paths.is_empty() {
+        return Err("未选择任何重复文件".to_owned());
+    }
+    let confirmed = app
+        .dialog()
+        .message(format!(
+            "确认将明确选中的 {} 个重复文件移动到曲库回收站吗？此操作不会默认删除其它文件，之后可在文件管理器中手动恢复。",
+            paths.len()
+        ))
+        .title("确认删除重复文件")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "移到回收站".to_owned(),
+            "取消".to_owned(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return Ok(None);
+    }
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let task_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        task_app
+            .state::<AppState>()
+            .delete_indexed_files(&task_app, paths)
+            .map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("重复文件删除任务异常结束：{error}"))??;
+    Ok(Some(result))
 }
 
 /// 「模型」分组：重新扫描模型目录，返回默认模型状态、模型列表与已加载模型。

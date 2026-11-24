@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { loadAudioIndexInfo } from '@/composables/useAudioIndex';
 import { formatTime } from '@/lib/format';
 import { toast } from '@/lib/toast';
-import type { Song } from '@/lib/types';
+import type { AudioIndexInfo, Song } from '@/lib/types';
 import { audioState } from '@/stores/audio-engine';
 import { loopPointFor, openLoopEditor } from '@/stores/loops';
 import {
@@ -30,6 +31,7 @@ const props = defineProps<{ song: Song }>();
 const emit = defineEmits<{ close: [] }>();
 
 const diagnosticsActive = ref(false);
+const indexedInfo = ref<AudioIndexInfo | null>(null);
 const duration = computed(() => audioState.duration || (props.song.durationMs ?? 0) / 1000);
 const subtitle = computed(() => savedSubtitles.value[props.song.key] ?? null);
 const loopPoint = computed(() => loopPointFor(props.song.key));
@@ -44,7 +46,11 @@ watch(
   () => props.song.key,
   (key) => {
     diagnosticsActive.value = false;
+    indexedInfo.value = null;
     void loadSavedSubtitle(key);
+    void loadAudioIndexInfo(props.song).then((info) => {
+      if (props.song.key === key) indexedInfo.value = info;
+    });
   },
   { immediate: true },
 );
@@ -188,6 +194,7 @@ async function exportCurrentSubtitle(): Promise<void> {
           :subtitle="subtitle"
           :loop-point="loopPoint"
           :decoded="decoded"
+          :indexed-info="indexedInfo"
         />
       </section>
     </div>

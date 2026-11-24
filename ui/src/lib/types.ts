@@ -214,6 +214,84 @@ export interface LoopBook {
   points: Record<string, LoopPoint>;
 }
 
+/** 音频索引的启用状态与规模统计。 */
+export interface AudioIndexStatus {
+  enabled: boolean;
+  root: string;
+  indexedTracks: number;
+  readyTracks: number;
+  failedTracks: number;
+  sizeBytes: number;
+}
+
+/** 索引进度事件；`total` 只统计本轮真正需要解码的文件。 */
+export interface AudioIndexProgress {
+  current: number;
+  total: number;
+  title: string;
+}
+
+export interface AudioIndexSummary {
+  id: string;
+  key: string | null;
+  title: string;
+  fileName: string;
+  category: string;
+  path: string;
+  sizeBytes: number;
+  durationMs: number | null;
+  bpm: number | null;
+  musicalKey: string | null;
+  integratedLufs: number | null;
+  peakDb: number | null;
+  analyzedAtMs: number;
+  error: string | null;
+}
+
+/** 歌曲详情 / 诊断面板复用的索引详情，附带缓存的波形。 */
+export interface AudioIndexInfo extends AudioIndexSummary {
+  waveform: number[];
+  truePeakDb: number | null;
+}
+
+/** 索引中的一条曲目（重复分组与以声搜声共用）。 */
+export interface IndexedTrack {
+  id: string;
+  key: string | null;
+  title: string;
+  fileName: string;
+  category: string;
+  path: string;
+  sizeBytes: number;
+  durationMs: number | null;
+  bpm: number | null;
+  musicalKey: string | null;
+}
+
+export interface DuplicateGroup {
+  id: string;
+  matchKind: 'exact' | 'similar';
+  score: number;
+  tracks: IndexedTrack[];
+}
+
+export interface DuplicateReport {
+  groups: DuplicateGroup[];
+  indexedTracks: number;
+  failedTracks: number;
+}
+
+export interface SoundMatch extends IndexedTrack {
+  score: number;
+  offsetSeconds: number;
+  matchedFrames: number;
+}
+
+export interface SoundSearchResult {
+  queryPath: string;
+  matches: SoundMatch[];
+}
+
 /** 文件监听推送的增量快照。 */
 export interface LibraryChange {
   library: LibrarySnapshot;

@@ -86,6 +86,28 @@ function isBusy(): boolean {
         <button
           type="button"
           class="nav-item is-sub"
+          :class="{ 'is-active': state.view === 'duplicates' }"
+          id="nav-duplicates"
+          title="按本地音频指纹查找重复文件"
+          @click="setView('duplicates')"
+        >
+          <Icon name="disc" class="nav-icon" />
+          <span class="nav-label">音频指纹去重</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item is-sub"
+          :class="{ 'is-active': state.view === 'sound-search' }"
+          id="nav-sound-search"
+          title="选择一段本地音频，离线匹配曲库"
+          @click="setView('sound-search')"
+        >
+          <Icon name="search" class="nav-icon" />
+          <span class="nav-label">以声搜声</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item is-sub"
           id="btn-rescan"
           title="重新扫描曲库目录并热加载配置"
           :disabled="isBusy()"

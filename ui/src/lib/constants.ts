@@ -14,6 +14,12 @@ export const COMMANDS = {
   chooseLibraryDir: 'choose_library_dir',
   resetLibraryDir: 'reset_library_dir',
   openLibraryDir: 'open_library_dir',
+  audioIndexStatus: 'audio_index_status',
+  buildAudioIndex: 'build_audio_index',
+  audioIndexForSong: 'audio_index_for_song',
+  findAudioDuplicates: 'find_audio_duplicates',
+  searchLibraryBySound: 'search_library_by_sound',
+  deleteAudioDuplicates: 'delete_audio_duplicates',
   exportInfo: 'export_info',
   exportTrack: 'export_track',
   exportTracks: 'export_tracks',
@@ -69,6 +75,7 @@ export const COMMANDS = {
 /** Rust 推给前端的事件名；与 `src-tauri/src/api.rs`、`models.rs`、`subtitles.rs`、`lyrics.rs` 保持一致。 */
 export const EVENTS = {
   libraryChanged: 'library-changed',
+  audioIndexProgress: 'audio-index-progress',
   apiCommand: 'api-command',
   modelDownload: 'model-download-progress',
   modelLoadStatus: 'model-load-status',

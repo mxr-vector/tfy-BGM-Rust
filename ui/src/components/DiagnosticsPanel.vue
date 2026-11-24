@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { analyseBuffer, computePeaks, type AudioAnalysis } from '@/lib/audio-analysis';
+import { loadAudioIndexInfo } from '@/composables/useAudioIndex';
 import { COMMANDS, DEFAULT_ACCENT, DEFAULT_EXPORT_SCENE } from '@/lib/constants';
 import { formatTime, withAlpha } from '@/lib/format';
 import { invoke } from '@/lib/tauri';
-import type { ExportInfo, ExportPreset } from '@/lib/types';
+import type { AudioIndexInfo, ExportInfo, ExportPreset } from '@/lib/types';
 import {
   audioState,
   currentTime,
@@ -24,6 +25,7 @@ const loopPoint = computed(() =>
 );
 
 const analysis = ref<AudioAnalysis | null>(null);
+const indexedInfo = ref<AudioIndexInfo | null>(null);
 const analysing = ref(false);
 const momentary = ref<number | null>(null);
 const livePeak = ref<number | null>(null);
@@ -102,9 +104,13 @@ function drawWave(): void {
   context.clearRect(0, 0, width, height);
 
   const buffer = getAudioBuffer();
-  if (!peaks && buffer) {
+  let waveform: ArrayLike<number> | null = peaks;
+  if (!waveform && buffer) {
     peaks = computePeaks(buffer, Math.max(240, Math.floor(width)));
+    waveform = peaks;
   }
+  // 音频尚未解码时直接复用索引波形，避免再次读取整首源文件。
+  if (!waveform) waveform = indexedInfo.value?.waveform ?? null;
 
   context.strokeStyle = 'rgba(255, 255, 255, 0.08)';
   context.lineWidth = 1;
@@ -113,16 +119,16 @@ function drawWave(): void {
   context.lineTo(width, height / 2);
   context.stroke();
 
-  if (peaks && peaks.length > 0) {
+  if (waveform && waveform.length > 0) {
     const middle = height / 2;
-    const step = width / peaks.length;
+    const step = width / waveform.length;
     const gradient = context.createLinearGradient(0, 0, 0, height);
     gradient.addColorStop(0, withAlpha(accent.value, 0.85));
     gradient.addColorStop(0.5, withAlpha(accent.value, 0.55));
     gradient.addColorStop(1, withAlpha(accent.value, 0.85));
     context.fillStyle = gradient;
-    for (let index = 0; index < peaks.length; index += 1) {
-      const amplitude = Math.min(1, peaks[index]!) * middle * 0.92;
+    for (let index = 0; index < waveform.length; index += 1) {
+      const amplitude = Math.min(1, waveform[index] ?? 0) * middle * 0.92;
       context.fillRect(index * step, middle - amplitude, Math.max(1, step * 0.72), amplitude * 2);
     }
   }
@@ -356,9 +362,17 @@ watch(
   () => {
     analysis.value = null;
     peaks = null;
+    indexedInfo.value = null;
+    const current = state.currentSong;
+    if (current) {
+      void loadAudioIndexInfo(current).then((info) => {
+        if (state.currentSong?.key === current.key) indexedInfo.value = info;
+      });
+    }
     syncLoopDraft();
     runAnalysis();
   },
+  { immediate: true },
 );
 
 // 解码完成（而不是时长变化）才意味着可以分析；两首时长相同也要重新分析。
@@ -453,6 +467,11 @@ onBeforeUnmount(() => {
         </div>
 
         <aside class="diag-side">
+          <div v-if="indexedInfo" class="diag-indexed">
+            <strong>音频索引</strong>
+            <span>{{ indexedInfo.bpm?.toFixed(1) ?? '—' }} BPM · {{ indexedInfo.musicalKey ?? '—' }}</span>
+            <span>真峰值 {{ formatValue(indexedInfo.truePeakDb, 1) }} dBTP</span>
+          </div>
           <div v-if="analysing" class="diag-loading">
             <span class="diag-spinner"></span> 正在分析整曲…
           </div>
@@ -470,12 +489,12 @@ onBeforeUnmount(() => {
             <div class="diag-stats">
               <div class="diag-stat">
                 <span>综合响度</span>
-                <strong>{{ formatValue(analysis.integratedLufs, 1) }}</strong>
-                <small>LUFS · 源文件</small>
+                <strong>{{ formatValue(analysis.integratedLufs ?? indexedInfo?.integratedLufs, 1) }}</strong>
+                <small>LUFS · {{ analysis?.integratedLufs != null ? '浏览器实测' : '音频索引' }}</small>
               </div>
               <div class="diag-stat">
                 <span>采样峰值</span>
-                <strong>{{ formatValue(analysis.peakDb, 1) }}</strong>
+                <strong>{{ formatValue(analysis.peakDb ?? indexedInfo?.peakDb, 1) }}</strong>
                 <small>dBFS · 非真峰值</small>
               </div>
               <div class="diag-stat">
@@ -569,3 +588,19 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.diag-indexed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(25, 217, 139, 0.14);
+  border-radius: 9px;
+  color: var(--text-3);
+  font-size: 10px;
+  background: rgba(25, 217, 139, 0.055);
+}
+.diag-indexed strong { color: #9df7cf; font-weight: 600; }
+</style>

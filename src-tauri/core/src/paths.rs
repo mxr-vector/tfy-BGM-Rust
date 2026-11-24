@@ -13,6 +13,8 @@ pub const CONFIG_FILE: &str = "config.json";
 pub const SCHEDULE_FILE: &str = "schedule.json";
 /// 单曲循环区间配置。
 pub const LOOPS_FILE: &str = "loops.json";
+/// 本地音频索引与指纹缓存。
+pub const AUDIO_INDEX_FILE: &str = "audio-index.json";
 
 /// 外置曲库目录名（默认位于 exe 同级）。
 pub const LIBRARY_DIR_NAME: &str = "bgm";

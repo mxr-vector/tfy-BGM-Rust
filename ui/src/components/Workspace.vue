@@ -4,6 +4,7 @@ import { heroCopy } from '@/lib/config';
 import { HERO_KINDS } from '@/lib/constants';
 import { setSearch } from '@/stores/library';
 import { categoryById, state, visibleSongs } from '@/stores/state';
+import AudioToolsPage from './audio-tools/AudioToolsPage.vue';
 import BatchBar from './BatchBar.vue';
 import CategoryFilter from './CategoryFilter.vue';
 import HeroBanner from './HeroBanner.vue';
@@ -33,6 +34,8 @@ const query = computed(() => state.search.trim());
     <WarningBanner />
     <SchedulePage v-if="state.view === 'schedule'" />
     <SubtitlePage v-else-if="state.view === 'subtitles'" />
+    <AudioToolsPage v-else-if="state.view === 'duplicates'" mode="duplicates" />
+    <AudioToolsPage v-else-if="state.view === 'sound-search'" mode="search" />
     <template v-else>
       <HeroBanner />
       <CategoryFilter />

@@ -63,6 +63,16 @@ pub fn run() {
             let api_config = state.api_config();
             let (autostart, minimize_to_tray, _) = state.desktop_prefs();
             app.manage(state);
+            // 已确认索引的曲库在后台补同步，不阻塞首屏；后续增删由监听增量维护。
+            let index_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = index_app.state::<AppState>();
+                if state.audio_index_status().enabled
+                    && let Err(error) = state.synchronize_audio_index(&index_app)
+                {
+                    eprintln!("[audio-index] 启动同步失败：{error:#}");
+                }
+            });
             // 桌面歌词窗口的开关与最新快照；歌词窗口启动时从此处拉取初始状态。
             app.manage(LyricsState::default());
 
@@ -109,6 +119,12 @@ pub fn run() {
             commands::choose_library_dir,
             commands::reset_library_dir,
             commands::open_library_dir,
+            commands::audio_index_status,
+            commands::build_audio_index,
+            commands::audio_index_for_song,
+            commands::find_audio_duplicates,
+            commands::search_library_by_sound,
+            commands::delete_audio_duplicates,
             commands::models_info,
             commands::choose_models_dir,
             commands::reset_models_dir,
