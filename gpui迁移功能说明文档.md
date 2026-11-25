@@ -1,10 +1,10 @@
 # 已实现功能文档 · 主线 `bgm-tauri2` 功能基线
 
 > **用途**：作为 `bgm-gpui`（纯 Rust + GPUI）分支逐项对齐功能的**唯一功能事实来源**。**基准是当前分支 `bgm-tauri2`：gpui 只做对齐，不缩减功能、不改数据契约、不改对外接口**（详见 §0.0）。
-> **代码基线**：`bgm-tauri2` @ `e59ee18`（2026-11-22，`feat(separation): 双引擎并行分离，伴奏固定使用 UVR 乐器模型`）。
+> **代码基线**：`bgm-tauri2` @ `80faf7d`（2026-11-25，`feat(tts_script): 重构纯文本解析实现段落合并与智能分段`）。
 > **对照分支**：`origin/bgm-gpui` @ `59175f0`（2026-11-20，`feat: 以 GPUI 实现重建 bgm-gpui 分支`）。
-> **核对方式**：逐文件阅读 `src-tauri/core/src`（14 个模块）、`src-tauri/src`（15 个业务模块 / 17 个 .rs）、`ui/src`（17 个 store、6 个 composable、14 个 lib、31 个组件），并结合 `cargo` 单元测试与 `origin/bgm-gpui` 的文件清单与源码比对。本文所有「规则」均来自**代码**，不是从界面反推；无法从代码确认的内容明确标注【待确认】。
-> **本版性质**：**重构版**，替换旧版同名文档。旧版中与代码不一致的表述已在 §9 逐条列出并修正，请勿再引用旧版数字。
+> **核对方式**：对照上一版代码基线 `e59ee18` 与当前工作树，以 Rust 实现、Tauri 注册表、HTTP 路由及前端调用为依据。统计为源代码计数。
+> **本版重点**：补齐音频索引、公开歌单迁移、语音合成，并更新歌曲详情、平台能力和开放接口契约。
 
 ---
 
@@ -16,9 +16,9 @@
 
 | # | 原则 | 具体含义 |
 | :--- | :--- | :--- |
-| 1 | **功能范围不缩减** | 本文 §1 的 18 个功能域，gpui 需全部具备；不得以「平台限制」为由长期缺失，只能有「能力缺失时降级 + 界面明示」这一种处理方式，且降级分支必须与主线一致 |
+| 1 | **功能范围不缩减** | 本文 §1 的 21 个功能域，gpui 需全部具备；不得以「平台限制」为由长期缺失，只能有「能力缺失时降级 + 界面明示」这一种处理方式，且降级分支必须与主线一致 |
 | 2 | **数据契约不改写** | 5 个配置文件的字段名、类型、默认值、收敛规则、稳定 key 语义、`KeyChange` 迁移契约，一律以 §4 / §5.2 为准；gpui 不得新增/删减字段或改变序列化形态 |
-| 3 | **对外契约不变** | 58 个命令的参数与返回、10 个后端事件的名称与载荷（另有 2 个歌词窗口内部事件）、33 个 HTTP 方法+路径、标准 SSE（id/event/data）、状态码语义、快照字段，一律以附录 A/B/C 为准，外部脚本在两个分支间必须可直接复用 |
+| 3 | **对外契约不变** | 83 个命令的参数与返回、14 个后端事件的名称与载荷（另有 2 个歌词窗口内部事件）、33 个 HTTP 方法+路径、标准 SSE（id/event/data）、状态码语义、快照字段，一律以附录 A/B/C 为准，外部脚本在两个分支间必须可直接复用 |
 | 4 | **历史差异必须消除** | gpui 当前「仅 mp3」「`Prefs` 8 字段」「`LibrarySource` 缺 `External`」「均匀随机」等属于**待消除的落后状态**，不是可保留的分支特性。判定标准见 §6.1 |
 | 5 | **听感与交互结果对齐** | 交叉淡入淡出、A/B 循环、智能随机权重、响度归一化目标、字幕切分与时间轴、歌词逐词推进，均以主线实测行为为准；实现手段可不同，用户可感知**结果**需一致 |
 | 6 | **UI 布局与视觉样式不作要求** | 面板划分、栅格、间距、配色、圆角、阴影、动效、组件形态、图标风格均可自由设计；只要求**功能可达**（每个能力有入口）、**状态可辨**（播放/加载/禁用/错误可区分）、**反馈语义一致**（提示含义、拦截原因、失败原因不弱化）。不得以「样式不同」为由判定未对齐，也不得以「样式对齐」代替功能实现 |
@@ -51,19 +51,19 @@
 
 | 维度 | 数量 | 统计口径 |
 | :--- | :--- | :--- |
-| 功能域 | **18** | §1 的 F01–F18 |
-| `bgm-core` 模块 | **14** | `src-tauri/core/src/*.rs` |
-| Tauri 应用层模块 | **13**（文件 15 个） | `src-tauri/src/*.rs` 除去 `main.rs` 与 `lib.rs`，即 §0.4 列出的 13 个业务模块 |
-| 注册的 Tauri 命令 | **58** | `lib.rs` 的 `generate_handler!`（附录 A） |
-| Rust → 前端事件 | **10** | 后端 `pub const *_EVENT`（附录 B） |
+| 功能域 | **21** | §1 的 F01–F21 |
+| `bgm-core` 模块 | **16** | `src-tauri/core/src/*.rs` |
+| Tauri 应用层模块 | **22** | `src-tauri/src/lib.rs` 顶级 `mod` 声明，含平台与歌单子模块入口 |
+| 注册的 Tauri 命令 | **83** | `lib.rs` 的 `generate_handler!`（附录 A） |
+| Rust → 前端事件 | **14** | Rust → 前端的业务事件（含音频索引与 TTS）（附录 B） |
 | 窗口内前端事件 | **2** | 歌词窗 ↔ 设置窗（`desktop-lyrics-style` / `desktop-lyrics-command`） |
-| HTTP 路由声明 | **16** | `api.rs::router()` 的 `.route(...)` |
-| HTTP 方法+路径组合 | **17** | `/v1/outputs` 同时有 GET / POST |
+| HTTP 路由声明 | **30** | `api.rs::router()` 的 `.route(...)` |
+| HTTP 方法+路径组合 | **33** | 包含 `/v1/outputs` 和 `/v1/subtitles/track` 的多方法声明 |
 | 通用 action（HTTP） | **14** | `ui/src/stores/api.ts::runAction` |
 | 配置文件 | **5** | `prefs.json` / `config.json` / `categories.json` / `schedule.json` / `loops.json` |
-| 派生数据目录 | **2** | `subtitles/`、`separations/`（另加曲库内 `.tfy-trash/`） |
-| `bgm-core` 单元测试 | **96** | `grep -c '#\[test\]'`（含 `#[ignore]`） |
-| 应用层单元测试 | **58** | 同上（`api` / `state` / `models` / `subtitles` / `separation` 等） |
+| 派生数据目录 | **2** | `subtitles/`、`separations/`（另有 `audio-index.json`、应用缓存下的 `tts/`、曲库内的 `.tfy-trash/`） |
+| `bgm-core` 单元测试 | **108** | `grep -c '#\[test\]'`（含 `#[ignore]`） |
+| 应用层单元测试 | **110** | 同上（`api` / `state` / `models` / `subtitles` / `separation` 等） |
 
 ### 0.4 代码分层
 
@@ -80,7 +80,7 @@
 ┌───────────────────────────▼──────────────────────────────────┐
 │ src-tauri/src  应用层（Tauri 2，依赖平台与 WebView）           │
 │  state.rs    运行时状态 + 写操作编排 + watch 增量             │
-│  commands.rs 58 个命令（参数校验 + 调 core + 序列化）          │
+│  commands.rs 83 个命令（参数校验 + 调 core + 序列化）          │
 │  api.rs      本机 HTTP + SSE + 命令桥                          │
 │  lyrics.rs   桌面歌词窗口（多窗口 / 置顶 / 锁定）              │
 │  models.rs   ASR（下载 / 加载 / 分片识别）                     │
@@ -104,7 +104,7 @@
 
 ## 1. 功能总览表
 
-### 1.1 18 个功能域
+### 1.1 21 个功能域
 
 | 编号 | 功能域 | 状态 | 实现层 | 核心落点 | gpui 现状 | 优先级 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -117,7 +117,7 @@
 | F07 | 多输出设备路由 | 部分实现 | ui | `outputs.ts`、`audio-engine.ts` | **无** | P2 |
 | F08 | 节目单调度 | 已实现 | core + ui | `schedule.rs`、`useScheduler.ts` | **无** | P1 |
 | F09 | 导出与响度归一化 | 已实现 | core | `export.rs`、`loudness.rs` | 有（仅 mp3 纯复制，无归一化） | P1 |
-| F10 | 可视化诊断 | 已实现 | ui | `audio-analysis.ts`、`DiagnosticsPanel.vue` | **无** | P2 |
+| F10 | 歌曲详情与可视化诊断 | 已实现 | ui + core | `SongDetailsContent.vue`、`audio-analysis.ts`、`audio_index.rs` | **无** | P2 |
 | F11 | 偏好与收藏 | 已实现 | core + ui | `prefs.rs`、`prefs.ts` | 有（旧版 8 字段） | P0 |
 | F12 | 界面壁纸 | 已实现 | app + ui | `wallpapers.rs`、`useWallpaper.ts` | **无** | P2 |
 | F13 | 系统设置与桌面集成 | 部分实现 | app + ui | `desktop.rs`、`fonts.rs`、`useSystemIntegration.ts` | **无** | P2 |
@@ -126,6 +126,9 @@
 | F16 | 人声分离引擎 | 已实现 | app | `separation.rs` | **无** | P1 |
 | F17 | 字幕生成与编辑 | 已实现 | app + ui | `subtitles.rs`、`subtitles.ts` | **无** | P1 |
 | F18 | 桌面歌词窗口 | 已实现 | app + ui | `lyrics.rs`、`lyrics.ts` | **无** | P2 |
+| F19 | 音频索引、以声搜声与查重 | 已实现 | core + app + ui | `audio_index.rs`、`state.rs`、`audio-tools/` | **无** | P1 |
+| F20 | 公开歌单迁移 | 已实现 | app + ui | `playlist_migration/`、`usePlaylistMigration.ts` | **无** | P2 |
+| F21 | TTS 文本转语音 | 已实现 | app + ui | `tts.rs`、`tts_models.rs`、`tts_script.rs` | **无** | P1 |
 
 > 优先级定义：**P0** = `core/` 直接替换即可获得，风险最低；**P1** = 用户高频可见，需要 UI 与后端配合；**P2** = 平台相关或可后置。
 
@@ -133,10 +136,10 @@
 
 | 状态 | 数量 | 功能域 |
 | :--- | :--- | :--- |
-| 已实现 | 16 | F01–F06、F08–F12、F14–F18 |
+| 已实现 | 19 | F01–F06、F08–F12、F14–F21（F18 见 Wayland 降级） |
 | 部分实现 | 2 | F07（仅 Chromium 系 WebView）、F13（平台特有能力为 WebView 近似） |
 | 未实现 | 0 | — |
-| 待确认 | 0 个功能域 | §7.3 共 6 条：5 条技术待确认（Q1–Q5），Q6 因「样式不作要求」转为不适用；均不阻塞对齐 |
+| 待确认 | 0 个功能域 | 实机验证见 §7.3，包含新增工作台验证项 |
 
 ### 1.3 已废弃的旧实现（不作为功能域）
 
@@ -153,7 +156,7 @@
 
 ## 2. 模块级功能详情
 
-> 每项统一包含 13 个字段。代码位置写作 `文件:符号`，行号以基线 `e59ee18` 为准。
+> 每项统一包含 13 个字段。代码位置写作 `文件:符号`，保留旧模块的 `e59ee18` 历史行号作为定位提示。当前实现优先按符号检索。
 
 ### F01 曲库扫描与分类
 
@@ -299,7 +302,7 @@
 | 规则 | 具体行为 | 依据 |
 | :--- | :--- | :--- |
 | 整曲解码上限 | `durationMs > 30min` 直接跳过并提示「整曲解码内存占用过高」 | `player.ts:57,205` |
-| 传输淡入淡出 | 播放 / 暂停 / 恢复统一 80ms 线性包络，暂停后再延迟 80ms `stop()` | `audio-engine.ts:72,392` |
+| 传输淡入淡出 | 播放、暂停与恢复使用 80ms 线性包络，暂停的声部在包络时长再加 80ms 后停止。TTS 录参考音时另用 `suspendPlayback` 停止各声部，并禁止录音期间重新发声 | `audio-engine.ts:72,392` |
 | 交叉淡入淡出 | `0–12s`，`prefs` 默认 **2s**；旧声部线性淡出、新声部同时淡入；连续快速切歌时先停掉上一轮 `outgoing`，避免三层叠音 | `audio-engine.ts:592-625` |
 | 自然播完 | 无旧声部可交叉，用**相同时长**给新曲补淡入 | `player.ts:281` |
 | A/B 循环（引擎） | 区间跨度 `> 0.05s` 才生效；位置按 `region.start + ((pos-start) % span)` 回绕 | `audio-engine.ts:323-328,429-435` |
@@ -459,15 +462,15 @@
 | 文件名安全 | 控制字符与路径/通配保留字符（含竖线）→ `_`；去首尾空白与 `.`；空 → `audio`；≤120 字符 | `export.rs:198-216` |
 | 批量提示 | 全部成功归一化 → 「已导出 N 首（响度归一化 · 目标 X LUFS）」；部分 → 注明数量；0 首 → 普通提示 + 首条 warning | `ops.rs:414-439` |
 
-### F10 可视化诊断
+### F10 歌曲详情与可视化诊断
 
 | 项目 | 内容 |
 | :--- | :--- |
 | **功能名称** | 整曲波形 + 实时频谱 + 瞬时 LUFS/峰值 + 整曲分析结论 + 循环区间标记 |
 | **状态** | 已实现 |
 | **判断依据** | `audio-analysis.ts:88` `analyseBuffer`、`:357` `computePeaks`（374 行纯数值）；`audio-engine.ts:146-179` K-weighting 节点；`DiagnosticsPanel.vue`（600 行） |
-| **功能描述** | 点击播放器封面打开面板。所有指标以**源文件**为基准（归一化前），导出目标响度仅作对照显示，不参与测量。 |
-| **入口/触发** | 点击播放器封面；需已加载 `AudioBuffer` |
+| **功能描述** | 点击播放器封面展开歌曲详情，在「歌词」「详情」间切换，或从工具栏打开音频诊断。歌词区可预览 SRT/LRC，并进入生成、编辑和导出。详情区展示元数据、循环状态及可用的 F19 缓存分析。所有实时诊断指标以**源文件**为基准（归一化前），导出目标响度仅作对照显示，不参与测量。 |
+| **入口/触发** | 点击播放器封面。详情页可先展示曲库元数据，实时诊断需当前 `AudioBuffer` |
 | **关键代码位置** | `ui/src/lib/audio-analysis.ts`（全部）；`ui/src/components/DiagnosticsPanel.vue`；`ui/src/stores/audio-engine.ts:280` `getAnalyserHandle`、`:286` `getAudioBuffer` |
 | **输入** | `AudioBuffer`（已解码，不重新读文件） |
 | **输出** | `AudioAnalysis { duration, sampleRate, channels, integratedLufs, rmsDb, peakDb, clippedSamples, clipRuns, pops, maxDelta, silence[], minCorrelation, averageCorrelation, outOfPhase, issues[], verdict }` |
@@ -498,7 +501,7 @@
 | **状态** | 已实现 |
 | **判断依据** | `prefs.rs:18` `PREFS_VERSION=4`、`:273` `normalize`、`:437` `load`、`:481` `save`；27 项单测覆盖钳制、迁移、壁纸、模型、歌词字段 |
 | **功能描述** | 音量、静音、倍速、播放模式、排序、淡入淡出、输出路由、导出开关与场景、壁纸、字体与系统开关、关闭行为、收藏、模型与歌词状态，全部持久化并在重启后恢复。 |
-| **入口/触发** | 前端 `persistPrefs()`（280ms 防抖）/ `persistPrefs(true)`（立即）；`flushPrefsNow()` 在退出/隐藏前调用；后端 `update_prefs` 维护 4 个权威字段 |
+| **入口/触发** | 前端 `persistPrefs()`（280ms 防抖）/ `persistPrefs(true)`（立即）；`flushPrefsNow()` 在退出/隐藏前调用；后端 `update_prefs` 维护 6 个权威字段 |
 | **关键代码位置** | `core/src/prefs.rs`（1030 行）；`ui/src/stores/prefs.ts:22` `persistPrefs`、`:34` `flushPrefs`、`:61` `toggleFavorite`；`app/src/state.rs:196` `save_prefs`、`:374` `update_prefs` |
 | **输入** | 整包 `Prefs`（前端提交） |
 | **输出** | 归一化后的 `Prefs`（以后端返回值为准，前端覆盖本地） |
@@ -506,7 +509,7 @@
 | **依赖项** | `loudness::find_preset`（场景校验）、`paths::strip_verbatim_prefix`、`persist::write_json` |
 | **配置项** | 全部字段见 §4.2 |
 | **异常/边界** | 损坏文件 → 默认值 + 1 条告警，不阻断启动；未知字段忽略；`save_prefs` 不保留 `separation_model`（由前端提交值为准）；`library_dir` / `models_dir` 只能通过专用命令改 |
-| **gpui 实现建议** | **直接复用 `prefs.rs`，但必须补齐 34 个字段**（gpui 当前只有 8 个）。容器级 `#[serde(default)]` + 未知字段忽略意味着**双向覆盖会丢配置**：GPUI 若用旧结构体读入再写回，会把 `crossfadeSeconds`、`outputRoutes`、`wallpaper*`、`smtc` 等全部抹掉。迁移期建议先只读不写，或直接把 `prefs.rs` 整体替换。`--` 另一个坑：`normalize` 里的 `f32::NAN` 分支，GPUI 若用 `serde_json` 读 `null` 会反序列化失败而不是走默认值，需要 `Option` + 默认。 |
+| **gpui 实现建议** | **直接复用 `prefs.rs`，但必须补齐 35 个字段**（gpui 当前只有 8 个）。容器级 `#[serde(default)]` + 未知字段忽略意味着**双向覆盖会丢配置**：GPUI 若用旧结构体读入再写回，会把 `crossfadeSeconds`、`outputRoutes`、`wallpaper*`、`smtc` 等全部抹掉。迁移期建议先只读不写，或直接把 `prefs.rs` 整体替换。`--` 另一个坑：`normalize` 里的 `f32::NAN` 分支，GPUI 若用 `serde_json` 读 `null` 会反序列化失败而不是走默认值，需要 `Option` + 默认。 |
 | **待确认** | 无 |
 
 **后端权威字段（`save_prefs` 会用内存值覆盖前端提交值）**
@@ -517,8 +520,9 @@
 | `modelsDir` | 只能通过 `choose_models_dir` / `reset_models_dir` 修改 | `state.rs:203` |
 | `lastAsrModel` | 由模型加载/释放命令维护 | `state.rs:204` |
 | `desktopLyricsEnabled` | 由歌词开关命令维护 | `state.rs:205` |
+| `asrDownloadUrl`、`ttsDownloadUrl` | 通过 `save_model_download_source` 更新 | `state.rs::save_prefs` |
 
-> `separationModel` **不在**该列表：它由前端在生成前写入（`subtitles.ts:432`），后端只做长度与去空归一化。这是「前端权威」字段，与上面 4 个相反。
+> `separationModel` **不在**该列表：它由前端在生成前写入（`subtitles.ts:432`），后端只做长度与去空归一化。这是「前端权威」字段，与上面 6 个相反。
 
 ### F12 界面壁纸
 
@@ -552,6 +556,8 @@
 | 模糊 | 0–20 整数；`--table-blur` 仅在 >0 时生成 `blur() saturate(110%)` | `prefs.rs:378`、`App.vue:48` |
 | 内置缺失 | 资源文件找不到 → 该选项从列表消失（`availableWallpaperOptions`） | `wallpapers.rs:94-100` |
 | 视频暂停 | 窗口失焦或 `document.hidden` → `pause()`；恢复时 `play().catch()` | `WallpaperLayer.vue:17-28` |
+
+> Linux MP4 通过 `platform/linux/media.rs` 的独立本机 Range 媒体服务播放。主窗用 `wallpaper_media_url` 获取可播放地址。其他平台沿用 asset 协议。视频失焦或页面不可见时暂停。
 
 ### F13 系统设置与桌面集成
 
@@ -589,13 +595,15 @@
 | 空间音效 | HRTF，`positionZ=-1`、`rolloff=0.15`、`distanceModel=inverse`；仅 Windows | `audio-engine.ts:232-242` |
 | 音频增强 | 总线压缩：threshold -18dB、knee 12、ratio 2.2、attack 10ms、release 250ms；仅 Windows | `audio-engine.ts:221-229` |
 
+> 当前平台实现位于 `src-tauri/src/platform/`。自启、GPU 启动参数、字体源、配置目录、路径比较和媒体服务由平台模块分派。MPRIS2 设置仅在 Linux Wayland 会话提供。
+
 ### F14 本机 HTTP 开放接口
 
 | 项目 | 内容 |
 | :--- | :--- |
 | **功能名称** | `127.0.0.1:8737` JSON API + SSE 事件流 |
 | **状态** | 已实现 |
-| **判断依据** | `api.rs` 实现 axum 路由、鉴权、CORS、SSE、命令桥；`api.ts` 实现 14 个 action 与快照；`api.rs` 3 项单测覆盖 origin 与状态码映射 |
+| **判断依据** | `api.rs` 实现 axum 路由、鉴权、CORS、SSE、命令桥；`api.ts` 实现 14 个 action 与快照；`api.rs` 测试覆盖来源、状态码、目录与 SSE 参数 |
 | **功能描述** | 供 OBS、Stream Deck、直播脚本接入。Rust 只监听回环地址，播放控制由前端执行（命令经事件转发 + 6 秒超时）。 |
 | **入口/触发** | 启动 `bridge.serve()`；`config.api.enabled` 为 true 时监听 |
 | **关键代码位置** | `app/src/api.rs:41` `API_COMMAND_EVENT`、`:44` `COMMAND_TIMEOUT=6s`、`:118` `endpoints`、`:272` `serve`、`:340` `command`、`:377` `authorize`、`:408` `router`、`:476` `cors`、`:518` `origin_allowed`；`ui/src/stores/api.ts:67` `installApiBridge`、`:113` `runAction`、`:232` `snapshot`；`app/src/lib.rs:70-75` 启动顺序 |
@@ -608,15 +616,18 @@
 | **gpui 实现建议** | GPUI 没有 WebView 桥，**命令可直接在 Rust 内执行**，`api-command` / `api_reply` 这层可以省掉（改为在 axum handler 里直接调播放引擎的命令通道）。**但必须保留同一份路径、请求体、状态码与快照字段**，否则外部脚本会在两个分支间失效。建议把「快照结构」提取成 `bgm-core` 里的 `#[derive(Serialize)] struct ApiSnapshot`，两个分支共用，避免字段漂移。注意 `serve()` 用 `std::net::TcpListener` 绑定后再 `from_std`，这是为了「端口占用错误同步返回」；GPUI 若直接 `tokio::spawn` 绑定，需要额外把错误回传。 |
 | **待确认** | 无 |
 
+播放控制走 6 秒前端命令桥。字幕读写、分离结果、模型状态和任务查询由 Rust 直接处理。全局与逐任务 SSE 的行为见附录 C。
+
 **HTTP 状态码语义（F14）**
 
 | 码 | 触发条件 | 依据 |
 | :--- | :--- | :--- |
+| 202 | 字幕生成、分离或 ASR 加载已入队 | `api.rs`、`tasks.rs` |
 | 400 | 参数缺失/非法（`key` / `seconds` / `volume` / `deviceId` / 无更新字段） | `api.rs:645,679,691,703,719` |
 | 401 | token 缺失或错误 | `api.rs:395` |
 | 403 | 浏览器 `Origin` 不被允许 | `api.rs:485` |
 | 404 | 曲目不存在 / 未知 action | `api.ts:124,213` |
-| 409 | 节目单时段内点播 / 输出路数已满 | `api.ts:126,207` |
+| 409 | 节目单时段内点播 / 输出路数已满 / 同类型同曲目任务在途 / 资源忙 | `api.ts:126,207` |
 | 500 | 前端未预期异常 / 无法把命令发给界面 | `api.ts:107`、`api.rs:356` |
 | 503 | 界面未就绪 / 设备授权失败 / 通道关闭 | `api.rs:342,365`、`api.ts:188` |
 | 504 | 命令执行超时（6s） | `api.rs:369` |
@@ -768,11 +779,72 @@
 
 ---
 
+> 原生 Wayland 使用普通透明歌词窗口。位置由合成器控制，跳过贴底和悬浮设置窗的主动定位。锁定保持窗口可交互，页面悬停提供解锁入口。置顶取决于合成器，KDE Wayland 可能忽略置顶请求。XWayland 走普通窗口路径。
+
+### F19 本地音频索引、以声搜声与查重
+
+| 项目 | 内容 |
+| :--- | :--- |
+| **功能名称** | 本地音频索引、指纹匹配与重复项管理 |
+| **状态** | 已实现，分析依赖 ffmpeg |
+| **判断依据** | `audio_index.rs` 实现分析、指纹匹配与增量计划，`state.rs` 编排后台同步 |
+| **功能描述** | 为当前曲库建立本地索引，供歌曲详情、以声搜声和重复项管理共用 |
+| **入口/触发** | 侧栏「以声搜声」和「音频指纹去重」页面中建立或关闭索引，启用后随启动和曲库变化后台同步 |
+| **关键代码位置** | `src-tauri/core/src/audio_index.rs`、`src-tauri/src/state.rs::queue_audio_index_update`、`ui/src/composables/useAudioIndex.ts`、`ui/src/components/audio-tools/` |
+| **输入** | 曲库根目录、音频文件、查询文件或麦克风录音 |
+| **输出** | `AudioIndexStatus`、`AudioIndexInfo`、`DuplicateReport`、`SoundSearchResult` 与软删除结果 `LibraryMutation` |
+| **核心流程** | 首次启用需确认。按曲库版本生成增量计划，锁外分析，提交前校验版本，发布 `Arc` 快照。同一后台工作器合并新的同步请求。分析使用 11 025 Hz PCM，生成波形和指纹。查重阈值 0.85，查询阈值 0.35 |
+| **依赖项** | ffmpeg、桌面 IPC、文件选择器，麦克风路径使用 `MediaRecorder` |
+| **配置项** | `<config>/audio-index.json`，版本 2，按曲库根目录判断索引是否可用 |
+| **异常/边界** | 录音 IPC 接受 ≤2 MiB 原始字节，查询上限默认 10、夹到 1–50。关闭需确认并删除索引。查重只将明确选中的合法索引路径移到回收站，也能处理普通曲库列表未展示的同主干副本 |
+| **GPUI 实现建议** | 复用 core 的分析和匹配，以原生录音与文件对话框接入，保留增量计划、过期工作丢弃、确认与回收站语义 |
+| **待确认** | 目标平台的录音设备和实际编码格式需实机验证 |
+
+### F20 公开歌单迁移
+
+| 项目 | 内容 |
+| :--- | :--- |
+| **功能名称** | 将公开歌单转换为可复制或保存的曲目文本 |
+| **状态** | 已实现，依赖第三方公开数据 |
+| **判断依据** | `playlist_migration` 实现来源识别、请求、分页及结果校验，前端实现多来源与文本预览 |
+| **功能描述** | 读取网易云音乐、QQ 音乐、汽水音乐的公开分享链接，保留平台曲目顺序、曲名与艺人 |
+| **入口/触发** | 侧栏「歌单迁移」→ 添加分享链接 → 预览、复制或保存 TXT |
+| **关键代码位置** | `src-tauri/src/playlist_migration/{mod,source}.rs`、`src-tauri/src/commands.rs::parse_playlist_migration_source`、`ui/src/composables/usePlaylistMigration.ts` |
+| **输入** | `url: string`，平台允许的 HTTPS 歌单链接 |
+| **输出** | `Playlist { platform, title, tracks: [{ title, artists }], expectedTotal, warning }`，平台值为 `netease`、`qq`、`qishui` |
+| **核心流程** | 识别来源 → 校验短链跳转 → 拉取公开数据及必要分页 → 输出可用曲目与完整性提示 → 复制或将预览原样写为 UTF-8 TXT |
+| **依赖项** | `reqwest`、上游公开接口或分享页、剪贴板与保存对话框 |
+| **配置项** | 无持久配置。通过桌面 IPC 调用 |
+| **异常/边界** | 同时最多读取 4 个来源，单请求 10 秒、单来源 45 秒。短链最多跳转 4 次且仍须符合平台规则。部分成功时返回已读曲目与警告，无可用曲目且发生错误时返回失败 |
+| **GPUI 实现建议** | 复用来源白名单、重定向校验、响应大小限制及分页逻辑，保留部分成功状态与预览文本原样导出 |
+| **待确认** | 上游平台改版后需回归真实分享链接 |
+
+### F21 TTS 文本转语音
+
+| 项目 | 内容 |
+| :--- | :--- |
+| **功能名称** | 本地脚本配音、参考音色与 WAV 导出 |
+| **状态** | 已实现 |
+| **判断依据** | `tts.rs` 管理模型与合成，`tts_script.rs` 解析脚本，`speech_audio.rs` 处理参考音频 |
+| **功能描述** | Kokoro 选择模型内置说话人，ZipVoice 选择内置或用户参考录音并填写对应逐字稿 |
+| **入口/触发** | 侧栏「文生语音」工作台与「设置 → 模型」中的 TTS 模型管理 |
+| **关键代码位置** | `src-tauri/src/{tts,tts_models,tts_script,speech_audio}.rs`、`ui/src/components/tts/`、`ui/src/stores/tts.ts` |
+| **输入** | TXT/SRT/LRC 或编辑后的 `TtsSegment { startMs, endMs, text }[]`、模型、音色、可选参考音频与文字 |
+| **输出** | `SynthesisResult { name, path, sampleRate, duration }`，保留模型原生采样率的 WAV，可预听并另存 |
+| **核心流程** | 纯文本合并段落并按句界与长度分段，长段优先在标点等边界切分，分段上限 180 字符。带时间轴脚本按校验后的时隙排布。安装和合成按 UUID 报进度与取消，合成时按需加载所选引擎 |
+| **依赖项** | `sherpa-onnx`、模型资源、ffmpeg（参考音频处理） |
+| **配置项** | `prefs.ttsDownloadUrl`，模型位于 `<models>/tts/`。开发资源 `models/voices/`，包内 `voices/`，可由同目录 `prompts.json` 匹配逐字稿 |
+| **异常/边界** | ZipVoice 参考音频归一化到 16 kHz，要求 3–10 秒与对应文本。自定义参考原始上传上限 25 MiB。合成最长 30 分钟，结果存应用缓存，清理限额为 8 项及 512 MiB |
+| **GPUI 实现建议** | 复用脚本、参考音频与模型逻辑，用原生线程、进度通道、播放器和保存对话框替换 Tauri glue。保留合成取消、原生采样率与阶段错误 |
+| **待确认** | 各目标平台随包参考音色及模型文件需实机验收 |
+
 ## 3. 跨模块核心流程
 
 > 本节描述「一个动作跨了几个模块、按什么顺序、失败点在哪」。单看功能点容易漏掉这些耦合。
 
 ### 3.1 启动流程（Rust + 前端）
+
+Linux 先初始化壁纸媒体服务，再恢复偏好。应用注册 `AppState` 后为已启用的音频索引排入后台同步。ASR 继续按 `lastAsrModel` 后台恢复，TTS 在手动加载或合成时创建引擎。入口见 `src-tauri/src/lib.rs::run`。
 
 ```
 main()
@@ -989,6 +1061,8 @@ generate_subtitles(key, separation_model, separation_target)
 
 ### 3.9 HTTP 控制回路
 
+下图为播放控制等前端 action 的路径。字幕、分离和 ASR 加载由 Rust 在校验后入串行队列并返回 `202`，客户端用任务查询或 SSE 获取进度及结果。
+
 ```
 外部脚本 ──HTTP──▶ axum handler
                     ├─ CORS 中间件（无 Origin 放行）
@@ -1052,7 +1126,7 @@ download_asr_model()
 
 **注意**：`config.json` 与 `categories.json` 在首次启动时由 `ensure_file` 主动写出；`prefs.json` / `schedule.json` / `loops.json` **不会**在首次启动时创建，只有实际保存时才落盘（读取缺失文件返回默认值且不告警）。GPUI 若做「配置文件是否存在」的判断，不要假设 5 个文件都会存在。
 
-### 4.2 `prefs.json`（version 4，34 字段）
+### 4.2 `prefs.json`（version 4，35 字段）
 
 | 字段（camelCase） | 类型 | 默认 | 收敛规则 |
 | :--- | :--- | :--- | :--- |
@@ -1082,6 +1156,7 @@ download_asr_model()
 | `closeAction` | `ask`\|`quit`\|`tray` | ask | — |
 | `modelsDir` | string \| null | null | trim、去 `\\?\` 前缀、≤512 字符；null = 默认目录 |
 | `asrDownloadUrl` | string | `https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B` | 仅 http(s)、≤1024、无空白；非法回退默认 |
+| `ttsDownloadUrl` | string | `""` | 空值走内置下载源。自定义使用 HTTP(S) 文件目录，拒绝查询和片段，去掉末尾 `/` |
 | `lastAsrModel` | string \| null | null | 相对路径、`/` 分隔；拒绝绝对路径、盘符、`..`；≤512 |
 | `separationModel` | string \| null | null | trim、去空、≤256 字符（**前端权威**） |
 | `desktopLyricsEnabled` | bool | false | 由歌词命令维护 |
@@ -1166,6 +1241,9 @@ download_asr_model()
 
 ### 4.7 派生数据
 
+- `<config>/audio-index.json` 记录当前索引的根目录、开关、版本与分析条目。关闭索引会删除该文件。
+- `<app_cache>/tts/speech-<UUID 简写>.wav` 保存合成预览结果。用户通过保存命令另存长期使用的 WAV。
+
 **`subtitles/<prefix>-<hash16>.json`**（`StoredSubtitle`）
 
 | 字段 | 说明 |
@@ -1228,6 +1306,8 @@ download_asr_model()
 外置曲库会补齐分类子目录（`ensure_category_dirs`）；`bundled` / `custom` / `env` 不自动建目录。
 
 ### 4.11 打包资源清单（`tauri.conf.json`）
+
+`../models/voices` 打包为 `voices/`，含参考 WAV 与 `prompts.json`。绿色版也需复制这组资源。
 
 | 源 | 目标 |
 | :--- | :--- |
@@ -1356,7 +1436,7 @@ state.ts（单一 reactive 根）
 
 > 本节用途：**量化待消除的差距**，不是「可保留的分支差异清单」。按 §0.0 原则 4，下表中标为「缺」「旧版」「仅」的项都属于 gpui 必须补齐的内容；行数差异只用于估算工作量。
 
-**core 模块级差异**（行号统计以 `origin/bgm-gpui@59175f0` 与 `e59ee18` 对比）
+**core 模块级历史差异**（行数以 `origin/bgm-gpui@59175f0` 与 `e59ee18` 为准）。当前主线还新增 `audio_index.rs` 和 `process.rs`，偏好多 `ttsDownloadUrl`，路径模块新增 `AUDIO_INDEX_FILE`，文件操作新增按索引路径软删除。
 
 | 文件 | gpui 行数 | 主线行数 | 差异 | 缺失能力 |
 | :--- | ---: | ---: | :--- | :--- |
@@ -1398,6 +1478,9 @@ state.ts（单一 reactive 根）
 | F16 分离 | 无 | **未实现** |
 | F17 字幕 | 无 | **未实现** |
 | F18 桌面歌词 | 无 | **未实现** |
+| F19 音频索引 | 无 | **未实现** |
+| F20 公开歌单迁移 | 无 | **未实现** |
+| F21 TTS | 无 | **未实现** |
 
 ### 6.2 建议迁移批次
 
@@ -1407,10 +1490,10 @@ state.ts（单一 reactive 根）
 
 1. 用主线 `src-tauri/core` **整体替换** GPUI 的 `core/`，保持 crate 名 `bgm-core`。
 2. 修正 GPUI 对 `Prefs`、`AppConfig`、`Song` 的构造（新增字段有默认值，编译期会报缺失字段）。
-3. 运行 `cargo test -p bgm-core`（主线 96 项），确认归一化 / 迁移 / 导出决策树全部通过。
+3. 运行 `cargo test -p bgm-core`（主线 108 个测试声明），确认归一化 / 迁移 / 导出决策树全部通过。
 4. **验收**：同一份 `prefs.json` 在两分支间来回读写不丢字段；`cargo check` 通过。
 
-**风险提示**：① `Prefs` 从 8 字段扩到 34 字段，GPUI 现有的「读入 → 改一个字段 → 写回」路径会**抹掉**其余 26 个字段，替换后必须检查所有 `save` 调用点是否基于完整结构体；② 替换后扫描格式从 **mp3** 扩到 **5 种**，界面上会突然出现 flac/m4a/wav/ogg 曲目，GPUI 的播放与时长展示需先确认能处理这些容器；③ `LibrarySource` 会多出 `External`，GPUI 中所有 `match` 该枚举的位置都会编译报错——这是**好事**（强制补分支），不要用 `_ =>` 掩盖。
+**风险提示**：① `Prefs` 从 8 字段扩到 35 字段，GPUI 现有的「读入 → 改一个字段 → 写回」路径会**抹掉**其余 27 个字段，替换后必须检查所有 `save` 调用点是否基于完整结构体；② 替换后扫描格式从 **mp3** 扩到 **5 种**，界面上会突然出现 flac/m4a/wav/ogg 曲目，GPUI 的播放与时长展示需先确认能处理这些容器；③ `LibrarySource` 会多出 `External`，GPUI 中所有 `match` 该枚举的位置都会编译报错——这是**好事**（强制补分支），不要用 `_ =>` 掩盖。
 
 **批次 B：数据与播放（P1）**
 
@@ -1497,7 +1580,9 @@ state.ts（单一 reactive 根）
 | `WebviewWindowBuilder` 参数 | 平台差异大 | 平台特定 window 配置 |
 | Tauri `generate_context!` / `manage` | 框架特有 | 自建 `App` 结构体 + `Arc` |
 
-### 6.6 对齐任务清单（F01–F18）
+### 6.6 对齐任务清单（F01–F21）
+
+F19 随批次 A 复用 core，并在曲库与前端入口接通后完整验收。F20、F21 纳入批次 E 的独立工作台验收。
 
 > 用法：按行拆 issue。每行的「对齐目标」都是**主线现状**，不是建议；「gpui 必做」是达到目标的最小动作；「验收」对应 §8.2 的条目编号（可回查具体步骤）。**验收只看功能与反馈语义，不看布局与样式**。
 
@@ -1513,7 +1598,7 @@ state.ts（单一 reactive 根）
 | F08 | 歌曲级时间轴、不重叠、1s tick + 2min 回看 + 90s 休眠对齐、时段拦截 | 新增 `core/schedule.rs` + 调度器 + `EndedAction` 决策 | §8.2 F08 |
 | F09 | 4 预设、两遍 loudnorm、ffmpeg 三级探测、失败回退决策树 | 新增 `core/loudness.rs`；替换 `export.rs`；`rfd` 换对话框 | §8.2 F09 |
 | F10 | 72 段频谱、BS.1770 双门限、削波/相位/静音/爆音判定、三档结论 | 算法先翻成 Rust 纯函数并单测，再做波形/仪表渲染 | §8.2 F10 |
-| F11 | `Prefs` 34 字段、v4 迁移、后端 4 字段权威、280ms 防抖 + 退出前 flush | 整体替换 `core/prefs.rs`；补齐所有 `save` 调用点 | §8.2 F11 |
+| F11 | `Prefs` 35 字段、v4 迁移、后端 6 字段权威、280ms 防抖 + 退出前 flush | 整体替换 `core/prefs.rs`；补齐所有 `save` 调用点 | §8.2 F11 |
 | F12 | 7 个合法 id、透明度/模糊/填充、内置缺失隐藏、视频失焦暂停 | 先静态图 + 首帧降级；字段与 id 集合保持一致 | §8.2 F12 |
 | F13 | 字体扫描、自启三平台、托盘联动、关闭行为、GPU/防休眠/媒体控件 | 复用 `fonts.rs`/`desktop.rs` 逻辑；媒体控件与防休眠按平台实现或明示不支持 | §8.2 F13 |
 | F14 | 33 个方法+路径（9 类）、14 action、长任务 SSE、401/403/404/409/503/504、快照字段 | 复用 `api.rs`；去掉命令桥，直接调引擎；快照结构提到 `bgm-core` 共用 | §8.2 F14 |
@@ -1521,6 +1606,9 @@ state.ts（单一 reactive 根）
 | F16 | 双引擎分离、worker 子进程、10 分钟串行、`.part` 保护、`separation.json` | 复用 `separation.rs`；随包模型进 gpui 打包 | §8.2 F16 |
 | F17 | 强制分离前置、只识别人声、SRT/LRC 解析与编辑校验、key 迁移、哈希路径 | 复用 `subtitles.rs`；`subtitle_stem` 必须逐字一致 | §8.2 F17 |
 | F18 | 透明置顶、逐词高亮、rate 本地推进、锁定穿透、样式 v4 | 多窗口 + 平台 window level；先不透明后透明 | §8.2 F18 |
+| F19 | 索引增量同步、详情缓存、文件/录音查询、查重软删除 | 复用 core，接入音频工具 | §8.2 F19 |
+| F20 | 3 平台公开链接、完整性提示、预览、复制及 TXT 保存 | 复用解析模块，接入原生剪贴板和对话框 | §8.2 F20 |
+| F21 | 模型管理、TXT/SRT/LRC、参考音色、取消、WAV 预览与导出 | 复用 Rust 合成模块与参考音频流程 | §8.2 F21 |
 
 **对齐完成的判定**：§6.6 全部行通过 + §8.3 五个批次门槛全过 + 同一份配置/曲库在两分支间互换后行为一致。
 
@@ -1549,18 +1637,20 @@ state.ts（单一 reactive 根）
 
 | 风险 | 影响 | 缓解 |
 | :--- | :--- | :--- |
-| `prefs.json` 结构差异（8 vs 34 字段） | GPUI 写回会丢配置 | 批次 A 整体替换 + 只读过渡 |
+| `prefs.json` 结构差异（8 vs 35 字段） | GPUI 写回会丢配置 | 批次 A 整体替换 + 只读过渡 |
 | gpui `core` 仅支持 mp3 | 与主线的 5 格式曲库不兼容（同一目录在两侧扫描结果不同） | 整体替换 `library.rs` / `ops.rs`，并先验证播放器能解 flac/m4a/wav/ogg |
 | 两个分支对同名文件生成不同序号 | 文件重复 / key 冲突 | 复用 `ops::unique_path`，勿自行实现 |
 | 字幕 key→文件名哈希不一致 | 互相读不到记录 | 复用 `subtitles::subtitle_stem` |
 | 分离 worker 子进程参数不一致 | 子进程启动后不退出、重复建窗 | 严格复用 `--separation-worker` 早退逻辑 |
 | rodio 倍速变调 | 听感与主线不同（主线 `playbackRate` 保音高） | **对齐要求**：需实现保音高（WSOLA / phase vocoder），否则视为未对齐（§0.0 原则 5）；不允许以「已知差异」长期保留 |
 | 多设备时钟漂移 | 长时间播放不同步 | 共享 mix bus，不做多路独立解码 |
-| Wayland 置顶/穿透限制 | 桌面歌词不可用 | 先支持 X11 / Windows / macOS，Wayland 降级提示 |
+| Wayland 置顶/穿透限制 | 歌词可显示，位置和置顶取决于合成器 | 保留普通窗口及悬停解锁 |
 | `sherpa-onnx` 对不兼容模型 `_Exit(-1)` | 主进程被杀 | 必须保留 worker 子进程隔离 |
 | ffmpeg 每次探测 spawn 3 次进程 | 打开导出对话框有延迟 | GPUI 侧缓存探测结果 |
 
 ### 7.3 待确认项（编号）
+
+F19–F21 的实机验证项分别为目标平台麦克风和编码、三家平台当前公开分享链接、随包参考音色和模型文件。
 
 > 说明：按 §0.0，凡「主线已有明确行为」的都不再列为待确认，直接按主线对齐；本表只保留**技术可行性未知**或**外部事实无法从代码确认**的项。产品取舍类问题一律以主线为准，不再讨论。
 
@@ -1569,7 +1659,7 @@ state.ts（单一 reactive 根）
 | Q1 | gpui `rodio 0.23` 实际启用的解码特性 | `Cargo.toml` 只写 `rodio = "0.23"`，未显式列特性 | 必须覆盖 mp3 / m4a / flac / wav / ogg；缺哪个就在特性里显式打开，或改用 `symphonia` 直连 | `cargo tree -e features` 实测 + 5 种样例文件回归 |
 | Q2 | 保音高倍速的实现选型 | gpui 现为变调（与主线不一致） | 必须实现保音高；具体用哪个 crate / 算法由实现方决定 | `signalsmith-stretch` / `rubato` + WSOLA 的 CPU 与延迟实测 |
 | Q3 | 随包分离模型如何进 gpui 打包 | 主线 `tauri.conf.json` 已列 3 个模型；gpui 无打包配置 | 必须随包分发（否则 F16 开箱不可用），绿色版允许外置 `models/` | gpui 打包产物的资源目录约定 |
-| Q4 | Wayland 下「始终置顶 + 鼠标穿透」 | 主线依赖 Tauri/平台 API | 需实现；若协议层确实不支持，则在界面明示「当前会话不支持」，而不是静默失效 | 目标桌面环境（GNOME/KDE/wlroots）实测 |
+| Q4 | Wayland 歌词窗口 | 普通透明窗口，锁定态保持可交互 | 复现目标会话的定位、置顶和悬停解锁行为 | 目标桌面环境（GNOME/KDE/wlroots）实测 |
 | Q5 | 旧文档「41 个 Tauri 命令」的来源 | 实测基线 `db22c65` 为 **32** 个 | 以本文实测为准，旧数字作废 | 无需确认（已按代码修正） |
 | Q6 | gpui 声明的视觉基线 `203c641` 是否可解析 | `AGENTS.md` / `README.md` 提及，但该提交不在本仓库对象库 | **不适用**：UI 布局与视觉样式不作对齐要求（§0.0 原则 6），无需以该提交为准 | 无需确认；仅当需要复刻某个具体交互手感时才回查 |
 
@@ -1581,10 +1671,10 @@ state.ts（单一 reactive 根）
 
 | 命令 | 覆盖 |
 | :--- | :--- |
-| `cd src-tauri && cargo test -p bgm-core` | 96 项：扫描、分类、偏好、配置、节目单、循环、导出、响度、持久化、标签 |
+| `cd src-tauri && cargo test -p bgm-core` | 108 个测试声明：扫描、分类、偏好、配置、节目单、循环、导出、响度、持久化、标签 |
 | `cargo test -p tfy-bgm --lib subtitles::tests` | 16 项：SRT/LRC 解析、往返、非法标签、超长文本拒绝、key 迁移、分离路径重映射 |
 | `cargo test -p tfy-bgm --lib separation::tests` | WAV 写出、`.tar.bz2` 首次解压/替换、模型元数据预检、解码分声道、worker 非法任务拒绝、双引擎线程分配；真实模型测试默认 `#[ignore]` |
-| `cargo test -p tfy-bgm --lib` | 应用层 58 项（含 `api::tests` 的 origin / 状态码映射、`state::tests` 的 diff） |
+| `cargo test -p tfy-bgm --lib` | 应用层 110 个测试声明（含 `api::tests` 的 origin / 状态码映射、`state::tests` 的 diff） |
 | `cargo clippy -p bgm-core --all-targets -- -D warnings` | 静态检查 |
 | `cargo fmt --all -- --check` | 格式 |
 
@@ -1696,54 +1786,42 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 - [ ] 设置窗改字号 / 颜色 / 提前量立即生效并持久化
 - [ ] 关闭歌词窗后偏好清除，重启不再自动开
 
+**F19 音频索引**
+
+- [ ] 首次建立需确认，启动或曲库变动时后台同步。切换根目录后不展示旧索引为当前结果。
+- [ ] 同源不同格式能查重。仅移动用户选中的有效副本，确认取消时不改变文件。
+- [ ] 文件和麦克风均能查询，关闭索引后搜索不可用，歌曲详情仍可访问。
+
+**F20 公开歌单迁移**
+
+- [ ] 三个平台各有正常输入用例，验证曲序、艺人与多来源文本预览。
+- [ ] 过期、非公开及返回不完整时有相应提示，复制和 TXT 保存内容与预览一致。
+
+**F21 语音合成**
+
+- [ ] 双模型的下载源、安装、取消、加载、卸载及删除行为可验证。
+- [ ] TXT 分段能合并短段并切开长段，SRT/LRC 保留时间轴。内置 ZipVoice 自动填入可用逐字稿。
+- [ ] 参考录音期间主播放器停止发声。取消后忽略旧进度，合成 WAV 可按原生采样率预听和另存。
+
 ### 8.3 gpui 迁移验收门槛
 
 | 阶段 | 门槛 |
 | :--- | :--- |
-| 批次 A | `cargo test -p bgm-core` 全绿；`prefs.json` 双向读写字段数一致（34） |
+| 批次 A | `cargo test -p bgm-core` 全绿；`prefs.json` 双向读写字段数一致（35） |
 | 批次 B | 改名/移动/删除后 6 处引用全部正确；`.tfy-trash` 可恢复；循环无接缝 |
 | 批次 C | 节目单不重叠校验、时段拦截、休眠对齐三项通过；导出响度误差 ≤2 LU |
 | 批次 D | 下载/加载/识别/分离/字幕全链路通过；字幕文件哈希与主线一致 |
-| 批次 E | 14 个 HTTP action 通过；壁纸/字体/托盘/自启可用；歌词窗可置顶 |
+| 批次 E | 33 个方法与路径、14 个 HTTP action、长任务及 SSE 契约回归。验证壁纸、系统集成和歌词窗的平台行为，通过 F19–F21 的工作台验收 |
 
 > 验收边界：以上门槛只检查**功能可用性与数据一致性**。界面是否「像主线」、布局是否一致、配色与动效是否相同，**不在验收范围**（§0.0 原则 6）。唯一与观感相关的硬指标是「听感一致」（淡入淡出、循环无缝、响度目标、倍速保音高）与「状态可辨」（加载/禁用/错误有明确视觉区分）。
 
 ---
 
-## 9. 与原文档的主要变更记录
+## 9. 本次基线更新
 
-| # | 条目 | 旧文档 | 实际（本版） | 依据 |
-| :--- | :--- | :--- | :--- | :--- |
-| 1 | Tauri 命令总数 | 41（基线） / 58（附录 D） | **58**；基线 `db22c65` 实为 **32**，之后新增模型 9 + 字幕 9 + 歌词 8 | `lib.rs` 的 `generate_handler!` 逐项计数 |
-| 2 | `prefs.json` 版本 | version 3 | **version 4**，字段 34 个 | `prefs.rs:18` |
-| 3 | 同名文件序号 | `xxx-2.mp3` | **`xxx (2).mp3`**（空格 + 圆括号） | `ops.rs:507-517`、`ops.rs:604` 单测 |
-| 4 | 事件数量 | 3 个 | **后端 10 个 + 窗口内 2 个** | 10 个 `*_EVENT` 常量；`constants.ts::EVENTS` 12 项 |
-| 5 | 智能随机阈值 | 「短曲接短曲 ×0.4」「长曲接长曲 ×0.75」 | 短曲定义为 **`<60s`**；长曲定义为 **`≥300s`**；「≥180s 接 <90s ×0.22」正确 | `queue.ts:98-102` |
-| 6 | core 缺失行数 | 「缺 246 / 185 / 203 / 124 行」 | 差额应为 **784 / 129 / 147 / 245 行**（旧数字是 gpui 文件自身行数） | 两分支 `git show \| wc -l` |
-| 7 | 功能域数量 | 13 个（+ 附录 D 字幕） | **18 个**（新增 ASR、人声分离、字幕、桌面歌词为正式功能域） | §1 |
-| 8 | 持久化文件 | 5 个 | **5 个配置文件 + 2 个派生目录 + 曲库回收站** | §4 |
-| 9 | HTTP 路由 | 「17 条路由」 | **33 个方法+路径组合 / 9 个业务分类**；含字幕、人声分离、模型与长任务队列 | `api.rs::catalog` |
-| 10 | F01 检索范围 | 「曲名、分类目录名、中文名、英文名与英文标签」 | 同上，但**不匹配艺人/专辑**；字幕页检索才匹配艺人/专辑 | `state.ts:104-114`、`subtitles.ts:129-141` |
-| 11 | GPU 加速 | 只写 Windows/Linux 行为 | 补充：**macOS 为空实现** | `desktop.rs:349-353` |
-| 12 | 命令分组表 | 缺少模型 / 字幕 / 歌词三组 | 附录 A 给出 58 个命令的完整分组、参数与返回 | `commands.rs` 全量 |
-| 13 | 偏好字段表 | 缺 `separationModel` / `subtitleFormat` / `desktopLyricsEnabled` 等 | 34 字段全表 + 收敛规则 | `prefs.rs:156-228` |
-| 14 | 状态所有权 | 未说明 | 新增 §5.1 矩阵，区分 Rust 权威 / 前端权威 / 双写 | 代码核对 |
-| 15 | 失败语义 | 分散描述 | 新增 §3.2 / §3.3 的「迁移失败只告警不阻断」与「旧事件丢弃」 | `state.rs:751-791`、`library.ts:87` |
-| 16 | 已废弃实现 | 未系统列出 | 新增 §1.3（6 项） | 代码中的兼容/清理分支 |
-| 17 | 待确认项 | 无编号 | §7.3 给出 Q1–Q6 | — |
-| 18 | gpui 覆盖结论 | 「11 个功能域未覆盖」 | 修正为 **12 个未覆盖 / 6 个部分覆盖**（按 F01–F18 逐项核对） | `git ls-tree origin/bgm-gpui` + 逐文件比对 |
-| 19 | gpui `core` 的格式支持 | 未提及 | gpui 侧 `AUDIO_EXTENSION="mp3"`，**扫描/导入/导出全部只支持 mp3**；主线为 5 格式 | `git show origin/bgm-gpui:core/src/library.rs`、`ops.rs` |
-| 20 | gpui `LibrarySource` | 未提及 | gpui 只有 `Bundled/Custom/Env`，**缺 `External`**；替换 core 后该枚举会多一个变体 | 同上 |
-| 21 | 基准定位 | 以「同步功能」为隐含前提，但未明确谁为准 | 新增 **§0.0 基准原则**：当前分支为唯一基准，gpui 只对齐、不缩减、不改契约；历史差异属待消除项 | 用户确认 |
-| 22 | 待确认项性质 | 把产品取舍（保音高、是否随包模型）列为「待定」 | 改为「处置以主线为准 + 仅保留技术未知」，产品取舍不再进入待确认 | §7.3 重写 |
-| 23 | 任务可执行性 | 只有批次描述，无逐域动作 | 新增 **§6.6 对齐任务清单**（18 行，含目标 / 必做动作 / 验收回查） | 新增 |
-| 24 | UI 布局与样式 | 未明确，隐含「视觉对照主线」 | 新增 §0.0 原则 6：**布局与视觉样式不作对齐要求**；只要求功能可达、状态可辨、反馈语义一致。附录 E / §6.6 / §8.3 / 维护约定同步声明 | 用户确认 |
+本版从 `e59ee18` 更新到 `80faf7d`。新增 F19–F21，同步歌曲详情、Linux 媒体服务、Wayland 歌词降级、ASR 模型删除和本机 HTTP 长任务。各项序列化及对外契约见 §4 和附录 A–C。
 
-**保留自旧文档且经核对正确的内容**：`KeyChange` 迁移契约、节目单「不跨天 + 严禁重叠 + 2 分钟回看 + 90s 休眠对齐」、导出的两遍 loudnorm 与回退决策、诊断的 BS.1770 参数与阈值、字体扫描规则、根目录解析顺序、键盘快捷键、组件→功能域映射。
-
----
-
-## 附录 A：Tauri 命令全表（58）
+## 附录 A：Tauri 命令全表（83）
 
 | # | 命令 | 分组 | 参数 | 返回 | 关键副作用 |
 | ---: | :--- | :--- | :--- | :--- | :--- |
@@ -1751,7 +1829,7 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 | 2 | `reload_config` | 启动 | — | `ConfigReload { config, warnings }` | 更新内存 config + 窗口标题 |
 | 3 | `open_config_file` | 启动 | — | `()` | 文件管理器定位 |
 | 4 | `system_fonts` | 启动 | — | `SystemFont[]` | 阻塞线程扫描 |
-| 5 | `save_prefs` | 偏好 | `prefs: Prefs` | `Prefs` | 归一化 + 落盘 + 保留 4 个后端字段 |
+| 5 | `save_prefs` | 偏好 | `prefs: Prefs` | `Prefs` | 归一化 + 落盘 + 保留 6 个后端字段 |
 | 6 | `save_schedule` | 节目单 | `schedule: Schedule` | `Schedule` | 归一化 + 重叠拒绝 + 落盘 |
 | 7 | `save_loop_point` | 循环 | `key, start, end, enabled` | `LoopBook` | 校验曲目存在 + 落盘 |
 | 8 | `remove_loop_point` | 循环 | `key` | `LoopBook` | 落盘 |
@@ -1805,6 +1883,31 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 | 56 | `quit_app` | 桌面 | — | `()` | 置退出标记 + 退出 |
 | 57 | `builtin_wallpapers` | 壁纸 | — | `WallpaperAsset[]` | 定位 + 授权资源 |
 | 58 | `choose_wallpaper_file` | 壁纸 | — | `WallpaperPick \| null` | 文件对话框 + 校验 + 授权 |
+| 59 | `wallpaper_media_url` | 壁纸 | `path` | `string \| null` | Linux 视频流地址 |
+| 60 | `audio_index_status` | 音频索引 | — | `AudioIndexStatus` | 查询当前索引 |
+| 61 | `build_audio_index` | 音频索引 | — | `AudioIndexStatus \| null` | 首次确认、建立索引 |
+| 62 | `disable_audio_index` | 音频索引 | — | `AudioIndexStatus \| null` | 确认并删除索引 |
+| 63 | `audio_index_for_song` | 音频索引 | `key, path` | `AudioIndexInfo \| null` | 查询曲目缓存 |
+| 64 | `find_audio_duplicates` | 音频索引 | — | `DuplicateReport` | 扫描重复项 |
+| 65 | `search_library_by_sound` | 音频索引 | `limit?` | `SoundSearchResult \| null` | 选择查询文件 |
+| 66 | `search_library_by_recording` | 音频索引 | 原始字节、可选 `x-sound-search-limit` | `SoundSearchResult` | 用临时录音查询 |
+| 67 | `delete_audio_duplicates` | 音频索引 | `paths[]` | `LibraryMutation \| null` | 确认后软删除选中副本 |
+| 68 | `delete_asr_model` | ASR | `id` | `ModelsInfo` | 释放并删除指定模型，清理对应恢复目标 |
+| 69 | `parse_playlist_migration_source` | 歌单迁移 | `url` | `Playlist` | 读取公开歌单 |
+| 70 | `save_playlist_migration_text` | 歌单迁移 | `text` | `string \| null` | 保存原样 UTF-8 文本并返回路径 |
+| 71 | `tts_models` | TTS | — | `TtsModel[]` | 查询安装与加载状态 |
+| 72 | `install_tts_model` | TTS | `id, jobId` | `()` | 安装与下载进度 |
+| 73 | `open_model_download_source` | 模型 | `tts` | `()` | 打开对应下载源 |
+| 74 | `save_model_download_source` | 模型 | `tts, url` | `string` | 校验并保存，返回生效地址 |
+| 75 | `load_tts_model` | TTS | `id` | `()` | 加载引擎 |
+| 76 | `remove_tts_model` | TTS | `id, deleteFiles` | `()` | 卸载，按需删除模型文件 |
+| 77 | `parse_tts_script` | TTS | `text, format` | `TtsSegment[]` | 校验并解析 `txt`/`srt`/`lrc` |
+| 78 | `normalize_tts_reference` | TTS | 原始字节 | 原始 WAV 字节 | 归一化参考音频 |
+| 79 | `list_tts_builtin_voices` | TTS | — | `string[]` | 枚举内置参考 WAV |
+| 80 | `load_tts_builtin_reference` | TTS | `voice` | `{ audio: number[], text: string \| null }` | 读取参考音频与逐字稿 |
+| 81 | `generate_tts` | TTS | `request: { family, modelId, voiceId, segments, referenceAudio?, referenceText? }, jobId` | `SynthesisResult` | 合成并缓存预览 |
+| 82 | `cancel_tts_job` | TTS | `kind: install \| synthesis, jobId` | `()` | 请求取消对应任务 |
+| 83 | `save_tts_audio` | TTS | `name` | `bool` | 保存 WAV，取消返回 `false` |
 
 ## 附录 B：事件全表
 
@@ -1822,6 +1925,10 @@ CI（`.github/workflows/package.yml`）在 Linux 任务里执行 `cargo test -p 
 | `desktop-lyrics-settings-state` | Rust → 歌词窗 | `{ open }` | 设置悬浮窗开/关 | 歌词窗 Aa 按钮 |
 | `desktop-lyrics-style` | 歌词窗 ↔ 设置窗 | `LyricsStyle` | 任一侧修改样式 | 仅窗口内（前端常量） |
 | `desktop-lyrics-command` | 设置窗 → 歌词窗 | `LyricsCommand` | 锁定 / 恢复默认 | 仅窗口内（前端常量） |
+| `audio-index-progress` | Rust → 主窗 | `{ current, total, title }` 或 `null` | 分析进度，本轮完成后清空 | `useAudioIndex.ts` |
+| `audio-index-updated` | Rust → 主窗 | `string[]` | 同步完成、失败或清除索引，载荷为警告 | `useAudioIndex.ts`、歌曲详情 |
+| `tts-download-progress` | Rust → 主窗 | `{ jobId, id, file, received, total }` | 模型下载中 | `tts.ts` |
+| `tts-synthesis-progress` | Rust → 主窗 | `{ jobId, current, total }` | 语音合成进度 | `TtsWorkspace.vue` |
 
 ## 附录 C：HTTP 接口
 
@@ -1879,12 +1986,14 @@ POST   /v1/command/{action}        body 即 params（或 body.params）
 ```
 
 **长任务队列**（`tasks.rs`）：字幕生成 / 人声分离 / ASR 加载共用**串行**队列；字幕与分离另按曲目 key 进程内互斥（UI 与 HTTP 共用，避免并发写同一交付目录）；提交返回 `202` 与 `data.task`；
-同 `kind + key` 未完成时重复提交返回 `409`；任务只存内存（最近 50 条），重启清空；暂不支持取消。
+同 `kind + key` 未完成时重复提交返回 `409`；任务只存内存（保留最近 50 条已完成任务及在途任务），重启清空；暂不支持取消。
 
-**SSE 帧**（`event_bus.rs` + `api.rs`）：所有帧都是标准 `id:` / `event:` / `data:` 三段。
+**SSE 帧**（`event_bus.rs` + `api.rs`）默认包含 `id:`、`event:`、`data:`，每 15 秒发保活注释。
 `id` 进程内单调递增；客户端带 `Last-Event-ID`（或 `?lastEventId=`）时先补发缺口内事件，历史保留 256 条，
 超出窗口先发 `event: resync`（`reason = window | reset`）；`?legacy=1` 退回无 `event:` 的旧帧（只推 `state`）；全局流 `event` 为 `state` / `task` / `resync`，
-逐任务流为 `snapshot` / `progress` / `done` / `failed`，终态后服务端关闭连接。
+逐任务流重连时读取最新快照，事件为 `snapshot`、`progress`、`done`、`failed`，终态后服务端关闭连接。旧模式跳过历史重放。
+
+**任务快照**包含 `{ id, kind, status, key?, stage, message, current, total, error?, createdAtMs, startedAtMs?, finishedAtMs?, result? }`。`kind` 为 `subtitles`、`separation`、`asrLoad`。`status` 为 `queued`、`running`、`succeeded`、`failed`。任务 SSE 的 `data` 为 `{ type: "task", task }`。
 
 **通用 action（14）**：`state`、`play`、`pause`、`resume`、`toggle`、`next`、`previous`、`seek`、`volume`、`crossfade`、`outputs.list`、`outputs.refresh`、`outputs.unlock`、`outputs.set`。
 
@@ -1912,7 +2021,7 @@ library: { root, count }
 | `↑` / `↓` | 音量 ± | 默认 0.1，取 `config.player.volumeStep` |
 | `M` | 静音 / 恢复 | 恢复时若音量为 0 则设为 0.5 |
 | `/` | 聚焦搜索并全选 | 输入框内不触发 |
-| `Esc` | 逐层退出 | 队列抽屉 → 清除批量选择 → 清空搜索；诊断面板单独响应 |
+| `Esc` | 逐层退出 | 队列抽屉 → 歌曲详情 → 清除批量选择 → 清空搜索 |
 
 按键在 `INPUT` / `TEXTAREA` / `SELECT` / `contentEditable` 内一律让行（`/` 除外）；`空格` 在 `button` / `a` / `[role=button]` 上不拦截。
 
@@ -1925,7 +2034,10 @@ library: { root, count }
 | `TopBar` / `Sidebar` / `Workspace` / `HeroBanner` / `CategoryFilter` / `SongTable` / `SongRow` | F01 / F02 / F11 |
 | `AudioPlayer` / `QueueDrawer` / `MarqueeText` / `OutputPanel` / `ExportSettingsPopover` | F05 / F06 / F07 / F09 |
 | `SchedulePage` / `ScheduleEditor` / `SongPickerDialog` | F08 |
-| `DiagnosticsPanel` / `Equalizer` | F10 |
+| `SongDetailsPanel` / `SongDetailsContent` / `DiagnosticsPanel` / `Equalizer` | F10（详情缓存关联 F19） |
+| `audio-tools/` | F19 |
+| `playlist-migration/` | F20 |
+| `tts/` | F21 |
 | `SettingsDialog` / `FontSelect` / `SettingSwitch` / `ClosePrompt` | F13 / F14 |
 | `WallpaperLayer` / `WallpaperPopover` | F12 |
 | `SubtitlePage` | F17（+ F18 开关入口） |
@@ -1953,6 +2065,11 @@ library: { root, count }
 | `499cb88` | 添加音频分离模型文件 | F16 |
 | `c8276f2` | 强制人声分离前置与分离模型支持 | F16 / F17 |
 | `e59ee18` | 双引擎并行分离，伴奏固定 UVR 乐器模型 | F16 |
+| `8ba4f85` | HTTP 扩展、长任务、标准 SSE | F14–F17、F20 |
+| `0aba015` | 歌曲详情与诊断入口整合 | F10 |
+| `630b69b` / `923684a` | Wayland 歌词、Linux 视频壁纸、平台模块拆分 | F12、F13、F18 |
+| `f4a5479` / `575ab5c` | 本地音频索引、后台队列同步 | F19 |
+| `142c211` 至 `80faf7d` | TTS 工作台、动态音色、模型管理和脚本分段 | F21 |
 
 ---
 
