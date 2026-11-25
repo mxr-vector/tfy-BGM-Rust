@@ -477,9 +477,9 @@ fn synthesize(
     if request
         .reference_audio
         .as_ref()
-        .is_some_and(|audio| audio.len() > 330_000)
+        .is_some_and(|audio| audio.len() > 500_000)
     {
-        bail!("参考音频不能超过 10 秒");
+        bail!("参考音频不能超过 15 秒");
     }
     let model = tts_models::model(root, &request.model_id)?;
     if !model.installed || model.family != request.family {
@@ -503,7 +503,7 @@ fn synthesize(
         let reference = request
             .reference_audio
             .as_deref()
-            .context("ZipVoice 需要 3–10 秒参考音频")?;
+            .context("ZipVoice 需要 5–15 秒参考音频")?;
         generation.reference_audio = Some(speech_audio::read_reference(reference)?);
         generation.reference_sample_rate = speech_audio::REFERENCE_RATE as i32;
         generation.num_steps = 4;

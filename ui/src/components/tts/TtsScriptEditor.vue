@@ -1,22 +1,23 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import AppSelect from '@/components/AppSelect.vue';
 import Icon from '@/components/Icon.vue';
 import { COMMANDS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
+import { ttsScriptFormat as format, ttsScriptText as sourceText } from '@/stores/tts';
 
 interface Segment { text: string; startMs: number | null; endMs: number | null }
 type TextFormat = 'txt' | 'lrc' | 'srt';
+
+const DEFAULT_SCRIPT = '我深怕自己本非美玉，故而不敢加以刻苦琢磨，却又半信自己是块美玉，故又不肯庸庸碌碌，与瓦砾为伍。于是我渐渐脱离凡尘，疏远世人，结果便是一任愤懑与羞恨日益助长那怯弱的自尊心。其实任何人都是驯兽师，而那野兽，无非是个人的性情而已。';
 
 const formatOptions = [
   { value: 'txt', label: '纯文本' },
   { value: 'lrc', label: 'LRC 字幕' },
   { value: 'srt', label: 'SRT 字幕' },
 ];
-const sourceText = ref('');
-const format = ref<TextFormat>('txt');
 const title = ref('未载入文本');
 const segments = ref<Segment[]>([]);
 const hasText = computed(() => Boolean(sourceText.value.trim()));
@@ -63,6 +64,11 @@ async function importText(event: Event): Promise<void> {
     if (generation === textGeneration) toast(`解析文本失败：${normalizeError(error)}`, 'error');
   }
 }
+
+onMounted(() => {
+  if (!sourceText.value.trim()) sourceText.value = DEFAULT_SCRIPT;
+  void parseText();
+});
 
 async function parseText(): Promise<Segment[] | null> {
   const generation = invalidateText();

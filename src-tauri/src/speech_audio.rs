@@ -7,6 +7,10 @@ use bgm_core::{
 };
 
 pub const REFERENCE_RATE: u32 = 16_000;
+const MIN_REFERENCE_SAMPLES: usize = 48_000;
+const MIN_RECORDED_REFERENCE_SAMPLES: usize = 80_000;
+const MAX_REFERENCE_SAMPLES: usize = 240_000;
+const MAX_REFERENCE_BYTES: usize = 500_000;
 const EDGE_FADE_MS: u32 = 5;
 const EDGE_PAD_MS: u32 = 12;
 const OUTPUT_PRESET: ExportPreset = ExportPreset {
@@ -75,8 +79,9 @@ fn convert(
 }
 
 pub fn prepare_reference(bytes: &[u8]) -> Result<Vec<u8>> {
-    // Decode slightly past the ceiling so validation rejects rather than truncates long clips.
-    normalize_reference(bytes, "10.1")
+    let normalized = normalize_reference(bytes, "15.1")?;
+    read_recorded_reference(&normalized)?;
+    Ok(normalized)
 }
 
 pub fn builtin_voice_files(root: &Path) -> Result<Vec<String>> {
@@ -125,7 +130,7 @@ pub fn prepare_builtin_reference(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, 
     };
     if let Some(prompt) = prompt {
         let text = prompt.text.trim();
-        if !(3.0..=10.0).contains(&prompt.end_seconds) || !valid_reference_text(text) {
+        if !(3.0..=15.0).contains(&prompt.end_seconds) || !valid_reference_text(text) {
             bail!("内置音色逐字稿或参考片段时长无效");
         }
         let audio = normalize_reference(bytes, &prompt.end_seconds.to_string())?;
@@ -156,16 +161,26 @@ fn normalize_reference(bytes: &[u8], limit: &str) -> Result<Vec<u8>> {
 }
 
 pub fn read_reference(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() > 330_000 {
-        bail!("参考音频时长必须在 3–10 秒之间");
+    read_reference_with_minimum(bytes, MIN_REFERENCE_SAMPLES)
+}
+
+pub fn read_recorded_reference(bytes: &[u8]) -> Result<Vec<f32>> {
+    read_reference_with_minimum(bytes, MIN_RECORDED_REFERENCE_SAMPLES)
+}
+
+fn read_reference_with_minimum(bytes: &[u8], minimum_samples: usize) -> Result<Vec<f32>> {
+    if bytes.len() > MAX_REFERENCE_BYTES {
+        bail!("参考音频时长不能超过 15 秒");
     }
     let file = tempfile::NamedTempFile::new()?;
     std::fs::write(file.path(), bytes)?;
     let wave = read_wave(file.path())?;
-    if wave.sample_rate() != REFERENCE_RATE as i32
-        || !(48_000..=160_000).contains(&wave.samples().len())
-    {
-        bail!("参考音频须先转换为 16 kHz 单声道，时长须在 3–10 秒之间");
+    if wave.sample_rate() != REFERENCE_RATE as i32 {
+        bail!("参考音频须先转换为 16 kHz 单声道");
+    }
+    if !(minimum_samples..=MAX_REFERENCE_SAMPLES).contains(&wave.samples().len()) {
+        let minimum_seconds = minimum_samples / REFERENCE_RATE as usize;
+        bail!("参考音频时长须在 {minimum_seconds}–15 秒之间");
     }
     let peak = wave
         .samples()
@@ -332,7 +347,7 @@ mod tests {
             let (normalized, transcript) = prepare_builtin_reference(&path, &bytes)
                 .unwrap_or_else(|err| panic!("{name}: {err:#}"));
             assert!(transcript.is_some(), "missing transcript for {name}");
-            assert!((48_000..=160_000).contains(&read_reference(&normalized).unwrap().len()));
+            assert!((MIN_REFERENCE_SAMPLES..=MAX_REFERENCE_SAMPLES).contains(&read_reference(&normalized).unwrap().len()));
         }
     }
 
@@ -342,16 +357,29 @@ mod tests {
             return;
         }
         let file = tempfile::NamedTempFile::new().unwrap();
-        for seconds in [2, 4, 11] {
+        for seconds in [4, 5, 15, 16] {
             let samples: Vec<_> = (0..24_000 * seconds)
                 .map(|i| (i as f32 * 0.11).sin() * 0.2)
                 .collect();
             crate::separation::write_wav16_slices(file.path(), &[&samples], 24_000).unwrap();
             let result = prepare_reference(&std::fs::read(file.path()).unwrap());
-            assert_eq!(result.is_ok(), seconds == 4, "{result:?}");
+            assert_eq!(result.is_ok(), (5..=15).contains(&seconds), "{result:?}");
             if let Ok(bytes) = result {
-                assert_eq!(read_reference(&bytes).unwrap().len(), 64_000);
+                assert_eq!(read_reference(&bytes).unwrap().len(), 16_000 * seconds);
             }
+        }
+    }
+
+    #[test]
+    fn recorded_reference_requires_at_least_five_seconds() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for seconds in [4, 5] {
+            let samples: Vec<_> = (0..16_000 * seconds)
+                .map(|i| (i as f32 * 0.11).sin() * 0.2)
+                .collect();
+            crate::separation::write_wav16_slices(file.path(), &[&samples], 16_000).unwrap();
+            let result = read_recorded_reference(&std::fs::read(file.path()).unwrap());
+            assert_eq!(result.is_ok(), seconds == 5, "{result:?}");
         }
     }
 

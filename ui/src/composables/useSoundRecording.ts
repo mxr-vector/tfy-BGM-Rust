@@ -12,6 +12,7 @@ export function useSoundRecording(
     const requesting = ref(false);
     const recording = ref(false);
     const elapsedMs = ref(0);
+    const inputLevel = ref(0);
     const maxDurationMs = Math.max(1, maxDuration);
     const minDurationMs = Math.min(maxDurationMs, Math.max(0, minDuration));
     const canStop = computed(() => elapsedMs.value >= minDurationMs);
@@ -19,6 +20,10 @@ export function useSoundRecording(
     let timer = 0;
     let ticker = 0;
     let startedAt = 0;
+    let audioContext: AudioContext | undefined;
+    let analyser: AnalyserNode | undefined;
+    let levelFrame = 0;
+    let meterActive = false;
     let disposed = false;
 
     function stop(): boolean {
@@ -52,11 +57,39 @@ export function useSoundRecording(
                 input.getTracks().forEach((track) => track.stop());
                 return;
             }
+            try {
+                audioContext = new AudioContext();
+                if (audioContext.state === 'suspended') void audioContext.resume();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
+                audioContext.createMediaStreamSource(input).connect(analyser);
+                const meter = analyser;
+                const samples = new Uint8Array(meter.fftSize);
+                const measureInput = () => {
+                    if (!meterActive) return;
+                    meter.getByteTimeDomainData(samples);
+                    const sum = samples.reduce((total, sample) => total + (sample - 128) ** 2, 0);
+                    inputLevel.value = Math.min(1, Math.sqrt(sum / samples.length) / 32);
+                    levelFrame = requestAnimationFrame(measureInput);
+                };
+                meterActive = true;
+                measureInput();
+            } catch {
+                audioContext?.close().catch(() => undefined);
+                audioContext = undefined;
+                analyser = undefined;
+            }
             const capture = new MediaRecorder(input, { audioBitsPerSecond: 128_000 });
             const chunks: Blob[] = [];
             const release = () => {
                 window.clearTimeout(timer);
                 window.clearInterval(ticker);
+                meterActive = false;
+                cancelAnimationFrame(levelFrame);
+                audioContext?.close().catch(() => undefined);
+                audioContext = undefined;
+                analyser = undefined;
+                inputLevel.value = 0;
                 input.getTracks().forEach((track) => track.stop());
                 recorder = null;
                 recording.value = false;
@@ -107,5 +140,5 @@ export function useSoundRecording(
         capture?.stream.getTracks().forEach((track) => track.stop());
     });
 
-    return { requesting, recording, elapsedMs, maxDurationMs, minDurationMs, canStop, start, stop };
+    return { requesting, recording, elapsedMs, inputLevel, maxDurationMs, minDurationMs, canStop, start, stop };
 }

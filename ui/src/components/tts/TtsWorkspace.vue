@@ -5,7 +5,7 @@ import Icon from '@/components/Icon.vue';
 import TtsScriptEditor from './TtsScriptEditor.vue';
 import { useSoundRecording } from '@/composables/useSoundRecording';
 import { COMMANDS, EVENTS } from '@/lib/constants';
-import { normalizeError } from '@/lib/format';
+import { formatTime, normalizeError } from '@/lib/format';
 import { assetUrl, invoke, invokeBinary, listen } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import { suspendPlayback } from '@/stores/audio-engine';
@@ -22,8 +22,9 @@ type ReferenceMode = 'builtin' | 'custom';
 
 const referenceModeOptions = [
   { value: 'builtin', label: '内置音色' },
-  { value: 'custom', label: '录制或上传' },
+  { value: 'custom', label: '麦克风录制' },
 ];
+const RECORDING_PROMPT = '心之所向，素履所往，生如逆旅，一苇以航。';
 interface SynthesisProgress { jobId: string; current: number; total: number }
 
 const families = ['Kokoro', 'ZipVoice'] as const;
@@ -59,7 +60,6 @@ const modelOptions = computed(() => installedModels.value.map(model => ({ value:
 const voiceOptions = computed(() => voiceNames.map((name, id) => ({ value: String(id), label: `${name} · ${id < 3 ? '英' : '中'}` })));
 const visibleVoices = computed(() => voiceOptions.value.filter(voice => voice.value === String(voiceId.value)
   || voice.label.toLowerCase().includes(voiceSearch.value.trim().toLowerCase())));
-const builtinTranscript = ref(false);
 const parsingForGeneration = ref(false);
 const generationBlocker = computed(() => {
   if (!installedModels.value.some(model => model.id === modelId.value)) return '请先安装并选择本地模型';
@@ -67,8 +67,8 @@ const generationBlocker = computed(() => {
   if (captureActive.value || recordingClip.value) return '参考音频正在录制或处理';
   if (!scriptEditor.value?.hasText) return '请在左侧输入或导入合成文本';
   if (family.value === 'ZipVoice') {
-    if (!referenceAudio.value) return '请先载入参考音频';
-    if (!referenceText.value.trim()) return '请填写参考音频的逐字稿';
+    if (!referenceAudio.value) return '请先载入或录制参考音色';
+    if (!referenceText.value.trim()) return '请录制参考音色';
   }
   return '';
 });
@@ -77,7 +77,7 @@ const voiceNames = `af_maple af_sol bf_vale zf_001 zf_002 zf_003 zf_004 zf_005 z
 const outputPlayer = ref<HTMLAudioElement | null>(null);
 const referencePlayer = ref<HTMLAudioElement | null>(null);
 let releasePlayback: (() => void) | undefined;
-const recording = useSoundRecording((clip) => { void acceptReference(clip, '麦克风录音'); }, 10_000);
+const recording = useSoundRecording((clip) => { void acceptReference(clip, '麦克风录音'); }, 15_000, 5_000);
 const captureActive = computed(() => recording.requesting.value || recording.recording.value);
 async function refreshBuiltinVoices(): Promise<void> {
   try {
@@ -127,7 +127,6 @@ function resetReference(): void {
   referencePreviewUrl.value = '';
   referenceAudio.value = null;
   referenceText.value = '';
-  builtinTranscript.value = false;
   referenceKind.value = '';
 }
 
@@ -135,7 +134,6 @@ function setReferenceAudio(audio: Uint8Array<ArrayBuffer>, label: string, transc
   resetReference();
   referenceAudio.value = Array.from(audio);
   referenceText.value = transcript ?? '';
-  builtinTranscript.value = transcript !== null;
   referenceKind.value = label;
   referencePreviewUrl.value = URL.createObjectURL(new Blob([audio], { type: 'audio/wav' }));
 }
@@ -161,11 +159,11 @@ async function acceptReference(blob: Blob, label: string): Promise<void> {
   const model = modelId.value;
   try {
     const bytes = await blob.arrayBuffer();
-    if (label === '麦克风录音' && !await checkClipDuration(bytes.slice(0))) return;
+    if (!await checkClipDuration(bytes.slice(0))) return;
     if (disposed) return;
     const normalized = await invokeBinary<ArrayBuffer>(COMMANDS.normalizeTtsReference, bytes);
     if (disposed || family.value !== 'ZipVoice' || modelId.value !== model || referenceMode.value !== 'custom') return;
-    setReferenceAudio(new Uint8Array(normalized), label);
+    setReferenceAudio(new Uint8Array(normalized), label, RECORDING_PROMPT);
     toast('参考音频已响度归一化为 16 kHz 单声道', 'success');
   } catch (error) { toast(`参考音频不可用：${normalizeError(error)}`, 'error'); }
   finally { recordingClip.value = false; }
@@ -176,9 +174,9 @@ async function checkClipDuration(bytes: ArrayBuffer): Promise<boolean> {
   try {
     context = new AudioContext();
     const audio = await context.decodeAudioData(bytes);
-    if (audio.duration < 3 || audio.duration > 10) { toast('参考录音必须在 3 到 10 秒之间，请重新录制', 'error'); return false; }
+    if (audio.duration < 5 || audio.duration > 15) { toast('参考录音必须在 5 到 15 秒之间，请重新录制', 'error'); return false; }
     return true;
-  } catch { toast('无法解码参考录音，请重录或选择音频文件', 'error'); return false; }
+  } catch { toast('无法解码参考录音，请检查麦克风后重录', 'error'); return false; }
   finally { await context?.close().catch(() => undefined); }
 }
 
@@ -201,12 +199,6 @@ function pauseCompetingAudio(event: Event): void {
   if (captureActive.value || (generating.value && player === outputPlayer.value)) player.pause();
   else if (player === outputPlayer.value) referencePlayer.value?.pause();
   else outputPlayer.value?.pause();
-}
-
-async function importReference(event: Event): Promise<void> {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (file) await acceptReference(file, file.name);
-  (event.target as HTMLInputElement).value = '';
 }
 
 async function generate(): Promise<void> {
@@ -329,7 +321,7 @@ onBeforeUnmount(() => {
             <AppSelect v-model="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择已安装的 TTS 模型" />
           </div>
           <template v-if="!isReady">
-            <div class="tts-model-empty"><Icon name="chip"/><strong>{{ ttsModelsLoading ? '正在扫描本地模型…' : `${family} 模型尚未安装` }}</strong><span>{{ family === 'Kokoro' ? '适合口播与知识讲解：自然语调、多语音、低延迟。' : '适合零样本声音克隆：提供 3–10 秒参考音频及对应文本。' }}</span></div>
+            <div class="tts-model-empty"><Icon name="chip"/><strong>{{ ttsModelsLoading ? '正在扫描本地模型…' : `${family} 模型尚未安装` }}</strong><span>{{ family === 'Kokoro' ? '适合口播与知识讲解：自然语调、多语音、低延迟。' : '适合零样本声音克隆：提供 5–15 秒参考音频及对应文本。' }}</span></div>
             <article v-for="model in familyModels" :key="model.id" class="tts-model-row"><div><strong>{{ model.name }}</strong><span>{{ (model.sizeBytes / 1e9).toFixed(2) }} GB · {{ model.package }}</span></div><button type="button" class="tts-action tts-accent-action" :disabled="ttsModelBusy" @click="installTtsModel(model, 'workspace')">{{ ttsDownloadProgress?.id === model.id ? `${ttsDownloadPercent}%` : ttsInstalling === model.id ? '安装中…' : '下载' }}</button></article>
             <button type="button" class="tts-action" @click="openSettings('models')">前往模型管理</button>
             <button type="button" class="tts-source-link" @click="openModelDownloadSource(true)">访问 TTS 下载源</button>
@@ -341,7 +333,7 @@ onBeforeUnmount(() => {
                 <AppSelect :model-value="String(voiceId)" :options="visibleVoices" label="选择语音" @update:model-value="voiceId = Number($event)" />
               </div>
             </template>
-            <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : '内置音色已配好逐字稿；自定义录音需要填写该片段的逐字稿。' }}</p>
+            <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : '内置音色附带逐字稿；麦克风录音请朗读下方参考句。' }}</p>
             <template v-if="family === 'ZipVoice'">
               <div class="tts-field">
                 <span>参考来源</span>
@@ -352,15 +344,32 @@ onBeforeUnmount(() => {
                   <AppSelect :model-value="builtinVoice" :options="builtinVoiceOptions" :disabled="recordingClip" label="选择内置参考音色" @update:model-value="setBuiltinVoice" />
                   <button v-if="!referenceAudio || recordingClip" type="button" class="tts-action" :disabled="recordingClip" @click="loadBuiltinReference">{{ recordingClip ? '正在载入…' : '载入音色' }}</button>
                 </div>
-                <p v-else class="tts-reference-status">暂无内置参考音色，可切换到录音或上传。</p>
+                <p v-else class="tts-reference-status">暂无内置参考音色，可切换到麦克风录制。</p>
               </template>
               <template v-else>
-              <div class="tts-reference-actions"><button v-if="recording.recording.value" type="button" class="tts-action" @click="recording.stop">结束录音</button><button v-else type="button" class="tts-action" :disabled="captureActive || recordingClip || generating" @click="startCapture">{{ recording.requesting.value ? '正在请求麦克风…' : '麦克风录制（3–10 秒）' }}</button><label class="tts-action tts-file-label">上传音频<input type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" :disabled="captureActive || recordingClip" @change="importReference" /></label></div>
-                <p class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? referenceKind : '请选择 3–10 秒的清晰人声' }}</p>
+                <blockquote class="tts-recording-prompt">{{ RECORDING_PROMPT }}</blockquote>
+                <div class="tts-reference-actions">
+                  <button type="button" class="tts-action" :disabled="recording.requesting.value || (recording.recording.value && !recording.canStop.value) || recordingClip || generating" @click="recording.recording.value ? recording.stop() : startCapture()">
+                    <Icon :name="recording.recording.value ? 'check' : 'wave'" />
+                    {{ recording.requesting.value ? '正在请求麦克风…' : recording.recording.value ? `结束录音 · ${formatTime(recording.elapsedMs.value / 1000)}` : recordingClip ? '正在处理参考音频…' : referenceAudio ? '重新录制音色' : '开始录制音色（5–15 秒）' }}
+                  </button>
+                </div>
+                <div v-if="recording.recording.value" class="tts-recording-status" role="status" aria-live="polite">
+                  <span class="tts-recording-dot" aria-hidden="true"></span>
+                  <div class="tts-recording-copy">
+                    <strong>正在录制，请清晰朗读上方参考句</strong>
+                    <span>{{ formatTime(recording.elapsedMs.value / 1000) }} / 00:15 · {{ recording.canStop.value ? '可结束录音' : '至少录制 5 秒后可结束' }}</span>
+                  <span v-if="recording.elapsedMs.value > 1200 && recording.inputLevel.value < 0.006" class="tts-recording-warning">未检测到明显输入，请检查麦克风</span>
+                  <span v-else-if="recording.inputLevel.value > 0.88" class="tts-recording-warning">输入过强，可能产生失真</span>
+                  </div>
+                  <div class="tts-input-meter" role="meter" aria-label="麦克风输入电平" :aria-valuenow="Math.round(recording.inputLevel.value * 100)" aria-valuemin="0" aria-valuemax="100">
+                    <span :style="{ transform: `scaleX(${recording.inputLevel.value})` }"></span>
+                  </div>
+                </div>
+                <p v-else class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? `${referenceKind} · 已录制` : '请安静环境录制清晰人声，录制满 5 秒后可结束，15 秒自动停止。' }}</p>
               </template>
               <audio v-if="referencePreviewUrl" ref="referencePlayer" class="tts-voice-preview" :src="referencePreviewUrl" :controls="!captureActive" preload="none" aria-label="试听参考音频" @play="pauseCompetingAudio" />
-              <p v-if="builtinTranscript" class="tts-reference-status">已载入配套逐字稿</p>
-              <textarea v-else-if="referenceAudio" v-model="referenceText" class="tts-reference-text" rows="2" placeholder="逐字填写这段参考音频说的话（不是左侧合成稿）" aria-label="参考音频的逐字稿"></textarea>
+              <p v-if="referenceAudio && referenceMode === 'builtin'" class="tts-reference-status">已载入配套逐字稿</p>
             </template>
           </template>
           <div v-if="ttsInstalling" class="tts-download-status">
@@ -407,10 +416,17 @@ onBeforeUnmount(() => {
 .tts-page :deep(.tts-card-heading h2){font-size:15px;font-weight:580}
 .tts-page :deep(.tts-card-heading>span:not(.tts-native)){color:var(--text-3);font-size:11px}
 .tts-reference-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.tts-page :deep(.tts-file-label){position:relative;overflow:hidden;cursor:pointer}
-.tts-page :deep(.tts-file-label input){position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
-.tts-reference-text{display:block;width:100%;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(1,8,5,.42);color:var(--text);font:13px/1.45 var(--font-sans);resize:none}
-.tts-reference-text::placeholder,.tts-search::placeholder{color:var(--text-3)}
+.tts-recording-prompt{margin:8px 0 4px;padding:10px 12px;border-left:3px solid var(--accent-bright);background:rgba(25,217,139,.07);color:var(--text);font-size:13px;line-height:1.7}
+.tts-recording-status{display:grid;grid-template-columns:10px minmax(0,1fr) 88px;align-items:center;gap:10px;margin-top:8px;padding:10px 12px;border:1px solid rgba(248,113,113,.28);border-radius:8px;background:rgba(239,68,68,.1)}
+.tts-recording-dot{width:9px;height:9px;border-radius:50%;background:#f87171;box-shadow:0 0 0 4px rgba(248,113,113,.12);animation:tts-recording-pulse 1.2s ease-in-out infinite}
+.tts-recording-copy{display:flex;min-width:0;flex-direction:column;gap:3px}
+.tts-recording-copy strong{color:#fecaca;font-size:11px}
+.tts-recording-copy span{color:var(--text-3);font-size:10px}
+.tts-recording-copy .tts-recording-warning{color:#fca5a5}
+.tts-input-meter{height:7px;overflow:hidden;border-radius:4px;background:rgba(255,255,255,.12)}
+.tts-input-meter span{display:block;width:100%;height:100%;transform:scaleX(0);transform-origin:left center;border-radius:inherit;background:linear-gradient(90deg,#28cf91 0%,#d7d852 75%,#ef6868 100%);transition:transform .08s linear}
+@keyframes tts-recording-pulse{50%{opacity:.45;box-shadow:0 0 0 7px rgba(248,113,113,.04)}}
+.tts-search::placeholder{color:var(--text-3)}
 .tts-reference-status{display:block;margin-top:4px;color:var(--text-3);font-size:11px}
 .tts-native,.tts-live-dot{color:var(--accent-bright);font:10px ui-monospace,Consolas,monospace}
 .tts-download-status{margin-top:10px;color:var(--accent-bright);font-size:11px}
@@ -427,7 +443,6 @@ onBeforeUnmount(() => {
 .tts-accent-action{border-color:rgba(25,217,139,.3);color:var(--accent-bright)}
 .tts-source-link:hover{color:var(--accent-bright)}
 .tts-voice-note{margin-top:5px;color:var(--text-3);font-size:11px}
-.tts-reference-text{min-height:0}
 .tts-voice-preview{display:block;width:100%;height:32px;margin-top:6px}
 .tts-render-card>p{margin:5px 0 7px;color:var(--text-3);font-size:12px}
 .tts-generate{display:flex;width:100%;min-height:46px;align-items:center;justify-content:center;gap:9px;border:1px solid rgba(25,217,139,.35);border-radius:10px;background:linear-gradient(110deg,rgba(25,217,139,.18),rgba(25,217,139,.07));color:var(--accent-bright);font-weight:580}

@@ -18,6 +18,8 @@ export interface TtsModel {
 interface TtsDownloadProgress { jobId: string; id: string; file: string; received: number; total: number }
 export interface TtsJob { id: string; cancelled: boolean; finished: boolean }
 
+export const ttsScriptText = ref('');
+export const ttsScriptFormat = ref<'txt' | 'lrc' | 'srt'>('txt');
 export const ttsModels = ref<TtsModel[]>([]);
 export const ttsModelsLoading = ref(false);
 export const ttsDownloadProgress = ref<TtsDownloadProgress | null>(null);
