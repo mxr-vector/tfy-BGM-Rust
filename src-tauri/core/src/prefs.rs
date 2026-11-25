@@ -216,6 +216,7 @@ pub struct Prefs {
     pub models_dir: Option<String>,
     /// ASR 模型下载地址；空字符串表示使用 `DEFAULT_ASR_DOWNLOAD_URL`（0.6B-int8）。
     pub asr_download_url: String,
+    pub tts_download_url: String,
     /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
     /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
     pub last_asr_model: Option<String>,
@@ -268,6 +269,7 @@ impl Default for Prefs {
             close_action: CloseAction::Ask,
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
+            tts_download_url: String::new(),
             last_asr_model: None,
             separation_model: None,
             desktop_lyrics_enabled: false,
@@ -421,6 +423,12 @@ impl Prefs {
             download_url.to_owned()
         } else {
             DEFAULT_ASR_DOWNLOAD_URL.to_owned()
+        };
+        let tts_url = self.tts_download_url.trim();
+        self.tts_download_url = if is_download_url(tts_url) && !tts_url.contains(['?', '#']) {
+            tts_url.trim_end_matches('/').to_owned()
+        } else {
+            String::new()
         };
 
         // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，

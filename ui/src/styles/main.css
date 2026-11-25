@@ -6790,26 +6790,6 @@ input[type="checkbox"]:indeterminate::after {
   gap: 10px;
 }
 
-.settings-transcript {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.022);
-  max-height: 160px;
-  overflow-y: auto;
-}
-
-.settings-transcript-text {
-  font-size: 11.5px;
-  color: var(--text-2);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .settings-models {
   display: flex;
   flex-direction: column;

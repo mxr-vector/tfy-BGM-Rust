@@ -16,8 +16,7 @@ import type {
   ModelLoadStatus,
   ModelsInfo,
 } from '@/lib/types';
-import { flushPrefsNow } from './prefs';
-import { state } from './state';
+import { refreshTtsModels } from './tts';
 
 export const modelsInfo = ref<ModelsInfo | null>(null);
 export const modelsLoading = ref(false);
@@ -25,9 +24,6 @@ export const downloading = ref(false);
 export const loadTarget = ref<string | null>(null);
 export const deletingModelId = ref<string | null>(null);
 export const downloadProgress = ref<ModelDownloadProgress | null>(null);
-export const transcribing = ref(false);
-/** 最近一次 WAV 识别结果；`null` 表示尚未识别。 */
-export const transcript = ref<string | null>(null);
 
 /**
  * 模型加载状态（idle / loading / success / failed）。
@@ -59,9 +55,6 @@ export const downloadPercent = computed(() => {
   return Math.min(100, Math.round((progress.overallReceived / progress.overallBytes) * 100));
 });
 
-/** 自定义下载地址（输入框草稿），保存后由后端归一化。 */
-export const downloadUrlDraft = ref('');
-
 let listening = false;
 let refreshQueued = false;
 
@@ -84,7 +77,6 @@ async function ensureProgressListener(): Promise<void> {
 function apply(info: ModelsInfo | null | undefined): void {
   if (!info) return;
   modelsInfo.value = info;
-  downloadUrlDraft.value = info.downloadUrl;
   // 后端是权威状态源；命令返回时自动加载已结束，刷新界面也不会丢失失败原因。
   loadStatus.value = info.loadStatus;
 }
@@ -117,6 +109,7 @@ export async function chooseModelsDir(): Promise<void> {
     const info = await invoke<ModelsInfo | null>(COMMANDS.chooseModelsDir);
     if (!info) return;
     apply(info);
+    void refreshTtsModels();
     toast('模型目录已更新', 'success');
   } catch (error) {
     toast(`切换模型目录失败：${normalizeError(error)}`, 'error');
@@ -127,6 +120,7 @@ export async function chooseModelsDir(): Promise<void> {
 export async function resetModelsDir(): Promise<void> {
   try {
     apply(await invoke<ModelsInfo>(COMMANDS.resetModelsDir));
+    void refreshTtsModels();
     toast('已恢复默认模型目录', 'success');
   } catch (error) {
     toast(`恢复默认模型目录失败：${normalizeError(error)}`, 'error');
@@ -139,22 +133,6 @@ export async function openModelsDir(): Promise<void> {
   } catch (error) {
     toast(`打开模型目录失败：${normalizeError(error)}`, 'error');
   }
-}
-
-/** 保存自定义下载地址；留空表示使用内置的 0.6B-int8 地址。 */
-export async function saveDownloadUrl(url: string): Promise<void> {
-  const trimmed = url.trim();
-  if (trimmed && !/^https?:\/\//i.test(trimmed)) {
-    toast('下载地址需以 http:// 或 https:// 开头', 'error');
-    return;
-  }
-  const prefs = state.prefs;
-  if (!prefs) return;
-  // 直接改内存并立即落盘，等后端归一化结果回来后以 models_info 为准。
-  state.prefs = { ...prefs, asrDownloadUrl: trimmed };
-  await flushPrefsNow();
-  await refreshModels();
-  toast(trimmed ? '下载地址已保存' : '已恢复默认下载地址', 'success');
 }
 
 let cancelRequested = false;
@@ -269,26 +247,6 @@ export async function deleteAsrModel(model: AsrModel): Promise<void> {
   } finally {
     deletingModelId.value = null;
   }
-}
-
-/** 选择 WAV 文件并用已加载模型识别；取消选择时什么也不做。 */
-export async function transcribeWav(): Promise<void> {
-  if (transcribing.value) return;
-  transcribing.value = true;
-  try {
-    const text = await invoke<string | null>(COMMANDS.transcribeWav);
-    if (text === null) return;
-    transcript.value = text;
-    toast(text ? '识别完成' : '识别完成（未识别到文本）', text ? 'success' : 'info');
-  } catch (error) {
-    toast(`识别失败：${normalizeError(error)}`, 'error');
-  } finally {
-    transcribing.value = false;
-  }
-}
-
-export function clearTranscript(): void {
-  transcript.value = null;
 }
 
 /** 当前是否处于加载中；用于按钮禁用与文案。 */

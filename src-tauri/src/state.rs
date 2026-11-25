@@ -256,6 +256,8 @@ impl AppState {
         next.library_dir = current.library_dir.clone();
         next.models_dir = current.models_dir.clone();
         next.last_asr_model = current.last_asr_model.clone();
+        next.asr_download_url = current.asr_download_url.clone();
+        next.tts_download_url = current.tts_download_url.clone();
         next.desktop_lyrics_enabled = current.desktop_lyrics_enabled;
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
@@ -452,6 +454,28 @@ impl AppState {
         } else {
             prefs.asr_download_url.clone()
         }
+    }
+
+    pub fn tts_download_url(&self) -> String {
+        self.prefs.read().tts_download_url.clone()
+    }
+
+    pub fn save_model_download_url(&self, tts: bool, url: String) -> Result<String> {
+        let mut current = self.prefs.write();
+        let mut next = current.clone();
+        let url = if !tts && url.is_empty() {
+            models::DEFAULT_DOWNLOAD_URL.to_owned()
+        } else {
+            url
+        };
+        if tts {
+            next.tts_download_url = url.clone();
+        } else {
+            next.asr_download_url = url.clone();
+        }
+        next.save(&self.prefs_path).context("保存模型下载源失败")?;
+        *current = next;
+        Ok(url)
     }
 
     /// 「模型」分组快照：每次进入分组都重新扫描目录下的 `.onnx`。

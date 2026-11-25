@@ -487,13 +487,16 @@ pub async fn choose_models_dir(
         ),
         None => None,
     };
-    state.choose_models_dir(dir).map_err(describe)
+    if dir.is_none() {
+        return Ok(None);
+    }
+    crate::tts::change_models_root(&state, || state.choose_models_dir(dir)).map_err(describe)
 }
 
 /// 恢复默认模型目录（系统「下载」目录下的 `bgm-models`）。
 #[tauri::command]
 pub async fn reset_models_dir(state: State<'_, AppState>) -> CommandResult<ModelsInfo> {
-    state.reset_models_dir().map_err(describe)
+    crate::tts::change_models_root(&state, || state.reset_models_dir()).map_err(describe)
 }
 
 #[tauri::command]

@@ -11,6 +11,8 @@ export interface TtsModel {
   package: string;
   sizeBytes: number;
   installed: boolean;
+  hasFiles: boolean;
+  loaded: boolean;
   path: string;
 }
 interface TtsDownloadProgress { jobId: string; id: string; file: string; received: number; total: number }
@@ -24,6 +26,33 @@ export const ttsDownloadPercent = computed(() => ttsDownloadProgress.value && tt
 const activeInstall = shallowRef<{ job: TtsJob; modelId: string; owner: 'settings' | 'workspace' } | null>(null);
 export const ttsInstalling = computed(() => activeInstall.value?.modelId ?? null);
 export const ttsInstallCancelling = ref(false);
+export const ttsSynthesizing = ref(false);
+const ttsModelAction = shallowRef<{ id: string; action: 'load' | 'release' | 'delete' } | null>(null);
+export const ttsModelBusy = computed(() => ttsSynthesizing.value || Boolean(ttsInstalling.value || ttsModelAction.value));
+
+export function ttsModelActionLabel(id: string): string | undefined {
+  const task = ttsModelAction.value;
+  if (task?.id === id) return { load: '加载中…', release: '释放中…', delete: '删除中…' }[task.action];
+}
+
+export async function manageTtsModel(model: TtsModel, action: 'load' | 'release' | 'delete'): Promise<void> {
+  if (ttsModelBusy.value) return;
+  ttsModelAction.value = { id: model.id, action };
+  const verb = { load: model.loaded ? '重新加载' : '加载', release: '释放', delete: '删除' }[action];
+  try {
+    if (action === 'load') {
+      await invoke(COMMANDS.loadTtsModel, { id: model.id });
+    } else {
+      await invoke(COMMANDS.removeTtsModel, { id: model.id, deleteFiles: action === 'delete' });
+    }
+    toast(`${verb}成功：${model.name}`, 'success');
+  } catch (error) {
+    toast(`${verb} TTS 模型失败：${normalizeError(error)}`, 'error');
+  } finally {
+    await refreshTtsModels();
+    ttsModelAction.value = null;
+  }
+}
 let refreshGeneration = 0;
 
 export async function cancelTtsJob(kind: 'install' | 'synthesis', job: TtsJob, quiet = false): Promise<void> {
@@ -37,9 +66,9 @@ export async function cancelTtsJob(kind: 'install' | 'synthesis', job: TtsJob, q
   }
 }
 
-export async function openTtsRelease(): Promise<void> {
-  try { await invoke(COMMANDS.openTtsRelease); }
-  catch (error) { toast(`无法打开 sherpa-onnx 模型发布页：${normalizeError(error)}`, 'error'); }
+export async function openModelDownloadSource(tts: boolean): Promise<void> {
+  try { await invoke(COMMANDS.openModelDownloadSource, { tts }); }
+  catch (error) { toast(`无法打开模型下载源：${normalizeError(error)}`, 'error'); }
 }
 
 export async function refreshTtsModels(): Promise<void> {
@@ -64,7 +93,7 @@ export async function cancelTtsInstall(owner?: 'settings' | 'workspace'): Promis
 }
 
 export async function installTtsModel(model: TtsModel, owner: 'settings' | 'workspace'): Promise<void> {
-  if (activeInstall.value || model.installed) return;
+  if (ttsModelBusy.value || model.installed) return;
   const job: TtsJob = { id: crypto.randomUUID(), cancelled: false, finished: false };
   activeInstall.value = { job, modelId: model.id, owner };
   ttsDownloadProgress.value = null;

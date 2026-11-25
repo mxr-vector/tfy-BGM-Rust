@@ -40,6 +40,8 @@ pub struct TtsModel {
     pub package: &'static str,
     pub size_bytes: u64,
     pub installed: bool,
+    pub has_files: bool,
+    pub loaded: bool,
     pub path: String,
 }
 
@@ -138,6 +140,8 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
         package: spec.package,
         size_bytes: spec.size,
         installed: false,
+        has_files: dir.is_dir(),
+        loaded: false,
         path: dir.to_string_lossy().into_owned(),
     };
     model.installed = model.complete()
@@ -156,6 +160,14 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
 
 fn package_dir(spec: &Spec) -> &str {
     spec.package.trim_end_matches(".tar.bz2")
+}
+
+pub fn model(root: &Path, id: &str) -> Result<TtsModel> {
+    let spec = SPECS
+        .iter()
+        .find(|spec| spec.id == id)
+        .context("未知的 TTS 模型")?;
+    Ok(entry(spec, &root.join(DIR).join(package_dir(spec))))
 }
 
 pub fn catalog(root: &Path) -> Vec<TtsModel> {
@@ -179,6 +191,7 @@ pub fn install(
     app: &AppHandle,
     models_root: &Path,
     id: &str,
+    source: &str,
     job_id: uuid::Uuid,
     token: &CancellationToken,
 ) -> Result<()> {
@@ -207,6 +220,13 @@ pub fn install(
                 continue;
             }
             let target = root.join(file);
+            let mirror;
+            let url = if source.is_empty() {
+                url
+            } else {
+                mirror = format!("{source}/{file}");
+                &mirror
+            };
             let tmp = download(
                 app, &client, &root, id, job_id, token, file, url, hash, size,
             )?;
@@ -230,7 +250,11 @@ pub fn install(
         job_id,
         token,
         spec.package,
-        &format!("{ASSETS}/{}", spec.package),
+        &format!(
+            "{}/{}",
+            if source.is_empty() { ASSETS } else { source },
+            spec.package
+        ),
         spec.hash,
         spec.size,
     )?;

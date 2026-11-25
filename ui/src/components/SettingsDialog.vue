@@ -11,7 +11,9 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { cachedFonts, fontOptions, loadSystemFonts, type FontOption } from '@/lib/fonts';
 import { formatBytes, normalizeError } from '@/lib/format';
+import { COMMANDS } from '@/lib/constants';
 import { showModal } from '@/lib/modal';
+import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import { wakeLockSupported } from '@/composables/useSystemIntegration';
 import type { AsrModel, CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
@@ -20,13 +22,11 @@ import {
   autoLoading,
   cancelDownload,
   chooseModelsDir,
-  clearTranscript,
   deleteAsrModel,
   deletingModelId,
   downloadDefaultModel,
   downloadPercent,
   downloadProgress,
-  downloadUrlDraft,
   downloading,
   loadAsrModel,
   loadStatus,
@@ -39,10 +39,6 @@ import {
   refreshModels,
   resetModelsDir,
   retryModelLoad,
-  saveDownloadUrl,
-  transcribeWav,
-  transcribing,
-  transcript,
   unloadAsrModel,
 } from '@/stores/models';
 import {
@@ -81,17 +77,22 @@ import {
   type SettingsTab,
 } from '@/stores/settings';
 import { state } from '@/stores/state';
-import { cancelTtsInstall, installTtsModel, openTtsRelease, refreshTtsModels, ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModels, ttsModelsLoading } from '@/stores/tts';
+import {
+  cancelTtsInstall, installTtsModel, manageTtsModel, openModelDownloadSource, refreshTtsModels,
+  ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelActionLabel,
+  ttsModelBusy, ttsModels, ttsModelsLoading, type TtsModel,
+} from '@/stores/tts';
 import FontSelect from './FontSelect.vue';
 import Icon from './Icon.vue';
 import SettingSwitch from './SettingSwitch.vue';
+import SettingsModelRow from './SettingsModelRow.vue';
 
 const prefs = computed(() => state.prefs);
 
 const TABS: { id: SettingsTab; label: string; hint: string; icon: string }[] = [
   { id: 'general', label: '常规', hint: '字体与系统集成', icon: 'sliders' },
   { id: 'playback', label: '播放', hint: '启动行为与输出', icon: 'wave' },
-  { id: 'models', label: '模型', hint: 'ASR 模型与下载', icon: 'chip' },
+  { id: 'models', label: '模型', hint: 'ASR 与 TTS 模型', icon: 'chip' },
   { id: 'integrations', label: '第三方接入', hint: 'token / 接口 / CORS', icon: 'external' },
 ];
 
@@ -155,6 +156,57 @@ const corsHint = computed(
 const models = computed(() => modelsInfo.value?.models ?? []);
 const defaultModel = computed(() => modelsInfo.value?.defaultModel ?? null);
 const loadedModel = computed(() => modelsInfo.value?.loaded ?? null);
+const savingDownloadSource = ref(false);
+
+async function editDownloadSource(tts: boolean): Promise<void> {
+  const family = tts ? 'TTS' : 'ASR';
+  const result = await showModal({
+    title: `修改 ${family} 下载源`,
+    description: tts
+      ? '填写镜像目录地址，目录中需包含模型压缩包及 ZipVoice 依赖文件。留空恢复默认源。'
+      : '填写 ModelScope 仓库地址或 0.6B-int8 文件所在目录的直链。留空恢复默认源。',
+    fields: [{
+      name: 'url',
+      label: '下载源地址',
+      value: tts ? prefs.value?.ttsDownloadUrl : modelsInfo.value?.downloadUrl,
+      placeholder: tts ? '默认使用 sherpa-onnx 发布源' : modelsInfo.value?.defaultDownloadUrl,
+    }],
+    confirmText: '保存',
+    validate: ({ url }) => {
+      const source = url.trim();
+      if (!source) return null;
+      if (!/^https?:\/\//i.test(source) || !URL.canParse(source) || /[\s\x00-\x1f\x7f]/.test(source)
+        || Array.from(source).length > 1024) return '请输入有效的 HTTP 或 HTTPS 地址';
+      if (tts && /[?#]/.test(source)) return '请输入不含查询参数或片段的目录地址';
+      return null;
+    },
+  });
+  if (!result) return;
+  savingDownloadSource.value = true;
+  try {
+    const url = await invoke<string>(COMMANDS.saveModelDownloadSource, { tts, url: result.url });
+    if (state.prefs) {
+      if (tts) state.prefs.ttsDownloadUrl = url;
+      else state.prefs.asrDownloadUrl = url;
+    }
+    if (!tts) await refreshModels();
+    toast(result.url.trim() ? `${family} 下载源已保存` : `已恢复默认 ${family} 下载源`, 'success');
+  } catch (error) {
+    toast(`保存 ${family} 下载源失败：${normalizeError(error)}`, 'error');
+  } finally {
+    savingDownloadSource.value = false;
+  }
+}
+
+async function confirmDeleteTtsModel(model: TtsModel): Promise<void> {
+  const confirmed = await showModal({
+    title: '删除 TTS 模型',
+    description: `确定永久删除「${model.name}」的模型文件吗？已加载的模型会在删除前自动释放。`,
+    confirmText: '删除',
+    danger: true,
+  });
+  if (confirmed !== null) await manageTtsModel(model, 'delete');
+}
 const modelDownloading = computed(() => downloading.value || Boolean(modelsInfo.value?.downloading));
 
 const progressText = computed(() => {
@@ -162,34 +214,6 @@ const progressText = computed(() => {
   if (!progress) return '准备下载…';
   const file = progress.file || '准备中';
   return `${file} · ${formatBytes(progress.overallReceived)} / ${formatBytes(progress.overallBytes)}`;
-});
-
-/** 模型加载四态反馈；下载完成后的自动加载与手动加载共用同一状态条。 */
-const loadStatusTitle = computed(() => {
-  if (autoLoading.value) return '下载完成，正在自动加载模型…';
-  switch (loadStatus.value.phase) {
-    case 'loading':
-      return '正在加载 ASR 模型…';
-    case 'success':
-      return `模型加载成功${loadedModel.value ? ` · ${loadedModel.value.name}` : ''}`;
-    case 'failed':
-      return '模型加载失败';
-    default:
-      return '模型未加载';
-  }
-});
-
-const loadStatusIcon = computed(() => {
-  switch (loadStatus.value.phase) {
-    case 'loading':
-      return 'refresh';
-    case 'success':
-      return 'check-circle';
-    case 'failed':
-      return 'alert';
-    default:
-      return 'chip';
-  }
 });
 
 /** 删除模型前确认一次；确认后后端会自动卸载正在使用的目标模型。 */
@@ -671,7 +695,7 @@ watch(settingsOpen, async (open) => {
             >
               <div class="settings-group-head">
                 <h3>模型</h3>
-                <p>ASR 推理统一使用 sherpa-onnx；模型保存在本地目录，可自行替换。</p>
+                <p>管理本地语音识别与语音合成模型。</p>
               </div>
 
               <div class="settings-subgroup">
@@ -726,66 +750,22 @@ watch(settingsOpen, async (open) => {
 
               <div class="settings-subgroup">
                 <div class="settings-subgroup-head">
-                  <h4>下载地址</h4>
-                  <span class="settings-muted">固定 0.6B-int8</span>
-                </div>
-                <div class="settings-token-row">
-                  <input
-                    v-model="downloadUrlDraft"
-                    class="settings-input"
-                    spellcheck="false"
-                    placeholder="https://modelscope.cn/models/…"
-                    aria-label="模型下载地址"
-                  />
-                  <button
-                    type="button"
-                    class="settings-btn is-primary"
-                    @click="saveDownloadUrl(downloadUrlDraft)"
-                  >
-                    保存
-                  </button>
-                  <button type="button" class="settings-btn" @click="saveDownloadUrl('')">
-                    恢复默认
-                  </button>
-                </div>
-                <p class="settings-hint">
-                  默认指向 ModelScope 的 0.6B-int8 目录；下载内容固定为
-                  <code>conv_frontend.onnx</code>、<code>encoder.int8.onnx</code>、
-                  <code>decoder.int8.onnx</code> 与 <code>tokenizer/</code>，
-                  不会下载 fp32 或 1.7B 版本。
-                </p>
-              </div>
-
-              <div class="settings-subgroup">
-                <div class="settings-subgroup-head">
                   <h4>ASR 模型列表</h4>
-                  <span class="settings-muted">{{ models.length }} 个 · 引擎 sherpa-onnx</span>
+                  <div class="settings-subgroup-actions">
+                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource(false)">修改下载源</button>
+                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(false)">访问下载源</button>
+                  </div>
                 </div>
 
-                <div
-                  class="model-load-status"
-                  :class="`is-${loadStatus.phase}`"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <div class="model-load-head">
-                    <Icon :name="loadStatusIcon" class="model-load-icon" />
-                    <strong>{{ loadStatusTitle }}</strong>
-                    <span v-if="loadStatus.phase === 'loading'" class="model-load-spinner"></span>
-                    <button
-                      v-if="loadStatus.phase === 'failed'"
-                      type="button"
-                      class="settings-btn is-primary model-load-retry"
-                      :disabled="modelBusy"
-                      @click="retryModelLoad"
-                    >
-                      {{ modelBusy ? '重试中…' : '重试加载' }}
-                    </button>
-                  </div>
-                  <p v-if="loadStatus.error" class="model-load-error">{{ loadStatus.error }}</p>
-                  <p v-else-if="loadStatus.path" class="model-load-path">{{ loadStatus.path }}</p>
-                  <p v-else class="model-load-path">下载完成后将自动加载，无需手动点击「加载」。</p>
+                <div v-if="loadStatus.phase === 'failed'" class="settings-subgroup-actions" role="status">
+                  <p class="settings-hint is-warn">模型加载失败{{ loadStatus.error ? `：${loadStatus.error}` : '' }}</p>
+                  <button type="button" class="settings-btn" :disabled="modelBusy" @click="retryModelLoad">
+                    重试加载
+                  </button>
                 </div>
+                <p v-else-if="autoLoading && !models.some(model => model.path === loadingModelPath)" class="settings-hint" role="status">
+                  下载完成，正在自动加载模型…
+                </p>
 
                 <div v-if="defaultModel && !defaultModel.installed" class="settings-model-callout">
                   <div class="settings-model-callout-text">
@@ -802,7 +782,7 @@ watch(settingsOpen, async (open) => {
                   <button
                     type="button"
                     class="settings-btn is-primary"
-                    :disabled="modelDownloading"
+                    :disabled="modelDownloading || savingDownloadSource"
                     @click="downloadDefaultModel"
                   >
                     {{ autoLoading ? '自动加载中…' : modelDownloading ? '下载中…' : '下载' }}
@@ -827,36 +807,21 @@ watch(settingsOpen, async (open) => {
                 </div>
 
                 <div class="settings-models">
-                  <article
+                  <SettingsModelRow
                     v-for="model in models"
                     :key="model.id"
-                    class="settings-model"
-                    :class="{ 'is-loaded': loadedModel?.path === model.path }"
+                    :name="model.name"
+                    :path="model.path"
+                    :size-bytes="model.sizeBytes"
+                    :default-model="model.isDefault"
+                    :loaded="loadedModel?.path === model.path"
+                    :status="model.loadable ? '已安装' : model.missing.length ? '文件不完整' : '不可加载'"
                   >
-                    <div class="settings-model-main">
-                      <div class="settings-model-title">
-                        <strong>{{ model.name }}</strong>
-                        <span v-if="model.isDefault" class="settings-badge">默认</span>
-                        <span
-                          v-if="loadedModel?.path === model.path"
-                          class="settings-badge is-accent"
-                        >
-                          已加载
-                        </span>
-                      </div>
-                      <p class="settings-model-path" :title="model.path">{{ model.path }}</p>
-                      <p class="settings-model-meta">
-                        {{ model.files.length }} 个 .onnx · {{ formatBytes(model.sizeBytes) }}
-                        <span v-if="!model.loadable">
-                          · {{
-                            model.missing.length
-                              ? `缺少 ${model.missing.join('、')}`
-                              : '非 Qwen3 目录结构，暂不支持加载'
-                          }}
-                        </span>
-                      </p>
-                    </div>
-                    <div class="settings-model-actions">
+                    <template #details>
+                      · {{ model.files.length }} 个 .onnx
+                      <template v-if="loadedModel?.path === model.path">· {{ loadedModel.engine }} · {{ loadedModel.threads }} 线程</template>
+                      <template v-if="model.missing.length">· 缺少 {{ model.missing.join('、') }}</template>
+                    </template>
                       <button
                         type="button"
                         class="settings-btn"
@@ -873,25 +838,23 @@ watch(settingsOpen, async (open) => {
                                 : '不可加载'
                         }}
                       </button>
+                      <button v-if="loadedModel?.path === model.path" type="button" class="settings-btn" :disabled="modelBusy" @click="unloadAsrModel">释放模型</button>
                       <button
                         type="button"
                         class="settings-btn is-danger"
-                        :disabled="modelBusy || modelDownloading || transcribing"
+                        :disabled="modelBusy || modelDownloading"
                         :title="
-                          transcribing
-                            ? '识别进行中，暂不能删除模型'
-                            : modelBusy || modelDownloading
-                              ? '模型任务进行中，暂不能删除'
-                              : loadedModel?.path === model.path
-                                ? '删除模型并自动卸载'
-                                : '删除模型文件'
+                          modelBusy || modelDownloading
+                            ? '模型任务进行中，暂不能删除'
+                            : loadedModel?.path === model.path
+                              ? '删除模型并自动卸载'
+                              : '删除模型文件'
                         "
                         @click="confirmDeleteModel(model)"
                       >
                         {{ deletingModelId === model.id ? '删除中…' : '删除' }}
                       </button>
-                    </div>
-                  </article>
+                  </SettingsModelRow>
                   <p v-if="modelsLoading && models.length === 0" class="settings-hint">
                     正在扫描模型目录…
                   </p>
@@ -900,19 +863,42 @@ watch(settingsOpen, async (open) => {
                   </p>
                 </div>
 
-                <div class="settings-subgroup">
+                <p v-if="modelsInfo?.warnings.length" class="settings-hint is-warn">
+                  {{ modelsInfo.warnings.join('；') }}
+                </p>
+              </div>
+
+              <div class="settings-subgroup">
                   <div class="settings-subgroup-head">
                     <h4>TTS 语音模型</h4>
-                    <button type="button" class="settings-link" @click="openTtsRelease">sherpa-onnx 下载源</button>
+                    <div class="settings-subgroup-actions">
+                      <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource(true)">修改下载源</button>
+                      <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true)">访问下载源</button>
+                    </div>
                   </div>
                   <p class="settings-hint">Kokoro 适合口播与知识解说：自然语调、多语音、低延迟，适合长文本朗读和讲解。ZipVoice 适合零样本声音克隆：短参考音频即可复刻音色，支持中英文；合成时需同时提供录音文本。</p>
-                  <article v-for="model in ttsModels" :key="model.id" class="settings-model">
-                    <div class="settings-model-main">
-                      <div class="settings-model-title"><strong>{{ model.name }}</strong><span v-if="model.installed" class="settings-badge is-accent">已安装</span></div>
-                      <p class="settings-model-meta">{{ model.package }} · {{ formatBytes(model.sizeBytes) }}</p>
-                    </div>
-                    <button type="button" class="settings-btn" :disabled="ttsInstalling !== null || model.installed" @click="installTtsModel(model, 'settings')">{{ ttsInstalling === model.id ? '安装中…' : model.installed ? '已安装' : '下载' }}</button>
-                  </article>
+                  <div class="settings-models">
+                    <SettingsModelRow
+                      v-for="model in ttsModels"
+                      :key="model.id"
+                      :name="model.name"
+                      :path="model.hasFiles ? model.path : undefined"
+                      :size-bytes="model.sizeBytes"
+                      :loaded="model.loaded"
+                      :status="model.installed ? '已安装' : model.hasFiles ? '文件不完整' : undefined"
+                    >
+                        <template v-if="!model.hasFiles" #details> · {{ model.package }}</template>
+                        <span v-if="ttsModelActionLabel(model.id)" class="settings-muted" role="status">{{ ttsModelActionLabel(model.id) }}</span>
+                        <button v-if="model.installed" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'load')">
+                          {{ model.loaded ? '重新加载' : '加载' }}
+                        </button>
+                        <button v-else type="button" class="settings-btn" :disabled="ttsModelBusy || savingDownloadSource" @click="installTtsModel(model, 'settings')">
+                          {{ ttsInstalling === model.id ? '安装中…' : '下载' }}
+                        </button>
+                        <button v-if="model.loaded" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'release')">释放模型</button>
+                        <button v-if="model.hasFiles" type="button" class="settings-btn is-danger" :disabled="ttsModelBusy" @click="confirmDeleteTtsModel(model)">删除</button>
+                    </SettingsModelRow>
+                  </div>
                   <p v-if="ttsModelsLoading && !ttsModels.length" class="settings-hint">正在扫描 TTS 模型…</p>
                   <div v-if="ttsInstalling" class="settings-download">
                     <div class="settings-download-bar"><span class="settings-download-fill" :style="{ width: `${ttsDownloadPercent}%` }"></span></div>
@@ -920,47 +906,6 @@ watch(settingsOpen, async (open) => {
                     <button type="button" class="settings-btn" :disabled="ttsInstallCancelling" @click="cancelTtsInstall()">{{ ttsInstallCancelling ? '正在取消…' : '取消下载' }}</button>
                   </div>
                   <p v-else-if="!ttsModels.some(model => model.installed)" class="settings-hint">模型安装后才会出现在“文生语音”可选项中。</p>
-                </div>
-
-                <p v-if="modelsInfo?.warnings.length" class="settings-hint is-warn">
-                  {{ modelsInfo.warnings.join('；') }}
-                </p>
-
-                <div class="settings-inline">
-                  <span class="settings-muted">
-                    {{
-                      loadedModel
-                        ? `已加载 ${loadedModel.name} · ${loadedModel.engine} · ${loadedModel.threads} 线程`
-                        : '尚未加载模型'
-                    }}
-                  </span>
-                  <div class="settings-inline-actions">
-                    <button
-                      v-if="loadedModel"
-                      type="button"
-                      class="settings-link"
-                      :disabled="transcribing"
-                      @click="transcribeWav"
-                    >
-                      {{ transcribing ? '识别中…' : '识别 WAV…' }}
-                    </button>
-                    <button
-                      v-if="loadedModel"
-                      type="button"
-                      class="settings-link"
-                      :disabled="modelBusy"
-                      :title="modelBusy ? '模型加载中，暂不能释放' : '释放已加载的模型'"
-                      @click="unloadAsrModel"
-                    >
-                      释放模型
-                    </button>
-                  </div>
-                </div>
-
-                <div v-if="transcript !== null" class="settings-transcript">
-                  <span class="settings-transcript-text">{{ transcript || '（未识别到文本）' }}</span>
-                  <button type="button" class="settings-link" @click="clearTranscript">清除</button>
-                </div>
               </div>
             </section>
 
@@ -1106,86 +1051,3 @@ watch(settingsOpen, async (open) => {
     </div>
   </Teleport>
 </template>
-
-<style scoped>
-/* 模型加载四态：下载完成后的自动加载与手动加载共用 */
-.model-load-status {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(255, 255, 255, 0.035);
-  border-radius: 10px;
-  padding: 10px 12px;
-  margin-bottom: 12px;
-}
-.model-load-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.model-load-head strong {
-  font-size: 13px;
-  color: var(--text);
-}
-.model-load-icon {
-  display: inline-flex;
-  flex: none;
-  width: 16px;
-  height: 16px;
-  color: var(--text-2);
-}
-.model-load-icon :deep(svg) {
-  width: 16px;
-  height: 16px;
-}
-.model-load-status.is-success {
-  border-color: rgba(25, 217, 139, 0.35);
-  background: rgba(25, 217, 139, 0.08);
-}
-.model-load-status.is-success .model-load-icon {
-  color: var(--accent-bright);
-}
-.model-load-status.is-loading {
-  border-color: rgba(111, 243, 188, 0.28);
-}
-.model-load-status.is-failed {
-  border-color: rgba(248, 113, 113, 0.4);
-  background: rgba(248, 113, 113, 0.08);
-}
-.model-load-status.is-failed .model-load-icon {
-  color: #f87171;
-}
-.model-load-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  border-top-color: var(--accent-bright);
-  border-radius: 50%;
-  animation: model-load-spin 0.8s linear infinite;
-}
-@keyframes model-load-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.model-load-error {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: #fca5a5;
-  line-height: 1.5;
-  word-break: break-word;
-}
-.model-load-path {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--text-3);
-  line-height: 1.5;
-  word-break: break-all;
-}
-.model-load-retry {
-  margin-left: auto;
-}
-.settings-model-actions {
-  display: flex;
-  flex-shrink: 0;
-  gap: 6px;
-}
-</style>

@@ -27,6 +27,52 @@ const CACHE_MAX_RESULTS: usize = 8;
 const CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 static SYNTHESIS: JobSlot = JobSlot::new();
 static INSTALL: JobSlot = JobSlot::new();
+static ENGINE: parking_lot::Mutex<Option<LoadedTts>> = parking_lot::Mutex::new(None);
+static LOADED_PATH: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+
+struct LoadedTts {
+    path: String,
+    engine: OfflineTts,
+}
+
+fn set_engine(slot: &mut Option<LoadedTts>, engine: Option<LoadedTts>) {
+    *LOADED_PATH.write() = engine.as_ref().map(|loaded| loaded.path.clone());
+    *slot = engine;
+}
+
+fn catalog(root: &Path) -> Vec<tts_models::TtsModel> {
+    let mut models = tts_models::catalog(root);
+    let loaded = LOADED_PATH.read();
+    for model in &mut models {
+        model.loaded = model.installed && loaded.as_deref() == Some(model.path.as_str());
+    }
+    models
+}
+
+fn with_idle_models<T>(operation: impl FnOnce(&mut Option<LoadedTts>) -> Result<T>) -> Result<T> {
+    let mut engine = ENGINE
+        .try_lock()
+        .context("TTS 模型正在加载或合成，请稍后再试")?;
+    let install = INSTALL.0.lock();
+    if install.active.is_some() {
+        bail!("TTS 模型正在安装，请稍后再试");
+    }
+    operation(&mut engine)
+}
+
+pub(crate) fn change_models_root<T>(
+    state: &AppState,
+    change: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_idle_models(|engine| {
+        let previous = state.models_root();
+        let result = change()?;
+        if state.models_root() != previous {
+            set_engine(engine, None);
+        }
+        Ok(result)
+    })
+}
 
 struct JobSlot(parking_lot::Mutex<JobState>);
 
@@ -147,29 +193,132 @@ async fn worker<T: Send + 'static>(
 #[tauri::command]
 pub async fn tts_models(state: State<'_, AppState>) -> CommandResult<Vec<tts_models::TtsModel>> {
     let root = state.models_root();
-    worker(move || Ok(tts_models::catalog(&root))).await
+    worker(move || Ok(catalog(&root))).await
 }
 
 #[tauri::command]
 pub async fn install_tts_model(
     app: AppHandle,
-    state: State<'_, AppState>,
     id: String,
     job_id: uuid::Uuid,
 ) -> CommandResult<()> {
-    let root = state.models_root();
     worker(move || {
         let job = INSTALL.start(job_id, "已有 TTS 模型安装任务正在进行")?;
-        tts_models::install(&app, &root, &id, job_id, &job.token)
+        let state = app.state::<AppState>();
+        let source = validated_source(&state.tts_download_url(), true)?;
+        tts_models::install(&app, &state.models_root(), &id, &source, job_id, &job.token)
+    })
+    .await
+}
+
+fn validated_source(source: &str, tts: bool) -> Result<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Ok(String::new());
+    }
+    let url = reqwest::Url::parse(source).context("请输入有效的 HTTP 或 HTTPS 地址")?;
+    if !bgm_core::prefs::is_download_url(source) || url.host_str().is_none() {
+        bail!("请输入有效的 HTTP 或 HTTPS 地址");
+    }
+    if tts && (url.query().is_some() || url.fragment().is_some()) {
+        bail!("TTS 下载源需要使用可直接拼接文件名的目录地址");
+    }
+    if tts {
+        Ok(source.trim_end_matches('/').to_owned())
+    } else {
+        Ok(source.to_owned())
+    }
+}
+
+#[tauri::command]
+pub fn save_model_download_source(
+    state: State<'_, AppState>,
+    tts: bool,
+    url: String,
+) -> CommandResult<String> {
+    let source = validated_source(&url, tts).map_err(|error| format!("{error:#}"))?;
+    state
+        .save_model_download_url(tts, source)
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub fn open_model_download_source(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tts: bool,
+) -> CommandResult<()> {
+    let source = if tts {
+        state.tts_download_url()
+    } else {
+        state.asr_download_url()
+    };
+    let source = validated_source(&source, tts).map_err(|error| format!("{error:#}"))?;
+    let url = if source.is_empty() {
+        tts_models::RELEASE_URL
+    } else {
+        &source
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_tts_model(app: AppHandle, id: String) -> CommandResult<()> {
+    worker(move || {
+        with_idle_models(|engine| {
+            let root = app.state::<AppState>().models_root();
+            let model = tts_models::model(&root, &id)?;
+            if !model.installed {
+                bail!("模型文件不齐全，请先安装模型");
+            }
+            if engine
+                .as_ref()
+                .is_some_and(|loaded| loaded.path == model.path)
+            {
+                set_engine(engine, None);
+            }
+            let loaded = create_engine(&root, &model)?;
+            set_engine(engine, Some(loaded));
+            Ok(())
+        })
     })
     .await
 }
 
 #[tauri::command]
-pub fn open_tts_release(app: AppHandle) -> CommandResult<()> {
-    app.opener()
-        .open_url(tts_models::RELEASE_URL, None::<&str>)
-        .map_err(|error| error.to_string())
+pub async fn remove_tts_model(app: AppHandle, id: String, delete_files: bool) -> CommandResult<()> {
+    worker(move || {
+        with_idle_models(|engine| {
+            let root = app.state::<AppState>().models_root();
+            let model = tts_models::model(&root, &id)?;
+            if engine
+                .as_ref()
+                .is_some_and(|loaded| loaded.path == model.path)
+            {
+                set_engine(engine, None);
+            }
+            if delete_files {
+                let path = Path::new(&model.path);
+                let target = match path.canonicalize() {
+                    Ok(target) => target,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error).context("无法定位 TTS 模型目录"),
+                };
+                let expected = root
+                    .canonicalize()?
+                    .join(tts_models::DIR)
+                    .join(path.file_name().unwrap());
+                if target != expected {
+                    bail!("TTS 模型目录指向链接，无法删除");
+                }
+                fs::remove_dir_all(&target).context("删除 TTS 模型目录失败")?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -219,14 +368,14 @@ pub async fn normalize_tts_reference(request: Request<'_>) -> CommandResult<Resp
 #[tauri::command]
 pub async fn generate_tts(
     app: AppHandle,
-    state: State<'_, AppState>,
     request: SynthesisRequest,
     job_id: uuid::Uuid,
 ) -> CommandResult<SynthesisResult> {
-    let root = state.models_root();
     worker(move || {
         let job = SYNTHESIS.start(job_id, "已有语音合成正在进行")?;
-        synthesize(&app, &root, request, job_id, &job.token)
+        let mut engine = ENGINE.try_lock().context("TTS 模型正在管理，请稍后再试")?;
+        let root = app.state::<AppState>().models_root();
+        synthesize(&app, &root, &mut engine, request, job_id, &job.token)
     })
     .await
 }
@@ -303,6 +452,7 @@ fn prune_results(dir: &Path, incoming: u64, max_results: usize, max_bytes: u64) 
 fn synthesize(
     app: &AppHandle,
     root: &Path,
+    slot: &mut Option<LoadedTts>,
     mut request: SynthesisRequest,
     job_id: uuid::Uuid,
     token: &CancellationToken,
@@ -319,45 +469,14 @@ fn synthesize(
     {
         bail!("参考音频不能超过 10 秒");
     }
-    let catalog = tts_models::catalog(root);
-    let model = catalog
-        .iter()
-        .find(|item| item.id == request.model_id && item.family == request.family && item.installed)
-        .context("模型文件不齐全，请前往模型管理下载安装")?;
-    let path = Path::new(&model.path);
-    let mut config = OfflineTtsConfig::default();
-    config.model.num_threads =
-        std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
-    config.max_num_sentences = 1;
+    let model = tts_models::model(root, &request.model_id)?;
+    if !model.installed || model.family != request.family {
+        bail!("模型文件不齐全或型号不匹配，请检查模型配置");
+    }
     let mut generation = GenerationConfig::default();
-    let join = |file: &str| path.join(file).to_string_lossy().into_owned();
     if model.family == "Kokoro" {
-        config.model.kokoro.model = Some(join(model.acoustic_file()));
-        config.model.kokoro.voices = Some(join("voices.bin"));
-        config.model.kokoro.tokens = Some(join("tokens.txt"));
-        config.model.kokoro.lexicon = Some(format!(
-            "{},{}",
-            join("lexicon-us-en.txt"),
-            join("lexicon-zh.txt")
-        ));
         generation.sid = request.voice_id;
     } else {
-        let (encoder, decoder) = model.zipvoice_files();
-        let deps = root.join(tts_models::DIR);
-        config.model.zipvoice.tokens = Some(join("tokens.txt"));
-        config.model.zipvoice.encoder = Some(join(encoder));
-        config.model.zipvoice.decoder = Some(join(decoder));
-        config.model.zipvoice.vocoder =
-            Some(deps.join("vocos_24khz.onnx").to_string_lossy().into_owned());
-        config.model.zipvoice.lexicon = Some(format!(
-            "{},{}",
-            join("lexicon.txt"),
-            deps.join("lexicon-en-us.txt").display()
-        ));
-        config.model.zipvoice.feat_scale = 0.1;
-        config.model.zipvoice.t_shift = 0.5;
-        config.model.zipvoice.target_rms = 0.1;
-        config.model.zipvoice.guidance_scale = 1.0;
         generation.reference_text = Some(
             request
                 .reference_text
@@ -377,8 +496,13 @@ fn synthesize(
         generation.num_steps = 4;
     }
     check_cancelled(token)?;
-    let engine = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
-    check_cancelled(token)?;
+    if slot.as_ref().is_none_or(|loaded| loaded.path != model.path) {
+        set_engine(slot, None);
+        let loaded = create_engine(root, &model)?;
+        check_cancelled(token)?;
+        set_engine(slot, Some(loaded));
+    }
+    let engine = &slot.as_ref().unwrap().engine;
     let sample_rate = u32::try_from(engine.sample_rate())
         .ok()
         .filter(|rate| (8_000..=65_535).contains(rate))
@@ -386,6 +510,59 @@ fn synthesize(
     if model.family == "Kokoro" && !(0..engine.num_speakers()).contains(&generation.sid) {
         bail!("所选 Kokoro 语音不可用");
     }
+    synthesize_track(app, request, job_id, token, engine, generation, sample_rate)
+}
+
+fn create_engine(root: &Path, model: &tts_models::TtsModel) -> Result<LoadedTts> {
+    let path = Path::new(&model.path);
+    let mut config = OfflineTtsConfig::default();
+    config.model.num_threads =
+        std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
+    config.max_num_sentences = 1;
+    let join = |file: &str| path.join(file).to_string_lossy().into_owned();
+    if model.family == "Kokoro" {
+        config.model.kokoro.model = Some(join(model.acoustic_file()));
+        config.model.kokoro.voices = Some(join("voices.bin"));
+        config.model.kokoro.tokens = Some(join("tokens.txt"));
+        config.model.kokoro.lexicon = Some(format!(
+            "{},{}",
+            join("lexicon-us-en.txt"),
+            join("lexicon-zh.txt")
+        ));
+    } else {
+        let (encoder, decoder) = model.zipvoice_files();
+        let deps = root.join(tts_models::DIR);
+        config.model.zipvoice.tokens = Some(join("tokens.txt"));
+        config.model.zipvoice.encoder = Some(join(encoder));
+        config.model.zipvoice.decoder = Some(join(decoder));
+        config.model.zipvoice.vocoder =
+            Some(deps.join("vocos_24khz.onnx").to_string_lossy().into_owned());
+        config.model.zipvoice.lexicon = Some(format!(
+            "{},{}",
+            join("lexicon.txt"),
+            deps.join("lexicon-en-us.txt").display()
+        ));
+        config.model.zipvoice.feat_scale = 0.1;
+        config.model.zipvoice.t_shift = 0.5;
+        config.model.zipvoice.target_rms = 0.1;
+        config.model.zipvoice.guidance_scale = 1.0;
+    }
+    let engine = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
+    Ok(LoadedTts {
+        path: model.path.clone(),
+        engine,
+    })
+}
+
+fn synthesize_track(
+    app: &AppHandle,
+    request: SynthesisRequest,
+    job_id: uuid::Uuid,
+    token: &CancellationToken,
+    engine: &OfflineTts,
+    generation: GenerationConfig,
+    sample_rate: u32,
+) -> Result<SynthesisResult> {
     let mut track = Vec::new();
     let total = request.segments.len();
     let _ = app.emit(
