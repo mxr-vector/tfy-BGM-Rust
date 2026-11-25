@@ -340,11 +340,7 @@ impl AppState {
         self.finish_category_change(app, category_id, warnings)
     }
 
-    pub fn choose_library_dir(
-        &self,
-        app: &AppHandle,
-        dir: PathBuf,
-    ) -> Result<LibrarySnapshot> {
+    pub fn choose_library_dir(&self, app: &AppHandle, dir: PathBuf) -> Result<LibrarySnapshot> {
         let _guard = self.ops_lock.lock();
         self.library_revision.fetch_add(1, Ordering::Relaxed);
         if !dir.is_dir() {
@@ -725,18 +721,26 @@ impl AppState {
             next.retry_failed();
         }
         let plan = next.plan_sync(&root, &categories, &songs);
-        let analysis = audio_index::analyze_plan_while(&plan, ffmpeg.as_deref(), |current, total, title| {
-            if self.library_revision.load(Ordering::Relaxed) != revision {
-                return false;
-            }
+        let analysis =
+            audio_index::analyze_plan_while(&plan, ffmpeg.as_deref(), |current, total, title| {
+                if self.library_revision.load(Ordering::Relaxed) != revision {
+                    return false;
+                }
+                let _ = app.emit(
+                    AUDIO_INDEX_PROGRESS_EVENT,
+                    AudioIndexProgress {
+                        current,
+                        total,
+                        title: title.to_owned(),
+                    },
+                );
+                true
+            });
+        if plan.pending() > 0 && ffmpeg.is_some() {
             let _ = app.emit(
                 AUDIO_INDEX_PROGRESS_EVENT,
-                AudioIndexProgress { current, total, title: title.to_owned() },
+                Option::<AudioIndexProgress>::None,
             );
-            true
-        });
-        if plan.pending() > 0 && ffmpeg.is_some() {
-            let _ = app.emit(AUDIO_INDEX_PROGRESS_EVENT, Option::<AudioIndexProgress>::None);
         }
         let Some(analysis) = analysis else {
             return Ok(audio_index::IndexSyncReport::default());
@@ -768,7 +772,11 @@ impl AppState {
             let root = audio_index::normalize_path(root);
             let snapshot = self.audio_index_snapshot();
             if !snapshot.enabled || snapshot.root != root {
-                let next = AudioIndexStore { root, enabled: true, ..AudioIndexStore::default() };
+                let next = AudioIndexStore {
+                    root,
+                    enabled: true,
+                    ..AudioIndexStore::default()
+                };
                 next.save(&self.audio_index_path)?;
                 *self.audio_index.write() = Arc::new(next);
             }
@@ -802,7 +810,10 @@ impl AppState {
                     let _ = app.emit(AUDIO_INDEX_UPDATED_EVENT, &report.warnings);
                 }
                 Err(error) if !retry => {
-                    let _ = app.emit(AUDIO_INDEX_UPDATED_EVENT, vec![format!("音频索引更新失败：{error:#}")]);
+                    let _ = app.emit(
+                        AUDIO_INDEX_UPDATED_EVENT,
+                        vec![format!("音频索引更新失败：{error:#}")],
+                    );
                 }
                 _ => {}
             }
@@ -856,7 +867,12 @@ impl AppState {
             .library
             .songs
             .iter()
-            .map(|song| (audio_index::normalize_path(Path::new(&song.path)), song.key.clone()))
+            .map(|song| {
+                (
+                    audio_index::normalize_path(Path::new(&song.path)),
+                    song.key.clone(),
+                )
+            })
             .collect();
         drop(runtime);
         if !query_path.is_file() {
@@ -898,7 +914,11 @@ impl AppState {
             if !store.enabled || store.root != audio_index::normalize_path(&root) {
                 bail!("请先为当前曲库建立音频索引");
             }
-            let entries: Vec<&audio_index::IndexEntry> = store.entries.values().filter(|entry| Path::new(&entry.path).is_file()).collect();
+            let entries: Vec<&audio_index::IndexEntry> = store
+                .entries
+                .values()
+                .filter(|entry| Path::new(&entry.path).is_file())
+                .collect();
             let duplicates = audio_index::find_duplicates(&entries, DUPLICATE_THRESHOLD);
             let duplicate_paths: HashSet<&str> = duplicates
                 .groups

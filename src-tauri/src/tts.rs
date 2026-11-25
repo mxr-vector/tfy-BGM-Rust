@@ -485,8 +485,10 @@ fn synthesize(
     if !model.installed || model.family != request.family {
         bail!("模型文件不齐全或型号不匹配，请检查模型配置");
     }
-    let mut generation = GenerationConfig::default();
-    generation.silence_scale = 0.3;
+    let mut generation = GenerationConfig {
+        silence_scale: 0.3,
+        ..GenerationConfig::default()
+    };
     if model.family == "Kokoro" {
         generation.sid = request.voice_id;
     } else {
@@ -598,21 +600,8 @@ fn synthesize_track(
                 !audio.samples().is_empty() && audio.sample_rate() == sample_rate as i32
             })
             .with_context(|| format!("第 {} 段未生成有效语音", index + 1))?;
-        let slot = segment
-            .start_ms
-            .zip(segment.end_ms)
-            .map(|(start, end)| frames(end, sample_rate) - frames(start, sample_rate));
-        let fitted;
-        let samples = if let Some(slot) = slot.filter(|slot| *slot < audio.samples().len()) {
-            fitted =
-                speech_audio::fit_clip(audio.samples(), slot, sample_rate).with_context(|| {
-                    format!("第 {} 段超过字幕时槽，请缩短文本或延长时槽", index + 1)
-                })?;
-            &fitted
-        } else {
-            audio.samples()
-        };
-        append_segment(&mut track, segment, samples, sample_rate)?;
+        append_segment(&mut track, segment, audio.samples(), sample_rate)
+            .with_context(|| format!("第 {} 段音频处理失败", index + 1))?;
         let _ = app.emit(
             "tts-synthesis-progress",
             SynthesisProgress {
@@ -622,25 +611,39 @@ fn synthesize_track(
             },
         );
     }
+    while track.last() == Some(&0.0) {
+        track.pop();
+    }
+    if track.is_empty() {
+        bail!("合成结果没有有效声音");
+    }
     check_cancelled(token)?;
     let dir = result_dir(app)?;
     fs::create_dir_all(&dir)?;
     let name = format!("speech-{}.wav", uuid::Uuid::new_v4().simple());
-    let staged = tempfile::Builder::new()
-        .prefix("speech-part-")
+    let raw = tempfile::Builder::new()
+        .prefix("speech-raw-")
         .suffix(".wav")
         .tempfile_in(&dir)?;
-    crate::separation::write_wav16_slices(staged.path(), &[&track], sample_rate)?;
+    crate::separation::write_wav16_slices(raw.path(), &[&track], sample_rate)?;
     check_cancelled(token)?;
+    let normalized = tempfile::Builder::new()
+        .prefix("speech-normalized-")
+        .suffix(".wav")
+        .tempfile_in(&dir)?;
+    speech_audio::normalize_output(raw.path(), normalized.path(), sample_rate)
+        .context("语音响度归一化失败")?;
+    check_cancelled(token)?;
+    let wave = speech_audio::read_wave(normalized.path())?;
     prune_results(
         &dir,
-        staged.as_file().metadata()?.len(),
+        normalized.as_file().metadata()?.len(),
         CACHE_MAX_RESULTS,
         CACHE_MAX_BYTES,
     )?;
     check_cancelled(token)?;
     let path = dir.join(name);
-    staged.persist(&path).context("发布合成音频失败")?;
+    normalized.persist(&path).context("发布合成音频失败")?;
     Ok(SynthesisResult {
         name: path
             .file_name()
@@ -649,7 +652,7 @@ fn synthesize_track(
             .into_owned(),
         path: path.to_string_lossy().into_owned(),
         sample_rate,
-        duration: track.len() as f64 / f64::from(sample_rate),
+        duration: wave.samples().len() as f64 / f64::from(sample_rate),
     })
 }
 
@@ -663,16 +666,14 @@ fn append_segment(
     samples: &[f32],
     rate: u32,
 ) -> Result<()> {
-    let start = segment.start_ms.map_or(track.len(), |ms| frames(ms, rate));
-    let end = start.checked_add(samples.len()).context("音轨过长")?;
-    let padded_end = segment.end_ms.map_or(end, |ms| end.max(frames(ms, rate)));
-    if padded_end > frames(MAX_DURATION_MS, rate) {
+    let samples = speech_audio::polish_segment(samples, rate)?;
+    let pause = speech_audio::pause_after(&segment.text, rate);
+    let added = samples.len().checked_add(pause).context("音轨过长")?;
+    if track.len().checked_add(added).context("音轨过长")? > frames(MAX_DURATION_MS, rate) {
         bail!("音轨不能超过 30 分钟");
     }
-    track.resize(track.len().max(padded_end), 0.0);
-    for (dst, src) in track[start..end].iter_mut().zip(samples) {
-        *dst = (*dst + src).clamp(-1.0, 1.0);
-    }
+    track.extend_from_slice(&samples);
+    track.resize(track.len() + pause, 0.0);
     Ok(())
 }
 
@@ -722,26 +723,54 @@ mod tests {
     }
 
     #[test]
-    fn timed_track_preserves_initial_gaps_and_final_timestamp() {
-        let mut track = Vec::new();
-        for (start_ms, end_ms) in [(10, 20), (30, 50)] {
+    fn subtitle_timestamps_do_not_change_speech_timing() {
+        let samples = vec![0.5; 2_000];
+        let mut natural = Vec::new();
+        let mut timed = Vec::new();
+        for (index, (start_ms, end_ms)) in
+            [(10_000, 10_100), (20_000, 20_050)].into_iter().enumerate()
+        {
+            let text = if index == 0 {
+                "第一句。"
+            } else {
+                "第二句！"
+            };
             append_segment(
-                &mut track,
+                &mut natural,
                 &TtsSegment {
-                    text: "a".into(),
+                    text: text.into(),
+                    start_ms: None,
+                    end_ms: None,
+                },
+                &samples,
+                24_000,
+            )
+            .unwrap();
+            append_segment(
+                &mut timed,
+                &TtsSegment {
+                    text: text.into(),
                     start_ms: Some(start_ms),
                     end_ms: Some(end_ms),
                 },
-                &[0.5; 10],
+                &samples,
                 24_000,
             )
             .unwrap();
         }
-        assert_eq!(track.len(), 1200);
-        assert!(track[..240].iter().all(|&value| value == 0.0));
-        assert_eq!(track[240], 0.5);
-        assert!(track[250..720].iter().all(|&value| value == 0.0));
-        assert_eq!(track[720], 0.5);
-        assert!(track[730..].iter().all(|&value| value == 0.0));
+        assert_eq!(natural, timed);
+        assert_eq!(
+            natural.len(),
+            4_000 + 2 * speech_audio::pause_after("。", 24_000)
+        );
+        assert_eq!(natural[0], 0.0);
+    }
+
+    #[test]
+    fn sentence_and_clause_pauses_are_natural_and_bounded() {
+        assert_eq!(speech_audio::pause_after("一句话。", 24_000), 3_840);
+        assert_eq!(speech_audio::pause_after("“你好。”", 24_000), 3_840);
+        assert_eq!(speech_audio::pause_after("前半句，", 24_000), 1_440);
+        assert_eq!(speech_audio::pause_after("跨段继续", 24_000), 0);
     }
 }

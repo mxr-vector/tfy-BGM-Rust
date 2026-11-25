@@ -183,9 +183,8 @@ fn netease_checks_inline_total_when_manifest_is_absent_or_empty() {
         complete["playlist"]["trackIds"] = manifest;
         let mut incomplete = complete.clone();
         incomplete["playlist"]["trackCount"] = json!(2);
-        let read = |fixture| {
-            runtime.block_on(netease_pages(fixture, 42, |_| ready(Err(INCOMPLETE))))
-        };
+        let read =
+            |fixture| runtime.block_on(netease_pages(fixture, 42, |_| ready(Err(INCOMPLETE))));
         assert!(read(complete).unwrap().warning.is_none());
         assert!(read(incomplete).unwrap().warning.unwrap().contains("1 / 2"));
     }

@@ -252,7 +252,7 @@ async function generate(): Promise<void> {
     outputDuration.value = result.duration;
     outputFamily.value = selectedFamily;
     outputUrl.value = assetUrl(result.path);
-    toast('语音合成完成，已保留模型原生采样率', 'success');
+    toast('语音已优化响度，并保留模型原生采样率', 'success');
   } catch (error) {
     if (!disposed && !job.cancelled) toast(`语音合成失败：${normalizeError(error)}`, 'error');
   } finally {
@@ -371,7 +371,7 @@ onBeforeUnmount(() => {
         </section>
         <section class="tts-card tts-render-card">
           <div class="tts-card-heading"><div><span class="tts-overline">RENDER / WAV</span><h2>生成声音</h2></div><span class="tts-live-dot">LOCAL ONLY</span></div>
-          <p>文本在本机进行离线合成。带时间码的字幕会生成原采样率 WAV 音轨。</p>
+          <p>文本在本机离线合成为连续语音。字幕可提前渲染，时间戳不会压缩语音或改变语速。</p>
           <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating || parsingForGeneration ? 'refresh' : 'play'"/>{{ generating ? '正在本地合成…' : parsingForGeneration ? '正在解析文本…' : '生成声音' }}</button>
           <p v-if="!generating && !parsingForGeneration && generationBlocker" class="tts-reference-status" aria-live="polite">{{ generationBlocker }}</p>
           <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段</p>

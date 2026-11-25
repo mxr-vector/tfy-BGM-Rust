@@ -43,7 +43,10 @@ fn parse_plain_text(text: &str) -> Vec<TtsSegment> {
         while lines.peek().is_some_and(|line| !line.is_empty()) {
             let line = lines.next().unwrap();
             if paragraph.chars().last().is_some_and(|c| c.is_ascii())
-                && line.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                && line
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
             {
                 paragraph.push(' ');
             }
@@ -59,7 +62,10 @@ fn parse_plain_text(text: &str) -> Vec<TtsSegment> {
                     && sentence_count(&previous.text) < MAX_SENTENCES_PER_CHUNK
             }) {
                 if previous.text.chars().last().is_some_and(|c| c.is_ascii())
-                    && text.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                    && text
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
                 {
                     previous.text.push(' ');
                 }
@@ -86,7 +92,9 @@ fn plain_chunk_end(text: &str) -> usize {
             .enumerate()
             .find(|(index, (_, c))| {
                 is_sentence_mark(*c)
-                    && chars.get(index + 1).is_some_and(|(_, next)| !is_sentence_mark(*next))
+                    && chars
+                        .get(index + 1)
+                        .is_some_and(|(_, next)| !is_sentence_mark(*next))
             })
             .map_or(text.len(), |(index, _)| {
                 chars.get(index + 1).map_or(text.len(), |(byte, _)| *byte)
@@ -101,9 +109,7 @@ fn plain_chunk_end(text: &str) -> usize {
     for (index, &(_, c)) in chars.iter().enumerate().take(MAX_PLAIN_CHARS) {
         let next = chars.get(index + 1).map_or(' ', |(_, next)| *next);
         let boundary = chars.get(index + 1).map_or(text.len(), |(byte, _)| *byte);
-        if is_sentence_mark(c)
-            && !(c == '.' && c.is_ascii() && next.is_ascii_alphanumeric())
-        {
+        if is_sentence_mark(c) && !(c == '.' && c.is_ascii() && next.is_ascii_alphanumeric()) {
             sentence = Some((index + 1, boundary));
         } else if matches!(c, '，' | ',' | '、' | '；' | ';' | '：' | ':')
             && !(c.is_ascii() && next.is_ascii_digit())
@@ -309,10 +315,17 @@ mod tests {
 
     #[test]
     fn plain_text_merges_wrapped_paragraphs_and_splits_at_sentence_marks() {
-        let cues = parse_script("这是第一句话。\n这是第二句话！\n这里继续\n下一行。\n\nEnglish line\ncontinued.", "txt").unwrap();
+        let cues = parse_script(
+            "这是第一句话。\n这是第二句话！\n这里继续\n下一行。\n\nEnglish line\ncontinued.",
+            "txt",
+        )
+        .unwrap();
         assert_eq!(
             cues.iter().map(|cue| cue.text.as_str()).collect::<Vec<_>>(),
-            ["这是第一句话。这是第二句话！这里继续下一行。", "English line continued."]
+            [
+                "这是第一句话。这是第二句话！这里继续下一行。",
+                "English line continued."
+            ]
         );
     }
 
@@ -329,12 +342,21 @@ mod tests {
         let text = format!("{}。{}", "前文".repeat(100), "后文".repeat(100));
         let cues = parse_script(&text, "txt").unwrap();
         assert!(cues.len() >= 2);
-        assert!(cues.iter().all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS));
+        assert!(
+            cues.iter()
+                .all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS)
+        );
         assert_eq!(
-            cues.iter().map(|cue| cue.text.as_str()).collect::<String>().replace('。', ""),
+            cues.iter()
+                .map(|cue| cue.text.as_str())
+                .collect::<String>()
+                .replace('。', ""),
             text.replace('。', "")
         );
-        assert!(cues.iter().all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS));
+        assert!(
+            cues.iter()
+                .all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS)
+        );
     }
 
     #[test]

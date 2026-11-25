@@ -12,8 +12,8 @@ type TextFormat = 'txt' | 'lrc' | 'srt';
 
 const formatOptions = [
   { value: 'txt', label: '纯文本' },
-  { value: 'lrc', label: 'LRC 时间轴' },
-  { value: 'srt', label: 'SRT 时间轴' },
+  { value: 'lrc', label: 'LRC 字幕' },
+  { value: 'srt', label: 'SRT 字幕' },
 ];
 const sourceText = ref('');
 const format = ref<TextFormat>('txt');
@@ -90,7 +90,8 @@ defineExpose({ hasText, segments, parseText });
       <AppSelect :model-value="format" :options="formatOptions" label="文本格式" :min-menu-width="132" @update:model-value="setFormat" />
       <button type="button" class="tts-action" @click="parseText">解析文本</button>
     </div>
-    <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会合并段内换行，优先按标点分段；LRC 与 SRT 将按原时间轴合成。" @input="invalidateText"></textarea>
+    <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会合并段内换行，优先按标点分段；LRC 与 SRT 按字幕条目分段。" @input="invalidateText"></textarea>
+    <p v-if="format !== 'txt'" class="tts-timing-note">字幕时间戳仅用于分段与预览，不会限制语音时长、语速或音质。</p>
     <div v-if="segments.length" class="tts-segment-preview">
       <div class="tts-card-heading"><h3>{{ title }}</h3><span>{{ segments.length }} 条</span></div>
       <div v-for="(segment, index) in segments.slice(0, 4)" :key="index" class="tts-segment-row">
@@ -108,6 +109,7 @@ defineExpose({ hasText, segments, parseText });
 .tts-import-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .tts-textarea{display:block;width:100%;flex:1;min-height:110px;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(1,8,5,.42);color:var(--text);font:13px/1.45 var(--font-sans);resize:none}
 .tts-textarea::placeholder{color:var(--text-3)}
+.tts-timing-note{margin-top:6px;color:var(--text-3);font-size:11px;line-height:1.5}
 .tts-segment-preview{max-height:117px;overflow:auto;margin-top:8px;padding-top:6px;border-top:1px solid var(--line)}
 .tts-segment-row{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);color:var(--text-2);font-size:12px}
 .tts-segment-row time{flex:none;color:var(--accent-bright);font:11px ui-monospace,Consolas,monospace}

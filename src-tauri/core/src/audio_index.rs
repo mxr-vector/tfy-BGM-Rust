@@ -41,8 +41,7 @@ const FAILED_RETRY_MS: u64 = 10 * 60 * 1_000;
 /// 50 MB 量级，启动时还要解析数百万个数字。改成 Base64 字符串后体积降到约 11 KB/首，
 /// 解析成本从「逐数字」变成「逐字符串」，大曲库的冷启动明显更快。
 mod codec {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     fn encode(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -545,8 +544,8 @@ impl AudioIndexStore {
             keep.insert(candidate.id.clone());
             let existing = self.entries.get(&candidate.id);
             // 根目录变化或版本升级后，旧条目的指纹语义不再可信，一律重新分析。
-            let matched = !root_changed
-                && existing.is_some_and(|entry| entry.signature_matches(&candidate));
+            let matched =
+                !root_changed && existing.is_some_and(|entry| entry.signature_matches(&candidate));
             // 同一份文件刚分析失败过：先做退避，等下一轮再试，别让兜底扫描反复解码。
             let backing_off = !root_changed
                 && existing.is_some_and(|entry| {
@@ -619,7 +618,10 @@ impl AudioIndexStore {
                 }
                 Err(error) => {
                     report.failed += 1;
-                    push_warning(&mut report.warnings, format!("{}：{error}", candidate.file_name));
+                    push_warning(
+                        &mut report.warnings,
+                        format!("{}：{error}", candidate.file_name),
+                    );
                     self.entries
                         .insert(candidate.id.clone(), failed_entry(candidate, &error));
                 }
@@ -737,14 +739,10 @@ fn analyze_file(ffmpeg: &Path, candidate: &IndexCandidate) -> Result<IndexEntry,
         let decoded = scope.spawn(|| decode_mono(ffmpeg, source));
         (
             fingerprint.join().unwrap_or_else(|_| {
-                Err(AudioIndexError::Analyze(
-                    "指纹分析线程异常结束".to_owned(),
-                ))
+                Err(AudioIndexError::Analyze("指纹分析线程异常结束".to_owned()))
             }),
             decoded.join().unwrap_or_else(|_| {
-                Err(AudioIndexError::Analyze(
-                    "音频解码线程异常结束".to_owned(),
-                ))
+                Err(AudioIndexError::Analyze("音频解码线程异常结束".to_owned()))
             }),
         )
     });
@@ -787,7 +785,13 @@ fn analyze_file(ffmpeg: &Path, candidate: &IndexCandidate) -> Result<IndexEntry,
 fn chromaprint(ffmpeg: &Path, source: &Path) -> Result<Vec<u32>, AudioIndexError> {
     let output = command(ffmpeg)
         .args([
-            "-hide_banner", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file", "-i",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-i",
         ])
         .arg(source)
         .args([
@@ -1655,7 +1659,14 @@ mod tests {
         // 若指纹退回 ffmpeg 默认的 Base64 压缩流，这里会一条都命中不了。
         let segment = dir.path().join("segment.wav");
         let clip = command(&ffmpeg)
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-ss"])
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+            ])
             .arg("6")
             .arg("-i")
             .arg(&music)

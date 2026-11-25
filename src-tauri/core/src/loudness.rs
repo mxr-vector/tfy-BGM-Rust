@@ -101,17 +101,7 @@ pub fn normalize_file(
     preset: ExportPreset,
 ) -> Result<(), LoudnormError> {
     let stats = measure(ffmpeg, source, preset)?;
-    let filter = format!(
-        "loudnorm=I={}:TP={}:LRA={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true:print_format=summary",
-        preset.target_lufs,
-        preset.true_peak,
-        preset.loudness_range,
-        stats.input_i,
-        stats.input_tp,
-        stats.input_lra,
-        stats.input_thresh,
-        stats.target_offset,
-    );
+    let filter = linear_filter(preset, &stats);
 
     let output = build_command(ffmpeg)
         .args(["-hide_banner", "-nostdin", "-y", "-i"])
@@ -152,6 +142,72 @@ pub fn normalize_file(
         )));
     }
     Ok(())
+}
+
+/// 用两遍 `loudnorm` 归一化单声道 PCM WAV，并保持调用方指定的原生采样率。
+pub fn normalize_wav(
+    ffmpeg: &Path,
+    source: &Path,
+    destination: &Path,
+    sample_rate: u32,
+    preset: ExportPreset,
+) -> Result<(), LoudnormError> {
+    if sample_rate == 0 {
+        return Err(LoudnormError::Write(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "采样率不能为 0",
+        )));
+    }
+    let stats = measure(ffmpeg, source, preset)?;
+    let filter = linear_filter(preset, &stats);
+    let output = build_command(ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .arg(source)
+        .args(["-map", "0:a:0", "-vn", "-af"])
+        .arg(&filter)
+        .args([
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+        ])
+        .arg(destination)
+        .output()
+        .map_err(LoudnormError::Spawn)?;
+
+    if !output.status.success() {
+        let _ = std::fs::remove_file(destination);
+        return Err(LoudnormError::Encode(tail(&output.stderr)));
+    }
+    let written = std::fs::metadata(destination)
+        .map_err(LoudnormError::Write)?
+        .len();
+    if written <= 44 {
+        let _ = std::fs::remove_file(destination);
+        return Err(LoudnormError::Write(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "ffmpeg 输出为空 WAV",
+        )));
+    }
+    Ok(())
+}
+
+fn linear_filter(preset: ExportPreset, stats: &LoudnormStats) -> String {
+    format!(
+        "loudnorm=I={}:TP={}:LRA={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:linear=true:print_format=summary",
+        preset.target_lufs,
+        preset.true_peak,
+        preset.loudness_range,
+        stats.input_i,
+        stats.input_tp,
+        stats.input_lra,
+        stats.input_thresh,
+        stats.target_offset,
+    )
 }
 
 fn measure(

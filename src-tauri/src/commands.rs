@@ -245,9 +245,11 @@ pub fn remove_loop_point(state: State<'_, AppState>, key: String) -> CommandResu
 
 #[tauri::command]
 pub async fn rescan_library(app: AppHandle) -> CommandResult<LibrarySnapshot> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().rescan(&app).map_err(describe))
-        .await
-        .map_err(|error| format!("曲库扫描任务异常结束：{error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().rescan(&app).map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("曲库扫描任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -260,9 +262,14 @@ pub async fn choose_library_dir(app: AppHandle) -> CommandResult<Option<LibraryS
     let Some(picked) = picked else {
         return Ok(None);
     };
-    let dir = picked.into_path().map_err(|error| format!("所选目录无效：{error}"))?;
+    let dir = picked
+        .into_path()
+        .map_err(|error| format!("所选目录无效：{error}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().choose_library_dir(&app, dir).map(Some).map_err(describe)
+        app.state::<AppState>()
+            .choose_library_dir(&app, dir)
+            .map(Some)
+            .map_err(describe)
     })
     .await
     .map_err(|error| format!("曲库切换任务异常结束：{error}"))?
@@ -271,7 +278,9 @@ pub async fn choose_library_dir(app: AppHandle) -> CommandResult<Option<LibraryS
 #[tauri::command]
 pub async fn reset_library_dir(app: AppHandle) -> CommandResult<LibrarySnapshot> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().reset_library_dir(&app).map_err(describe)
+        app.state::<AppState>()
+            .reset_library_dir(&app)
+            .map_err(describe)
     })
     .await
     .map_err(|error| format!("曲库恢复任务异常结束：{error}"))?
@@ -325,11 +334,15 @@ pub async fn build_audio_index(
 #[tauri::command]
 pub async fn disable_audio_index(app: AppHandle) -> CommandResult<Option<AudioIndexStatus>> {
     let root = app.state::<AppState>().root();
-    let confirmed = app.dialog()
+    let confirmed = app
+        .dialog()
         .message("停止为当前曲库自动同步，并删除本机的音频索引？音频文件不会被修改。")
         .title("关闭音频索引")
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom("关闭并删除索引".to_owned(), "取消".to_owned()))
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "关闭并删除索引".to_owned(),
+            "取消".to_owned(),
+        ))
         .blocking_show();
     if !confirmed {
         return Ok(None);
@@ -378,14 +391,24 @@ pub async fn search_library_by_sound(
         .file()
         .set_title("选择录音或查询音频")
         .add_filter("曲库音频", &AUDIO_EXTENSIONS)
-        .add_filter("其它录音格式", &["opus", "aac", "webm", "mp4", "amr", "3gp", "caf", "aiff", "wma"])
+        .add_filter(
+            "其它录音格式",
+            &[
+                "opus", "aac", "webm", "mp4", "amr", "3gp", "caf", "aiff", "wma",
+            ],
+        )
         .blocking_pick_file()
     else {
         return Ok(None);
     };
-    let path = file.into_path().map_err(|error| format!("查询音频路径无效：{error}"))?;
+    let path = file
+        .into_path()
+        .map_err(|error| format!("查询音频路径无效：{error}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().search_by_sound(path, limit).map(Some).map_err(describe)
+        app.state::<AppState>()
+            .search_by_sound(path, limit)
+            .map(Some)
+            .map_err(describe)
     })
     .await
     .map_err(|error| format!("以声搜声任务异常结束：{error}"))?
@@ -402,10 +425,13 @@ pub async fn search_library_by_recording(
     if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
         return Err("麦克风录音为空或超过 2 MB".to_owned());
     }
-    let limit = request.headers().get("x-sound-search-limit")
+    let limit = request
+        .headers()
+        .get("x-sound-search-limit")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(10).clamp(1, 50);
+        .unwrap_or(10)
+        .clamp(1, 50);
     let bytes = bytes.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
