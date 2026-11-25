@@ -340,15 +340,27 @@ pub async fn list_tts_builtin_voices(app: AppHandle) -> CommandResult<Vec<String
     worker(move || speech_audio::builtin_voice_files(&builtin_voices_root(&app)?)).await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinReference {
+    audio: Vec<u8>,
+    text: Option<String>,
+}
+
 #[tauri::command]
-pub async fn load_tts_builtin_reference(app: AppHandle, voice: String) -> CommandResult<Response> {
+pub async fn load_tts_builtin_reference(
+    app: AppHandle,
+    voice: String,
+) -> CommandResult<BuiltinReference> {
     worker(move || {
         let root = builtin_voices_root(&app)?;
         if !speech_audio::builtin_voice_files(&root)?.contains(&voice) {
             bail!("未找到所选内置参考音频");
         }
-        let bytes = fs::read(root.join(voice)).context("无法读取所选内置参考音频")?;
-        speech_audio::prepare_builtin_reference(&bytes).map(Response::new)
+        let path = root.join(voice);
+        let bytes = fs::read(&path).context("无法读取所选内置参考音频")?;
+        let (audio, text) = speech_audio::prepare_builtin_reference(&path, &bytes)?;
+        Ok(BuiltinReference { audio, text })
     })
     .await
 }
@@ -482,9 +494,7 @@ fn synthesize(
                 .reference_text
                 .take()
                 .map(|text| text.trim().to_owned())
-                .filter(|text| {
-                    !text.is_empty() && text.chars().count() <= 1000 && !text.contains('\0')
-                })
+                .filter(|text| speech_audio::valid_reference_text(text))
                 .context("请填写与参考录音完全对应的参考文本")?,
         );
         let reference = request

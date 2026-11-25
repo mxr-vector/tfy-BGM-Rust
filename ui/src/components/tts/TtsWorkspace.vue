@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue';
 import AppSelect from '@/components/AppSelect.vue';
 import Icon from '@/components/Icon.vue';
+import TtsScriptEditor from './TtsScriptEditor.vue';
 import { useSoundRecording } from '@/composables/useSoundRecording';
 import { COMMANDS, EVENTS } from '@/lib/constants';
 import { normalizeError } from '@/lib/format';
@@ -16,15 +17,9 @@ import {
   type TtsJob,
 } from '@/stores/tts';
 
-interface Segment { text: string; startMs: number | null; endMs: number | null }
-type TextFormat = 'txt' | 'lrc' | 'srt';
+interface BuiltinReference { audio: number[]; text: string | null }
 type ReferenceMode = 'builtin' | 'custom';
 
-const formatOptions = [
-  { value: 'txt', label: '纯文本' },
-  { value: 'lrc', label: 'LRC 时间轴' },
-  { value: 'srt', label: 'SRT 时间轴' },
-];
 const referenceModeOptions = [
   { value: 'builtin', label: '内置音色' },
   { value: 'custom', label: '录制或上传' },
@@ -38,11 +33,7 @@ const synthesisProgress = ref<SynthesisProgress | null>(null);
 const synthesisCancelling = ref(false);
 let synthesisJob: TtsJob | null = null;
 let disposed = false;
-let textGeneration = 0;
-const segments = ref<Segment[]>([]);
-const format = ref<TextFormat>('txt');
-const title = ref('未载入文本');
-const sourceText = ref('');
+const scriptEditor = useTemplateRef('scriptEditor');
 const voiceSearch = ref('');
 const voiceId = ref(3);
 const modelId = ref('');
@@ -61,7 +52,6 @@ const outputName = ref('');
 const outputRate = ref(0);
 const outputDuration = ref(0);
 const outputFamily = ref<Family>('Kokoro');
-const durationLabel = computed(() => `${segments.value.length} 段文本`);
 const familyModels = computed(() => ttsModels.value.filter(model => model.family === family.value));
 const installedModels = computed(() => familyModels.value.filter(model => model.installed));
 const isReady = computed(() => installedModels.value.length > 0);
@@ -69,10 +59,20 @@ const modelOptions = computed(() => installedModels.value.map(model => ({ value:
 const voiceOptions = computed(() => voiceNames.map((name, id) => ({ value: String(id), label: `${name} · ${id < 3 ? '英' : '中'}` })));
 const visibleVoices = computed(() => voiceOptions.value.filter(voice => voice.value === String(voiceId.value)
   || voice.label.toLowerCase().includes(voiceSearch.value.trim().toLowerCase())));
-const referenceReady = computed(() => referenceAudio.value !== null && referenceText.value.trim().length > 0);
-const canGenerate = computed(() => installedModels.value.some(model => model.id === modelId.value)
-  && segments.value.length > 0 && !ttsModelBusy.value && !captureActive.value
-  && (family.value === 'Kokoro' || (referenceReady.value && !recordingClip.value)));
+const builtinTranscript = ref(false);
+const parsingForGeneration = ref(false);
+const generationBlocker = computed(() => {
+  if (!installedModels.value.some(model => model.id === modelId.value)) return '请先安装并选择本地模型';
+  if (ttsModelBusy.value) return '模型正在忙，请稍后再试';
+  if (captureActive.value || recordingClip.value) return '参考音频正在录制或处理';
+  if (!scriptEditor.value?.hasText) return '请在左侧输入或导入合成文本';
+  if (family.value === 'ZipVoice') {
+    if (!referenceAudio.value) return '请先载入参考音频';
+    if (!referenceText.value.trim()) return '请填写参考音频的逐字稿';
+  }
+  return '';
+});
+const canGenerate = computed(() => !generationBlocker.value && !parsingForGeneration.value && !generating.value);
 const voiceNames = `af_maple af_sol bf_vale zf_001 zf_002 zf_003 zf_004 zf_005 zf_006 zf_007 zf_008 zf_017 zf_018 zf_019 zf_021 zf_022 zf_023 zf_024 zf_026 zf_027 zf_028 zf_032 zf_036 zf_038 zf_039 zf_040 zf_042 zf_043 zf_044 zf_046 zf_047 zf_048 zf_049 zf_051 zf_059 zf_060 zf_067 zf_070 zf_071 zf_072 zf_073 zf_074 zf_075 zf_076 zf_077 zf_078 zf_079 zf_083 zf_084 zf_085 zf_086 zf_087 zf_088 zf_090 zf_092 zf_093 zf_094 zf_099 zm_009 zm_010 zm_011 zm_012 zm_013 zm_014 zm_015 zm_016 zm_020 zm_025 zm_029 zm_030 zm_031 zm_033 zm_034 zm_035 zm_037 zm_041 zm_045 zm_050 zm_052 zm_053 zm_054 zm_055 zm_056 zm_057 zm_058 zm_061 zm_062 zm_063 zm_064 zm_065 zm_066 zm_068 zm_069 zm_080 zm_081 zm_082 zm_089 zm_091 zm_095 zm_096 zm_097 zm_098 zm_100`.split(' ');
 const outputPlayer = ref<HTMLAudioElement | null>(null);
 const referencePlayer = ref<HTMLAudioElement | null>(null);
@@ -107,12 +107,6 @@ function selectFamilyModel(): void {
   modelId.value = nextModelId;
 }
 
-function setFormat(value: string): void {
-  if (value === format.value) return;
-  format.value = value as TextFormat;
-  invalidateText();
-}
-
 function setReferenceMode(value: string): void {
   if (value === referenceMode.value) return;
   resetReference();
@@ -125,47 +119,6 @@ function setBuiltinVoice(value: string): void {
   builtinVoice.value = value;
 }
 
-function invalidateText(): number {
-  segments.value = [];
-  return ++textGeneration;
-}
-
-async function importText(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = '';
-  if (!file) return;
-  const extension = file.name.split('.').pop()?.toLowerCase();
-  if (extension !== 'txt' && extension !== 'lrc' && extension !== 'srt') { toast('请选择 .txt、.lrc 或 .srt 文件', 'error'); return; }
-  const generation = invalidateText();
-  try {
-    const text = await file.text();
-    if (generation !== textGeneration) return;
-    sourceText.value = text;
-    format.value = extension;
-    const parsed = await invoke<Segment[]>(COMMANDS.parseTtsScript, { text, format: extension });
-    if (generation !== textGeneration) return;
-    title.value = file.name;
-    segments.value = parsed;
-    toast(`已载入 ${parsed.length} 条合成文本`, 'success');
-  } catch (error) {
-    if (generation === textGeneration) toast(`解析文本失败：${normalizeError(error)}`, 'error');
-  }
-}
-
-async function parseText(): Promise<void> {
-  const generation = invalidateText();
-  const selectedFormat = format.value;
-  try {
-    const parsed = await invoke<Segment[]>(COMMANDS.parseTtsScript, { text: sourceText.value, format: selectedFormat });
-    if (generation !== textGeneration) return;
-    segments.value = parsed;
-    title.value = selectedFormat === 'txt' ? '粘贴文本' : `粘贴的 ${selectedFormat.toUpperCase()} 字幕`;
-  } catch (error) {
-    if (generation === textGeneration) toast(`解析文本失败：${normalizeError(error)}`, 'error');
-  }
-}
-
 const builtinVoiceOptions = computed(() => builtinVoices.value.map(voice => ({ value: voice, label: voice.slice(0, -4) })));
 
 function resetReference(): void {
@@ -174,14 +127,17 @@ function resetReference(): void {
   referencePreviewUrl.value = '';
   referenceAudio.value = null;
   referenceText.value = '';
+  builtinTranscript.value = false;
   referenceKind.value = '';
 }
 
-function setReferenceAudio(normalized: ArrayBuffer, label: string): void {
+function setReferenceAudio(audio: Uint8Array<ArrayBuffer>, label: string, transcript: string | null = null): void {
   resetReference();
-  referenceAudio.value = Array.from(new Uint8Array(normalized));
+  referenceAudio.value = Array.from(audio);
+  referenceText.value = transcript ?? '';
+  builtinTranscript.value = transcript !== null;
   referenceKind.value = label;
-  referencePreviewUrl.value = URL.createObjectURL(new Blob([normalized], { type: 'audio/wav' }));
+  referencePreviewUrl.value = URL.createObjectURL(new Blob([audio], { type: 'audio/wav' }));
 }
 
 async function loadBuiltinReference(): Promise<void> {
@@ -190,10 +146,10 @@ async function loadBuiltinReference(): Promise<void> {
   recordingClip.value = true;
   const model = modelId.value;
   try {
-    const normalized = await invoke<ArrayBuffer>(COMMANDS.loadTtsBuiltinReference, { voice });
-    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model) return;
-    setReferenceAudio(normalized, `models/voices/${voice}`);
-    toast('已载入内置参考音频，请填写该录音中说出的对应文本', 'success');
+    const reference = await invoke<BuiltinReference>(COMMANDS.loadTtsBuiltinReference, { voice });
+    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model
+      || referenceMode.value !== 'builtin' || builtinVoice.value !== voice) return;
+    setReferenceAudio(Uint8Array.from(reference.audio), voice, reference.text);
   } catch (error) { toast(`内置参考音频不可用：${normalizeError(error)}`, 'error'); }
   finally { recordingClip.value = false; }
 }
@@ -208,8 +164,8 @@ async function acceptReference(blob: Blob, label: string): Promise<void> {
     if (label === '麦克风录音' && !await checkClipDuration(bytes.slice(0))) return;
     if (disposed) return;
     const normalized = await invokeBinary<ArrayBuffer>(COMMANDS.normalizeTtsReference, bytes);
-    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model) return;
-    setReferenceAudio(normalized, label);
+    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model || referenceMode.value !== 'custom') return;
+    setReferenceAudio(new Uint8Array(normalized), label);
     toast('参考音频已响度归一化为 16 kHz 单声道', 'success');
   } catch (error) { toast(`参考音频不可用：${normalizeError(error)}`, 'error'); }
   finally { recordingClip.value = false; }
@@ -254,7 +210,20 @@ async function importReference(event: Event): Promise<void> {
 }
 
 async function generate(): Promise<void> {
-  if (!canGenerate.value) return;
+  const editor = scriptEditor.value;
+  if (!canGenerate.value || !editor) return;
+  if (!editor.segments.length) {
+    const selectedFamily = family.value;
+    const selectedModel = modelId.value;
+    const selectedReference = referenceAudio.value;
+    parsingForGeneration.value = true;
+    try {
+      const parsed = await editor.parseText();
+      if (!parsed?.length || !editor.segments.length || disposed || generationBlocker.value
+        || family.value !== selectedFamily || modelId.value !== selectedModel
+        || referenceAudio.value !== selectedReference) return;
+    } finally { parsingForGeneration.value = false; }
+  }
   const job: TtsJob = { id: crypto.randomUUID(), cancelled: false, finished: false };
   synthesisJob = job;
   generating.value = true;
@@ -266,7 +235,7 @@ async function generate(): Promise<void> {
     family: selectedFamily,
     modelId: modelId.value,
     voiceId: voiceId.value,
-    segments: segments.value,
+    segments: editor.segments,
     referenceAudio: selectedFamily === 'ZipVoice' ? referenceAudio.value : null,
     referenceText: selectedFamily === 'ZipVoice' ? referenceText.value.trim() : null,
   };
@@ -329,7 +298,6 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   disposed = true;
-  ++textGeneration;
   void cancelSynthesis();
   void cancelTtsInstall('workspace');
   recording.stop();
@@ -351,16 +319,7 @@ onBeforeUnmount(() => {
     </nav>
 
     <div class="tts-layout">
-      <section class="tts-card tts-script-card">
-        <div class="tts-card-heading"><div><span class="tts-overline">MANUSCRIPT</span><h2>合成文本</h2></div><span class="tts-count">{{ durationLabel }}</span></div>
-        <div class="tts-import-actions">
-          <label class="tts-action tts-file-label"><Icon name="upload" />导入文本<input type="file" accept=".txt,.lrc,.srt,text/plain" @change="importText"></label>
-          <AppSelect :model-value="format" :options="formatOptions" label="文本格式" :min-menu-width="132" @update:model-value="setFormat" />
-          <button type="button" class="tts-action" @click="parseText">解析文本</button>
-        </div>
-        <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会按行拆分；LRC 与 SRT 将按原时间轴合成。" @input="invalidateText"></textarea>
-        <div v-if="segments.length" class="tts-segment-preview"><div class="tts-card-heading"><h3>{{ title }}</h3><span>{{ segments.length }} 条</span></div><div v-for="(segment, index) in segments.slice(0, 4)" :key="index" class="tts-segment-row"><time v-if="segment.startMs !== null">{{ (segment.startMs / 1000).toFixed(2) }} s</time><span>{{ segment.text }}</span></div><span v-if="segments.length > 4" class="tts-more">另有 {{ segments.length - 4 }} 条合成文本</span></div>
-      </section>
+      <TtsScriptEditor ref="scriptEditor" />
 
       <div class="tts-side">
         <section class="tts-card tts-voice-card">
@@ -382,7 +341,7 @@ onBeforeUnmount(() => {
                 <AppSelect :model-value="String(voiceId)" :options="visibleVoices" label="选择语音" @update:model-value="voiceId = Number($event)" />
               </div>
             </template>
-            <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : 'ZipVoice 适合零样本声音克隆；必须提供短参考音频及对应的参考文本。' }}</p>
+            <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : '内置音色已配好逐字稿；自定义录音需要填写该片段的逐字稿。' }}</p>
             <template v-if="family === 'ZipVoice'">
               <div class="tts-field">
                 <span>参考来源</span>
@@ -400,7 +359,8 @@ onBeforeUnmount(() => {
                 <p class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? referenceKind : '请选择 3–10 秒的清晰人声' }}</p>
               </template>
               <audio v-if="referencePreviewUrl" ref="referencePlayer" class="tts-voice-preview" :src="referencePreviewUrl" :controls="!captureActive" preload="none" aria-label="试听参考音频" @play="pauseCompetingAudio" />
-              <textarea v-model="referenceText" class="tts-reference-text" rows="2" placeholder="填写参考音频中说出的文字" aria-label="参考音频的对应文本"></textarea>
+              <p v-if="builtinTranscript" class="tts-reference-status">已载入配套逐字稿</p>
+              <textarea v-else-if="referenceAudio" v-model="referenceText" class="tts-reference-text" rows="2" placeholder="逐字填写这段参考音频说的话（不是左侧合成稿）" aria-label="参考音频的逐字稿"></textarea>
             </template>
           </template>
           <div v-if="ttsInstalling" class="tts-download-status">
@@ -412,7 +372,8 @@ onBeforeUnmount(() => {
         <section class="tts-card tts-render-card">
           <div class="tts-card-heading"><div><span class="tts-overline">RENDER / WAV</span><h2>生成声音</h2></div><span class="tts-live-dot">LOCAL ONLY</span></div>
           <p>文本在本机进行离线合成。带时间码的字幕会生成原采样率 WAV 音轨。</p>
-          <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating ? 'refresh' : 'play'"/>{{ generating ? '正在本地合成…' : segments.length ? `合成 ${segments.length} 段语音` : '载入文本以开始' }}</button>
+          <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating || parsingForGeneration ? 'refresh' : 'play'"/>{{ generating ? '正在本地合成…' : parsingForGeneration ? '正在解析文本…' : '生成声音' }}</button>
+          <p v-if="!generating && !parsingForGeneration && generationBlocker" class="tts-reference-status" aria-live="polite">{{ generationBlocker }}</p>
           <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段</p>
           <button v-if="generating" type="button" class="tts-action" :disabled="synthesisCancelling" @click="cancelSynthesis">{{ synthesisCancelling ? '正在取消…' : '取消合成' }}</button>
           <div v-if="outputUrl" class="tts-output">
@@ -429,12 +390,12 @@ onBeforeUnmount(() => {
 <style scoped>
 .tts-page{flex:1;min-height:0;min-width:0;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:clamp(10px,2vh,24px) clamp(12px,3vw,42px);background:radial-gradient(ellipse at 78% 3%,rgba(25,217,139,.075),transparent 33%),rgba(7,17,14,.68);color:var(--text)}
 .tts-heading{display:flex;flex:none;justify-content:space-between;align-items:center;gap:10px}
-.tts-overline{display:block;color:var(--text-3);font:600 10px/1.6 ui-monospace,Consolas,monospace;letter-spacing:.17em}
+.tts-page :deep(.tts-overline){display:block;color:var(--text-3);font:600 10px/1.6 ui-monospace,Consolas,monospace;letter-spacing:.17em}
 .tts-heading h1{font-size:clamp(22px,3vw,30px);font-weight:620;letter-spacing:-.055em}
 .tts-heading p{color:var(--text-2);font-size:12px}
-.tts-action{display:inline-flex;min-height:36px;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1px solid var(--line-strong);border-radius:var(--radius-btn);color:var(--text-2);font-size:12px}
-.tts-action:hover:not(:disabled){color:var(--text);background:var(--hover)}
-.tts-action :deep([data-icon]){width:15px;height:15px}
+.tts-page :deep(.tts-action){display:inline-flex;min-height:36px;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1px solid var(--line-strong);border-radius:var(--radius-btn);color:var(--text-2);font-size:12px}
+.tts-page :deep(.tts-action:hover:not(:disabled)){color:var(--text);background:var(--hover)}
+.tts-page :deep(.tts-action [data-icon]){width:15px;height:15px}
 .tts-tabs{display:flex;flex:none;width:max-content;max-width:100%;gap:4px;padding:3px;border:1px solid var(--line);border-radius:10px;background:rgba(0,0,0,.16)}
 .tts-tabs button{display:flex;align-items:center;gap:8px;padding:6px 11px;border-radius:7px;color:var(--text-2);font-size:13px}
 .tts-tabs button span{font-size:11px;opacity:.68}
@@ -442,20 +403,15 @@ onBeforeUnmount(() => {
 .tts-layout{display:grid;flex:1 0 auto;grid-template-columns:minmax(0,1.08fr) minmax(270px,.92fr);gap:10px;align-items:stretch}
 .tts-side{display:flex;min-width:0;flex-direction:column;gap:10px}
 .tts-card{min-width:0;padding:12px;border:1px solid var(--line);border-radius:12px;background:rgba(10,24,19,.76)}
-.tts-card-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.tts-card-heading h2{font-size:15px;font-weight:580}
-.tts-card-heading h3{font-size:13px}
-.tts-count,.tts-card-heading>span:not(.tts-native){color:var(--text-3);font-size:11px}
-.tts-import-actions,.tts-reference-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.tts-file-label{position:relative;overflow:hidden;cursor:pointer}
-.tts-file-label input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
-.tts-textarea,.tts-reference-text{display:block;width:100%;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(1,8,5,.42);color:var(--text);font:13px/1.45 var(--font-sans);resize:none}
-.tts-textarea{flex:1;min-height:110px}
-.tts-textarea::placeholder,.tts-reference-text::placeholder,.tts-search::placeholder{color:var(--text-3)}
-.tts-segment-preview{max-height:117px;overflow:auto;margin-top:8px;padding-top:6px;border-top:1px solid var(--line)}
-.tts-segment-row{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);color:var(--text-2);font-size:12px}
-.tts-segment-row time{flex:none;color:var(--accent-bright);font:11px ui-monospace,Consolas,monospace}
-.tts-more,.tts-reference-status{display:block;margin-top:4px;color:var(--text-3);font-size:11px}
+.tts-page :deep(.tts-card-heading){display:flex;justify-content:space-between;align-items:center;gap:12px}
+.tts-page :deep(.tts-card-heading h2){font-size:15px;font-weight:580}
+.tts-page :deep(.tts-card-heading>span:not(.tts-native)){color:var(--text-3);font-size:11px}
+.tts-reference-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.tts-page :deep(.tts-file-label){position:relative;overflow:hidden;cursor:pointer}
+.tts-page :deep(.tts-file-label input){position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.tts-reference-text{display:block;width:100%;margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(1,8,5,.42);color:var(--text);font:13px/1.45 var(--font-sans);resize:none}
+.tts-reference-text::placeholder,.tts-search::placeholder{color:var(--text-3)}
+.tts-reference-status{display:block;margin-top:4px;color:var(--text-3);font-size:11px}
 .tts-native,.tts-live-dot{color:var(--accent-bright);font:10px ui-monospace,Consolas,monospace}
 .tts-download-status{margin-top:10px;color:var(--accent-bright);font-size:11px}
 .tts-source-link{display:flex;align-items:center;gap:6px;margin-top:13px;color:var(--text-3);font-size:11px;text-decoration:none}
@@ -479,8 +435,6 @@ onBeforeUnmount(() => {
 .tts-generate:disabled{opacity:.4;cursor:not-allowed}
 .tts-output{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:5px 8px;margin-top:6px}
 .tts-output audio{width:100%;height:34px}
-.tts-script-card{display:flex;flex-direction:column}
-.tts-segment-row span{min-width:0;overflow-wrap:anywhere}
 .tts-field,.tts-voice-picker{display:grid;align-items:center;gap:6px;margin-top:6px}
 .tts-field{grid-template-columns:4.5em minmax(0,1fr);color:var(--text-2);font-size:12px}
 .tts-voice-picker{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
@@ -491,16 +445,16 @@ onBeforeUnmount(() => {
 .tts-output-meta{grid-column:1 / -1;font-size:11px;color:var(--text-3)}
 @media(max-height:760px){
   .tts-page{gap:8px;padding-block:8px}
-  .tts-heading .tts-overline,.tts-heading p,.tts-card-heading .tts-overline,.tts-render-card>p:not(.tts-download-status){display:none}
+  .tts-page :deep(.tts-overline),.tts-heading p,.tts-render-card>p:not(.tts-download-status){display:none}
   .tts-layout,.tts-side{gap:8px}
   .tts-card{padding:9px}
   .tts-model-empty{display:block;text-align:left}
   .tts-model-empty :deep([data-icon]),.tts-model-empty span{display:none}
   .tts-model-row{padding-block:4px}
-  .tts-action{min-height:32px;padding-block:4px}
+  .tts-page :deep(.tts-action){min-height:32px;padding-block:4px}
   .tts-source-link{display:inline-flex;margin:0 0 0 8px}
   .tts-generate{min-height:36px;margin-top:6px}
 }
-@media(max-width:880px){.tts-layout{grid-template-columns:1fr}.tts-textarea{min-height:130px}}
+@media(max-width:880px){.tts-layout{grid-template-columns:1fr}}
 @media(max-width:480px){.tts-heading{flex-wrap:wrap}.tts-output{grid-template-columns:minmax(0,1fr)}}
 </style>

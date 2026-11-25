@@ -88,8 +88,42 @@ pub fn builtin_voice_files(root: &Path) -> Result<Vec<String>> {
     Ok(voices)
 }
 
-pub fn prepare_builtin_reference(bytes: &[u8]) -> Result<Vec<u8>> {
-    normalize_reference(bytes, "10")
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltinPrompt {
+    end_seconds: f64,
+    text: String,
+}
+
+pub fn prepare_builtin_reference(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Option<String>)> {
+    let manifest_path = path.with_file_name("prompts.json");
+    let prompt = match std::fs::read(&manifest_path) {
+        Ok(bytes) => {
+            let mut prompts: std::collections::HashMap<String, BuiltinPrompt> =
+                serde_json::from_slice(&bytes).context("无法解析内置音色逐字稿")?;
+            prompts.remove(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default(),
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("无法读取内置音色逐字稿"),
+    };
+    if let Some(prompt) = prompt {
+        let text = prompt.text.trim();
+        if !(3.0..=10.0).contains(&prompt.end_seconds) || !valid_reference_text(text) {
+            bail!("内置音色逐字稿或参考片段时长无效");
+        }
+        let audio = normalize_reference(bytes, &prompt.end_seconds.to_string())?;
+        Ok((audio, Some(text.to_owned())))
+    } else {
+        Ok((normalize_reference(bytes, "10")?, None))
+    }
+}
+
+pub fn valid_reference_text(text: &str) -> bool {
+    !text.is_empty() && text.chars().count() <= 1000 && !text.contains('\0')
 }
 
 fn normalize_reference(bytes: &[u8], limit: &str) -> Result<Vec<u8>> {
@@ -171,9 +205,11 @@ mod tests {
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/voices");
         for name in builtin_voice_files(&root).unwrap() {
-            let bytes = std::fs::read(root.join(&name)).unwrap();
-            let normalized =
-                prepare_builtin_reference(&bytes).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            let path = root.join(&name);
+            let bytes = std::fs::read(&path).unwrap();
+            let (normalized, transcript) = prepare_builtin_reference(&path, &bytes)
+                .unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            assert!(transcript.is_some(), "missing transcript for {name}");
             assert!((48_000..=160_000).contains(&read_reference(&normalized).unwrap().len()));
         }
     }
