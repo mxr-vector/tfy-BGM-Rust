@@ -299,7 +299,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true;
   void cancelSynthesis();
-  void cancelTtsInstall('workspace');
+  // 模型安装属于全局后台任务，离开页面只停止录音，不中断下载。
   recording.stop();
   endCapture();
   outputPlayer.value?.pause();

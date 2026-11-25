@@ -1,21 +1,38 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onScopeDispose, ref, watch } from 'vue';
 import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { audioIndexBusy, audioIndexStatus, searchLibraryBySound, soundSearchLoading } from '@/composables/useAudioIndex';
 import { useSoundRecording } from '@/composables/useSoundRecording';
 import { formatBytes, formatTime } from '@/lib/format';
 import type { SoundSearchResult } from '@/lib/types';
+import { suspendPlayback } from '@/stores/audio-engine';
 import { playSong } from '@/stores/player';
 import { state } from '@/stores/state';
 import Icon from '../Icon.vue';
 
 const result = ref<SoundSearchResult | null>(null);
 const limit = ref(10);
-const { requesting, recording, start, stop } = useSoundRecording((clip) => void search(clip));
+const { requesting, recording, elapsedMs, maxDurationMs, minDurationMs, canStop, start, stop } =
+  useSoundRecording((clip) => void search(clip), 30_000, 5_000);
 const canSearch = computed(() =>
   audioIndexStatus.value?.enabled && audioIndexStatus.value.readyTracks > 0 &&
   !audioIndexBusy.value && !soundSearchLoading.value,
 );
+const captureActive = computed(() => requesting.value || recording.value);
+let releasePlayback: (() => void) | undefined;
+
+watch(captureActive, (active) => {
+  if (active) releasePlayback ??= suspendPlayback();
+  else {
+    releasePlayback?.();
+    releasePlayback = undefined;
+  }
+}, { flush: 'sync' });
+
+onScopeDispose(() => {
+  releasePlayback?.();
+  releasePlayback = undefined;
+});
 
 watch([() => state.library.root, () => audioIndexStatus.value?.enabled], () => {
   result.value = null;
@@ -46,7 +63,7 @@ function play(track: SoundSearchResult['matches'][number]): void {
       <span class="search-hero-icon"><Icon name="search" /></span>
       <div>
         <h2>用声音查找曲库中的相似音频</h2>
-        <p>可导入外部录音，或用麦克风录制 10–30 秒清晰的音乐片段。音频在本机识别。</p>
+        <p>可导入外部录音，或用麦克风录制 5–30 秒清晰的音乐片段。音频在本机识别。</p>
       </div>
       <div class="search-actions">
         <label>最多返回
@@ -55,9 +72,19 @@ function play(track: SoundSearchResult['matches'][number]): void {
         <button type="button" :disabled="!canSearch || recording || requesting" @click="search()">
           <Icon name="folder" /> 选择录音或音频
         </button>
-        <button type="button" :disabled="requesting || (!recording && !canSearch)" @click="recording ? stop() : start()">
+        <button type="button" :disabled="requesting || (recording && !canStop) || (!recording && !canSearch)" @click="recording ? stop() : start()">
           {{ recording ? '结束录音并识别' : requesting ? '等待麦克风权限…' : '麦克风录音' }}
         </button>
+      </div>
+    </div>
+    <div v-if="recording" class="recording-status" role="status" aria-live="polite">
+      <span class="recording-dot" aria-hidden="true"></span>
+      <div>
+        <strong>正在录音，请播放清晰的音乐片段</strong>
+        <span>
+          已录 {{ formatTime(elapsedMs / 1000) }} / {{ formatTime(maxDurationMs / 1000) }}
+          · 至少 {{ Math.ceil(minDurationMs / 1000) }} 秒，可手动结束；满 30 秒后自动检索
+        </span>
       </div>
     </div>
     <p v-if="soundSearchLoading" class="query-path" role="status">正在识别音频…</p>
@@ -99,6 +126,12 @@ function play(track: SoundSearchResult['matches'][number]): void {
 .search-hero p { margin: 0; color: var(--text-3); font-size: 11px; line-height: 1.7; }
 .search-hero button, .match-row button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 14px; border-radius: 9px; color: #baf7dc; background: rgba(25, 217, 139, 0.13); }
 .search-hero button:disabled, .match-row button:disabled { opacity: 0.55; cursor: not-allowed; }
+.recording-status { display: flex; flex: none; align-items: center; gap: 11px; padding: 11px 14px; border: 1px solid rgba(248, 113, 113, 0.28); border-radius: 11px; color: #fecaca; background: rgba(239, 68, 68, 0.1); }
+.recording-status > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.recording-status strong { font-size: 12px; }
+.recording-status span:not(.recording-dot) { color: var(--text-3); font-size: 10.5px; line-height: 1.5; }
+.recording-dot { width: 10px; height: 10px; flex: none; border-radius: 50%; background: #f87171; box-shadow: 0 0 0 5px rgba(248, 113, 113, 0.12); animation: recording-pulse 1.2s ease-in-out infinite; }
+@keyframes recording-pulse { 50% { opacity: 0.45; box-shadow: 0 0 0 8px rgba(248, 113, 113, 0.04); } }
 .query-path { display: flex; gap: 10px; padding: 0 4px; color: var(--text-3); font-size: 10.5px; }
 .query-path strong { overflow: hidden; color: var(--text-2); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .match-list { display: flex; flex-direction: column; gap: 8px; }

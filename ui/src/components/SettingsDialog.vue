@@ -351,10 +351,6 @@ function onPanelKeydown(event: KeyboardEvent): void {
   closeSettings();
 }
 
-watch(() => settingsOpen.value && settingsTab.value === 'models', (visible) => {
-  if (!visible) void cancelTtsInstall('settings');
-}, { flush: 'sync' });
-
 watch(settingsOpen, async (open) => {
   if (!open) return;
   if (settingsTab.value === 'general') void ensureFonts();
