@@ -177,25 +177,28 @@ pub fn parse_tts_script(text: String, format: String) -> CommandResult<Vec<TtsSe
     tts_script::parse_script(&text, &format).map_err(|error| format!("{error:#}"))
 }
 
+fn builtin_voices_root(app: &AppHandle) -> Result<PathBuf> {
+    if tauri::is_dev() {
+        return Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/voices"));
+    }
+    Ok(app
+        .path()
+        .resolve("voices", tauri::path::BaseDirectory::Resource)?)
+}
+
+#[tauri::command]
+pub async fn list_tts_builtin_voices(app: AppHandle) -> CommandResult<Vec<String>> {
+    worker(move || speech_audio::builtin_voice_files(&builtin_voices_root(&app)?)).await
+}
+
 #[tauri::command]
 pub async fn load_tts_builtin_reference(app: AppHandle, voice: String) -> CommandResult<Response> {
     worker(move || {
-        if !matches!(
-            voice.as_str(),
-            "keai.wav"
-                | "lulu.wav"
-                | "manbo.wav"
-                | "qingnian.wav"
-                | "roucheng.wav"
-                | "weiketuo.wav"
-        ) {
+        let root = builtin_voices_root(&app)?;
+        if !speech_audio::builtin_voice_files(&root)?.contains(&voice) {
             bail!("未找到所选内置参考音频");
         }
-        let recording = app.path().resolve(
-            PathBuf::from("voices").join(voice),
-            tauri::path::BaseDirectory::Resource,
-        )?;
-        let bytes = std::fs::read(recording).context("无法读取 models/voices 中的内置参考音频")?;
+        let bytes = fs::read(root.join(voice)).context("无法读取所选内置参考音频")?;
         speech_audio::prepare_builtin_reference(&bytes).map(Response::new)
     })
     .await

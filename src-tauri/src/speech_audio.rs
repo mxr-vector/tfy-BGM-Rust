@@ -66,6 +66,28 @@ pub fn prepare_reference(bytes: &[u8]) -> Result<Vec<u8>> {
     normalize_reference(bytes, "10.1")
 }
 
+pub fn builtin_voice_files(root: &Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("无法打开内置参考音色目录"),
+    };
+    let mut voices = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && let Ok(name) = entry.file_name().into_string()
+            && Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        {
+            voices.push(name);
+        }
+    }
+    voices.sort_unstable();
+    Ok(voices)
+}
+
 pub fn prepare_builtin_reference(bytes: &[u8]) -> Result<Vec<u8>> {
     normalize_reference(bytes, "10")
 }
@@ -148,8 +170,8 @@ mod tests {
             return;
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/voices");
-        for name in ["keai", "lulu", "manbo", "qingnian", "roucheng", "weiketuo"] {
-            let bytes = std::fs::read(root.join(format!("{name}.wav"))).unwrap();
+        for name in builtin_voice_files(&root).unwrap() {
+            let bytes = std::fs::read(root.join(&name)).unwrap();
             let normalized =
                 prepare_builtin_reference(&bytes).unwrap_or_else(|err| panic!("{name}: {err:#}"));
             assert!((48_000..=160_000).contains(&read_reference(&normalized).unwrap().len()));

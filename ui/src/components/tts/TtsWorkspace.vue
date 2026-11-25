@@ -48,7 +48,8 @@ const modelId = ref('');
 const referenceText = ref('');
 const referenceAudio = ref<number[] | null>(null);
 const referenceMode = ref<ReferenceMode>('builtin');
-const builtinVoice = ref('keai.wav');
+const builtinVoice = ref('');
+const builtinVoices = ref<string[]>([]);
 const referenceKind = ref('');
 const referencePreviewUrl = ref('');
 let initialModelDetection = true;
@@ -77,14 +78,16 @@ const referencePlayer = ref<HTMLAudioElement | null>(null);
 let releasePlayback: (() => void) | undefined;
 const recording = useSoundRecording((clip) => { void acceptReference(clip, '麦克风录音'); }, 10_000);
 const captureActive = computed(() => recording.requesting.value || recording.recording.value);
-const builtinVoices = [
-  { file: 'keai.wav', name: '可爱' },
-  { file: 'lulu.wav', name: '露露' },
-  { file: 'manbo.wav', name: '曼波' },
-  { file: 'qingnian.wav', name: '青年' },
-  { file: 'roucheng.wav', name: '柔澄' },
-  { file: 'weiketuo.wav', name: '维克托' },
-];
+async function refreshBuiltinVoices(): Promise<void> {
+  try {
+    const voices = await invoke<string[]>(COMMANDS.listTtsBuiltinVoices);
+    if (disposed) return;
+    builtinVoices.value = voices;
+    if (!voices.includes(builtinVoice.value)) setBuiltinVoice(voices[0] ?? '');
+  } catch (error) {
+    if (!disposed) toast(`无法读取内置参考音色：${normalizeError(error)}`, 'error');
+  }
+}
 
 function syncModels(): void {
   if (initialModelDetection && ttsModels.value.length) {
@@ -162,7 +165,7 @@ async function parseText(): Promise<void> {
   }
 }
 
-const builtinVoiceOptions = builtinVoices.map(voice => ({ value: voice.file, label: voice.name }));
+const builtinVoiceOptions = computed(() => builtinVoices.value.map(voice => ({ value: voice, label: voice.slice(0, -4) })));
 
 function resetReference(): void {
   referencePlayer.value?.pause();
@@ -181,9 +184,9 @@ function setReferenceAudio(normalized: ArrayBuffer, label: string): void {
 }
 
 async function loadBuiltinReference(): Promise<void> {
-  if (recordingClip.value) return;
-  recordingClip.value = true;
   const voice = builtinVoice.value;
+  if (!voice || recordingClip.value) return;
+  recordingClip.value = true;
   const model = modelId.value;
   try {
     const normalized = await invoke<ArrayBuffer>(COMMANDS.loadTtsBuiltinReference, { voice });
@@ -318,6 +321,7 @@ watch(captureActive, (active) => { if (!active) endCapture(); }, { flush: 'sync'
 onMounted(() => {
   syncModels();
   void refreshTtsModels();
+  void refreshBuiltinVoices();
 });
 onBeforeUnmount(() => {
   disposed = true;
@@ -381,10 +385,11 @@ onBeforeUnmount(() => {
                 <AppSelect :model-value="referenceMode" :options="referenceModeOptions" :disabled="recordingClip || captureActive" label="ZipVoice 参考音色来源" @update:model-value="setReferenceMode" />
               </div>
               <template v-if="referenceMode === 'builtin'">
-                <div class="tts-reference-actions">
+                <div v-if="builtinVoiceOptions.length" class="tts-reference-actions">
                   <AppSelect :model-value="builtinVoice" :options="builtinVoiceOptions" :disabled="recordingClip" label="选择内置参考音色" @update:model-value="setBuiltinVoice" />
                   <button v-if="!referenceAudio || recordingClip" type="button" class="tts-action" :disabled="recordingClip" @click="loadBuiltinReference">{{ recordingClip ? '正在载入…' : '载入音色' }}</button>
                 </div>
+                <p v-else class="tts-reference-status">暂无内置参考音色，可切换到录音或上传。</p>
               </template>
               <template v-else>
               <div class="tts-reference-actions"><button v-if="recording.recording.value" type="button" class="tts-action" @click="recording.stop">结束录音</button><button v-else type="button" class="tts-action" :disabled="captureActive || recordingClip || generating" @click="startCapture">{{ recording.requesting.value ? '正在请求麦克风…' : '麦克风录制（3–10 秒）' }}</button><label class="tts-action tts-file-label">上传音频<input type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac" :disabled="captureActive || recordingClip" @change="importReference" /></label></div>

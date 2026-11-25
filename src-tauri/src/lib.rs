@@ -140,6 +140,7 @@ pub fn run() {
             tts::open_tts_release,
             tts::parse_tts_script,
             tts::normalize_tts_reference,
+            tts::list_tts_builtin_voices,
             tts::load_tts_builtin_reference,
             tts::generate_tts,
             tts::cancel_tts_job,

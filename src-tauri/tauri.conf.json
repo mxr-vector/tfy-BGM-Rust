@@ -45,12 +45,7 @@
       "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
       "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
       "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx",
-      "../models/voices/keai.wav": "voices/keai.wav",
-      "../models/voices/lulu.wav": "voices/lulu.wav",
-      "../models/voices/manbo.wav": "voices/manbo.wav",
-      "../models/voices/qingnian.wav": "voices/qingnian.wav",
-      "../models/voices/roucheng.wav": "voices/roucheng.wav",
-      "../models/voices/weiketuo.wav": "voices/weiketuo.wav"
+      "../models/voices": "voices"
     },
     "icon": [
       "icons/32x32.png",

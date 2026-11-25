@@ -60,6 +60,7 @@ export const COMMANDS = {
   openTtsRelease: 'open_tts_release',
   parseTtsScript: 'parse_tts_script',
   normalizeTtsReference: 'normalize_tts_reference',
+  listTtsBuiltinVoices: 'list_tts_builtin_voices',
   loadTtsBuiltinReference: 'load_tts_builtin_reference',
   generateTts: 'generate_tts',
   cancelTtsJob: 'cancel_tts_job',
