@@ -90,7 +90,7 @@ defineExpose({ hasText, segments, parseText });
       <AppSelect :model-value="format" :options="formatOptions" label="文本格式" :min-menu-width="132" @update:model-value="setFormat" />
       <button type="button" class="tts-action" @click="parseText">解析文本</button>
     </div>
-    <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会按行拆分；LRC 与 SRT 将按原时间轴合成。" @input="invalidateText"></textarea>
+    <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会合并段内换行，优先按标点分段；LRC 与 SRT 将按原时间轴合成。" @input="invalidateText"></textarea>
     <div v-if="segments.length" class="tts-segment-preview">
       <div class="tts-card-heading"><h3>{{ title }}</h3><span>{{ segments.length }} 条</span></div>
       <div v-for="(segment, index) in segments.slice(0, 4)" :key="index" class="tts-segment-row">

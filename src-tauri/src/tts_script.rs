@@ -16,22 +16,112 @@ pub fn parse_script(text: &str, format: &str) -> Result<Vec<TtsSegment>> {
         .replace("\r\n", "\n")
         .replace('\r', "\n");
     let mut segments = match format {
-        "txt" => text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| TtsSegment {
-                text: line.to_owned(),
-                start_ms: None,
-                end_ms: None,
-            })
-            .collect(),
+        "txt" => parse_plain_text(&text),
         "lrc" => parse_lrc(&text),
         "srt" => parse_srt(&text)?,
         _ => bail!("仅支持 .txt、.lrc 与 .srt"),
     };
     validate_segments(&mut segments, 30 * 60 * 1000)?;
     Ok(segments)
+}
+
+const MAX_PLAIN_CHARS: usize = 180;
+const MAX_SENTENCES_PER_CHUNK: usize = 3;
+
+fn sentence_count(text: &str) -> usize {
+    text.chars().filter(|&c| is_sentence_mark(c)).count()
+}
+
+fn parse_plain_text(text: &str) -> Vec<TtsSegment> {
+    let mut segments = Vec::new();
+    let mut lines = text.lines().map(str::trim).peekable();
+    while let Some(first) = lines.next() {
+        if first.is_empty() {
+            continue;
+        }
+        let mut paragraph = first.to_owned();
+        while lines.peek().is_some_and(|line| !line.is_empty()) {
+            let line = lines.next().unwrap();
+            if paragraph.chars().last().is_some_and(|c| c.is_ascii())
+                && line.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                paragraph.push(' ');
+            }
+            paragraph.push_str(line);
+        }
+        let mut paragraph_segments: Vec<TtsSegment> = Vec::new();
+        let mut rest = paragraph.trim();
+        while !rest.is_empty() {
+            let (text, next) = rest.split_at(plain_chunk_end(rest));
+            let text = text.trim_end();
+            if let Some(previous) = paragraph_segments.last_mut().filter(|previous| {
+                previous.text.chars().count() + text.chars().count() <= MAX_PLAIN_CHARS
+                    && sentence_count(&previous.text) < MAX_SENTENCES_PER_CHUNK
+            }) {
+                if previous.text.chars().last().is_some_and(|c| c.is_ascii())
+                    && text.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                {
+                    previous.text.push(' ');
+                }
+                previous.text.push_str(text);
+            } else {
+                paragraph_segments.push(TtsSegment {
+                    text: text.to_owned(),
+                    start_ms: None,
+                    end_ms: None,
+                });
+            }
+            rest = next.trim_start();
+        }
+        segments.extend(paragraph_segments);
+    }
+    segments
+}
+
+fn plain_chunk_end(text: &str) -> usize {
+    let chars: Vec<_> = text.char_indices().collect();
+    if chars.len() <= MAX_PLAIN_CHARS {
+        return chars
+            .iter()
+            .enumerate()
+            .find(|(index, (_, c))| {
+                is_sentence_mark(*c)
+                    && chars.get(index + 1).is_some_and(|(_, next)| !is_sentence_mark(*next))
+            })
+            .map_or(text.len(), |(index, _)| {
+                chars.get(index + 1).map_or(text.len(), |(byte, _)| *byte)
+            });
+    }
+
+    let minimum = MAX_PLAIN_CHARS / 3;
+    let limit = chars[MAX_PLAIN_CHARS].0;
+    let mut sentence = None;
+    let mut phrase = None;
+    let mut word = None;
+    for (index, &(_, c)) in chars.iter().enumerate().take(MAX_PLAIN_CHARS) {
+        let next = chars.get(index + 1).map_or(' ', |(_, next)| *next);
+        let boundary = chars.get(index + 1).map_or(text.len(), |(byte, _)| *byte);
+        if is_sentence_mark(c)
+            && !(c == '.' && c.is_ascii() && next.is_ascii_alphanumeric())
+        {
+            sentence = Some((index + 1, boundary));
+        } else if matches!(c, '，' | ',' | '、' | '；' | ';' | '：' | ':')
+            && !(c.is_ascii() && next.is_ascii_digit())
+        {
+            phrase = Some((index + 1, boundary));
+        } else if c.is_whitespace() && !next.is_whitespace() {
+            word = Some((index + 1, boundary));
+        }
+    }
+    sentence
+        .filter(|(count, _)| *count >= minimum)
+        .or(phrase.filter(|(count, _)| *count >= minimum))
+        .or(word.filter(|(count, _)| *count >= minimum))
+        .map_or(limit, |(_, boundary)| boundary)
+}
+
+pub fn is_sentence_mark(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '.' | '!' | '?' | '…')
 }
 
 pub fn validate_segments(segments: &mut [TtsSegment], max_ms: u64) -> Result<()> {
@@ -215,6 +305,36 @@ mod tests {
         let srt = parse_script("1\r\n00:00:01,200 --> 00:00:03,400\r\nfirst\r\nsecond\r\n  \r\n2\r\n00:00:04,000 --> 00:00:05,000\r\nthird", "srt").unwrap();
         assert_eq!(srt[0].text, "first second");
         assert_eq!(srt[1].end_ms, Some(5000));
+    }
+
+    #[test]
+    fn plain_text_merges_wrapped_paragraphs_and_splits_at_sentence_marks() {
+        let cues = parse_script("这是第一句话。\n这是第二句话！\n这里继续\n下一行。\n\nEnglish line\ncontinued.", "txt").unwrap();
+        assert_eq!(
+            cues.iter().map(|cue| cue.text.as_str()).collect::<Vec<_>>(),
+            ["这是第一句话。这是第二句话！这里继续下一行。", "English line continued."]
+        );
+    }
+
+    #[test]
+    fn plain_text_groups_short_sentences_for_smoother_synthesis() {
+        let cues = parse_script("第一句。\n第二句！\n第三句？\n第四句。", "txt").unwrap();
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "第一句。第二句！第三句？");
+        assert_eq!(cues[1].text, "第四句。");
+    }
+
+    #[test]
+    fn plain_text_splits_long_input_without_breaking_utf8() {
+        let text = format!("{}。{}", "前文".repeat(100), "后文".repeat(100));
+        let cues = parse_script(&text, "txt").unwrap();
+        assert!(cues.len() >= 2);
+        assert!(cues.iter().all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS));
+        assert_eq!(
+            cues.iter().map(|cue| cue.text.as_str()).collect::<String>().replace('。', ""),
+            text.replace('。', "")
+        );
+        assert!(cues.iter().all(|cue| cue.text.chars().count() <= MAX_PLAIN_CHARS));
     }
 
     #[test]

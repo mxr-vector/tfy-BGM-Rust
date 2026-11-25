@@ -486,6 +486,7 @@ fn synthesize(
         bail!("模型文件不齐全或型号不匹配，请检查模型配置");
     }
     let mut generation = GenerationConfig::default();
+    generation.silence_scale = 0.3;
     if model.family == "Kokoro" {
         generation.sid = request.voice_id;
     } else {
@@ -528,7 +529,7 @@ fn create_engine(root: &Path, model: &tts_models::TtsModel) -> Result<LoadedTts>
     let mut config = OfflineTtsConfig::default();
     config.model.num_threads =
         std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
-    config.max_num_sentences = 1;
+    config.max_num_sentences = 3;
     let join = |file: &str| path.join(file).to_string_lossy().into_owned();
     if model.family == "Kokoro" {
         config.model.kokoro.model = Some(join(model.acoustic_file()));
