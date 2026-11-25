@@ -1361,10 +1361,9 @@ fn collect_onnx(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, warnings: &mut
         if file_type.is_dir() {
             let name = entry.file_name();
             let hidden = name.to_string_lossy().starts_with('.');
-            // `separation/` 存放自定义人声分离模型，不属于 ASR 模型列表。
-            let separation =
-                depth == 0 && name.to_string_lossy() == crate::separation::CUSTOM_DIR_NAME;
-            if !hidden && !separation {
+            let other_category = depth == 0
+                && (name == crate::separation::CUSTOM_DIR_NAME || name == crate::tts_models::DIR);
+            if !hidden && !other_category {
                 collect_onnx(&path, depth + 1, out, warnings);
             }
         } else if is_onnx(&path) {

@@ -145,6 +145,18 @@ function isBusy(): boolean {
         <button
           type="button"
           class="nav-item is-sub"
+          :class="{ 'is-active': state.view === 'tts' }"
+          :aria-current="state.view === 'tts' ? 'page' : undefined"
+          id="nav-tts"
+          title="使用 Kokoro 或 ZipVoice 离线合成语音"
+          @click="setView('tts')"
+        >
+          <Icon name="volume-2" class="nav-icon" />
+          <span class="nav-label">文生语音</span>
+        </button>
+        <button
+          type="button"
+          class="nav-item is-sub"
           :class="{ 'is-active': state.view === 'subtitles' }"
           :aria-current="state.view === 'subtitles' ? 'page' : undefined"
           id="nav-subtitles"

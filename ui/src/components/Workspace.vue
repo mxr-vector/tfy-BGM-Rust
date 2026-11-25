@@ -13,6 +13,7 @@ import SchedulePage from './SchedulePage.vue';
 import SongTable from './SongTable.vue';
 import SubtitlePage from './SubtitlePage.vue';
 import WarningBanner from './WarningBanner.vue';
+import TtsWorkspace from './tts/TtsWorkspace.vue';
 
 const resultsTitle = computed(() => {
   if (state.favoritesOnly) return heroCopy(HERO_KINDS.favorites).resultsTitle;
@@ -35,6 +36,7 @@ const query = computed(() => state.search.trim());
     <WarningBanner />
     <SchedulePage v-if="state.view === 'schedule'" />
     <SubtitlePage v-else-if="state.view === 'subtitles'" />
+    <TtsWorkspace v-else-if="state.view === 'tts'" />
     <AudioToolsPage v-else-if="state.view === 'duplicates'" mode="duplicates" />
     <AudioToolsPage v-else-if="state.view === 'sound-search'" mode="search" />
     <PlaylistMigrationPage v-else-if="state.view === 'playlist-migration'" />

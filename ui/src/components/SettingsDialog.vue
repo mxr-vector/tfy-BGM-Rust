@@ -81,6 +81,7 @@ import {
   type SettingsTab,
 } from '@/stores/settings';
 import { state } from '@/stores/state';
+import { cancelTtsInstall, installTtsModel, openTtsRelease, refreshTtsModels, ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModels, ttsModelsLoading } from '@/stores/tts';
 import FontSelect from './FontSelect.vue';
 import Icon from './Icon.vue';
 import SettingSwitch from './SettingSwitch.vue';
@@ -215,7 +216,10 @@ function selectTab(tab: SettingsTab): void {
   settingsTab.value = tab;
   if (tab === 'general') void ensureFonts();
   if (tab === 'playback') void refreshOutputs();
-  if (tab === 'models') void refreshModels();
+  if (tab === 'models') {
+    void refreshModels();
+    void refreshTtsModels();
+  }
   if (tab === 'integrations') void syncIntegrationForm();
 }
 
@@ -323,11 +327,16 @@ function onPanelKeydown(event: KeyboardEvent): void {
   closeSettings();
 }
 
+watch(() => settingsOpen.value && settingsTab.value === 'models', (visible) => {
+  if (!visible) void cancelTtsInstall('settings');
+}, { flush: 'sync' });
+
 watch(settingsOpen, async (open) => {
   if (!open) return;
   if (settingsTab.value === 'general') void ensureFonts();
   if (settingsTab.value === 'playback') void refreshOutputs();
-  if (settingsTab.value === 'models') void refreshModels();
+  if (settingsTab.value === 'models') { void refreshModels(); void refreshTtsModels(); }
+  else if (ttsModels.value.length === 0) void refreshTtsModels();
   if (settingsTab.value === 'integrations') void syncIntegrationForm();
   await nextTick();
   panel.value?.focus();
@@ -889,6 +898,28 @@ watch(settingsOpen, async (open) => {
                   <p v-else-if="models.length === 0" class="settings-hint">
                     未在模型目录下找到 .onnx 模型{{ defaultModel?.installed ? '' : '，可先下载默认模型' }}。
                   </p>
+                </div>
+
+                <div class="settings-subgroup">
+                  <div class="settings-subgroup-head">
+                    <h4>TTS 语音模型</h4>
+                    <button type="button" class="settings-link" @click="openTtsRelease">sherpa-onnx 下载源</button>
+                  </div>
+                  <p class="settings-hint">Kokoro 适合口播与知识解说：自然语调、多语音、低延迟，适合长文本朗读和讲解。ZipVoice 适合零样本声音克隆：短参考音频即可复刻音色，支持中英文；合成时需同时提供录音文本。</p>
+                  <article v-for="model in ttsModels" :key="model.id" class="settings-model">
+                    <div class="settings-model-main">
+                      <div class="settings-model-title"><strong>{{ model.name }}</strong><span v-if="model.installed" class="settings-badge is-accent">已安装</span></div>
+                      <p class="settings-model-meta">{{ model.package }} · {{ formatBytes(model.sizeBytes) }}</p>
+                    </div>
+                    <button type="button" class="settings-btn" :disabled="ttsInstalling !== null || model.installed" @click="installTtsModel(model, 'settings')">{{ ttsInstalling === model.id ? '安装中…' : model.installed ? '已安装' : '下载' }}</button>
+                  </article>
+                  <p v-if="ttsModelsLoading && !ttsModels.length" class="settings-hint">正在扫描 TTS 模型…</p>
+                  <div v-if="ttsInstalling" class="settings-download">
+                    <div class="settings-download-bar"><span class="settings-download-fill" :style="{ width: `${ttsDownloadPercent}%` }"></span></div>
+                    <p class="settings-hint">{{ ttsDownloadProgress ? `${ttsDownloadProgress.file} · ${formatBytes(ttsDownloadProgress.received)} / ${formatBytes(ttsDownloadProgress.total)} · ${ttsDownloadPercent}%` : '正在准备安全校验的模型下载…' }}</p>
+                    <button type="button" class="settings-btn" :disabled="ttsInstallCancelling" @click="cancelTtsInstall()">{{ ttsInstallCancelling ? '正在取消…' : '取消下载' }}</button>
+                  </div>
+                  <p v-else-if="!ttsModels.some(model => model.installed)" class="settings-hint">模型安装后才会出现在“文生语音”可选项中。</p>
                 </div>
 
                 <p v-if="modelsInfo?.warnings.length" class="settings-hint is-warn">

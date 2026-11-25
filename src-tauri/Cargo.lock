@@ -4743,6 +4743,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sherpa-onnx",
  "sherpa-onnx-sys",
  "tar",
@@ -4755,6 +4756,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "ttf-parser",
+ "uuid",
  "windows-registry",
 ]
 
@@ -4902,6 +4904,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -4,7 +4,7 @@ import { toast } from '@/lib/toast';
 
 const MAX_DURATION_MS = 30_000;
 
-export function useSoundRecording(onRecorded: (clip: Blob) => void) {
+export function useSoundRecording(onRecorded: (clip: Blob) => void, maxDurationMs = MAX_DURATION_MS) {
   const requesting = ref(false);
   const recording = ref(false);
   let recorder: MediaRecorder | null = null;
@@ -56,7 +56,7 @@ export function useSoundRecording(onRecorded: (clip: Blob) => void) {
       capture.start();
       recorder = capture;
       recording.value = true;
-      timer = window.setTimeout(stop, MAX_DURATION_MS);
+      timer = window.setTimeout(stop, maxDurationMs);
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop());
       if (!disposed) toast(`无法启动麦克风：${normalizeError(error)}`, 'error');

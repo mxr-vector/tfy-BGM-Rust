@@ -31,7 +31,7 @@
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data:; media-src 'self' blob: asset: http://asset.localhost http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:",
       "assetProtocol": {
         "enable": true,
-        "scope": []
+        "scope": ["$APPCACHE/tts/speech-????????????????????????????????.wav"]
       }
     }
   },
@@ -44,7 +44,13 @@
       "../assets/bg/2.jpg": "assets/bg/2.jpg",
       "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
       "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
-      "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx"
+      "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx",
+      "../models/voices/keai.wav": "voices/keai.wav",
+      "../models/voices/lulu.wav": "voices/lulu.wav",
+      "../models/voices/manbo.wav": "voices/manbo.wav",
+      "../models/voices/qingnian.wav": "voices/qingnian.wav",
+      "../models/voices/roucheng.wav": "voices/roucheng.wav",
+      "../models/voices/weiketuo.wav": "voices/weiketuo.wav"
     },
     "icon": [
       "icons/32x32.png",

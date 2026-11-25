@@ -52,6 +52,11 @@ export function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOp
   return bridge.core.invoke<T>(command, args, options);
 }
 
+export function invokeBinary<T>(command: string, bytes: ArrayBuffer): Promise<T> {
+  if (!bridge?.core?.invoke) return Promise.reject(new Error('当前页面未运行在 Tauri 容器中，无法访问曲库。'));
+  return bridge.core.invoke<T>(command, bytes);
+}
+
 export function assetUrl(path: string): string {
   if (!bridge?.core?.convertFileSrc) return path;
   return bridge.core.convertFileSrc(path);

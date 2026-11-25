@@ -1119,7 +1119,11 @@ fn write_wav16(path: &Path, channels: &[Vec<f32>], sample_rate: u32) -> Result<u
     write_wav16_slices(path, &slices, sample_rate)
 }
 
-fn write_wav16_slices(path: &Path, channels: &[&[f32]], sample_rate: u32) -> Result<u64> {
+pub(crate) fn write_wav16_slices(
+    path: &Path,
+    channels: &[&[f32]],
+    sample_rate: u32,
+) -> Result<u64> {
     if channels.is_empty() || channels[0].is_empty() {
         bail!("无法写出空音轨：{}", path.display());
     }

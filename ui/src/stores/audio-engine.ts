@@ -92,6 +92,9 @@ let kShelf: BiquadFilterNode | null = null;
 let source: AudioBufferSourceNode | null = null;
 let sourceGain: GainNode | null = null;
 let outgoing: Voice | null = null;
+const pausingVoices = new Set<Voice>();
+let playbackInhibitors = 0;
+let playbackEpoch = 0;
 let buffer: AudioBuffer | null = null;
 
 let loadedPath = '';
@@ -353,13 +356,30 @@ export function setLoopRegion(region: LoopRegion | null): void {
   }
 }
 
+export function suspendPlayback(): () => void {
+  playbackInhibitors += 1;
+  playbackEpoch += 1;
+  if (playing) {
+    offset = currentTime();
+    playing = false;
+    stopClock();
+    syncClock();
+    emit('pause');
+  }
+  stopSource();
+  for (const voice of pausingVoices) stopVoice(voice);
+  pausingVoices.clear();
+  return () => { playbackInhibitors -= 1; };
+}
+
 export function startPlayback(fadeIn: number = TRANSPORT_FADE_SECONDS): void {
-  if (!buffer || playing || loading) return;
+  if (!buffer || playing || loading || playbackInhibitors) return;
+  const epoch = playbackEpoch;
   const ctx = ensureContext();
   if (!ctx) return;
 
   const start = () => {
-    if (!buffer) return;
+    if (!buffer || loading || playing || playbackInhibitors || epoch !== playbackEpoch) return;
     const region = activeRegion();
     if (region && (offset < region.start || offset >= region.end - 0.01)) {
       offset = region.start;
@@ -401,7 +421,7 @@ export function pausePlayback(): void {
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
     gain.linearRampToValueAtTime(0, now + TRANSPORT_FADE_SECONDS);
-    window.setTimeout(() => stopVoice(voice), TRANSPORT_FADE_SECONDS * 1000 + 80);
+    stopAfterPauseFade(voice);
   }
 
   // 交叉淡出中的旧声部也要一起收掉，否则按下暂停后它还会继续响到淡出结束。
@@ -413,11 +433,18 @@ export function pausePlayback(): void {
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
     gain.linearRampToValueAtTime(0, now + TRANSPORT_FADE_SECONDS);
-    window.setTimeout(() => stopVoice(fading), TRANSPORT_FADE_SECONDS * 1000 + 80);
+    stopAfterPauseFade(fading);
   }
   stopClock();
   syncClock();
   emit('pause');
+}
+
+function stopAfterPauseFade(voice: Voice): void {
+  pausingVoices.add(voice);
+  window.setTimeout(() => {
+    if (pausingVoices.delete(voice)) stopVoice(voice);
+  }, TRANSPORT_FADE_SECONDS * 1000 + 80);
 }
 
 export function currentTime(): number {
@@ -470,6 +497,8 @@ export async function loadSource(
   }: LoadOptions = {},
 ): Promise<LoadOutcome> {
   const token = (loadToken += 1);
+  const epoch = playbackEpoch;
+  const shouldAutoplay = autoplay && !playbackInhibitors;
   autoplayBlocked = onAutoplayBlocked ?? null;
   loadedPath = path;
 
@@ -482,7 +511,7 @@ export async function loadSource(
 
   // 正在播放时切换曲目：保留旧声部继续发声，等新曲解码完成再做交叉淡出。
   const crossfade = clamp(crossfadeSeconds, 0, 12);
-  const keepPlaying = autoplay && playing && source !== null && buffer !== null && crossfade > 0.05;
+  const keepPlaying = shouldAutoplay && playing && source !== null && buffer !== null && crossfade > 0.05;
   const wasPlaying = playing;
 
   loading = true;
@@ -547,7 +576,7 @@ export async function loadSource(
 
   // 未走交叉淡出的路径（关闭淡入淡出 / 原本暂停 / 上一首自然播完）在解码完成后
   // 按调用方的 autoplay 意图播放；交叉淡出路径若中途被暂停则保持暂停。
-  if (autoplay && !keepPlaying) {
+  if (shouldAutoplay && !keepPlaying && epoch === playbackEpoch) {
     startPlayback(fadeInSeconds > 0.05 ? clamp(fadeInSeconds, 0, 12) : TRANSPORT_FADE_SECONDS);
   } else {
     syncClock();

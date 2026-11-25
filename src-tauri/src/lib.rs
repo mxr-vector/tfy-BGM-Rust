@@ -12,9 +12,13 @@ mod platform;
 mod playlist_migration;
 mod separation;
 mod settings;
+mod speech_audio;
 mod state;
 mod subtitles;
 mod tasks;
+mod tts;
+mod tts_models;
+mod tts_script;
 mod wallpapers;
 
 use api::ApiBridge;
@@ -65,7 +69,8 @@ pub fn run() {
             let (autostart, minimize_to_tray, _) = state.desktop_prefs();
             app.manage(state);
             // 已启用的索引启动后在后台补同步，不阻塞首屏。
-            app.state::<AppState>().queue_audio_index_update(app.handle());
+            app.state::<AppState>()
+                .queue_audio_index_update(app.handle());
             // 桌面歌词窗口的开关与最新快照；歌词窗口启动时从此处拉取初始状态。
             app.manage(LyricsState::default());
 
@@ -130,6 +135,15 @@ pub fn run() {
             commands::delete_asr_model,
             commands::cancel_asr_download,
             commands::transcribe_wav,
+            tts::tts_models,
+            tts::install_tts_model,
+            tts::open_tts_release,
+            tts::parse_tts_script,
+            tts::normalize_tts_reference,
+            tts::load_tts_builtin_reference,
+            tts::generate_tts,
+            tts::cancel_tts_job,
+            tts::save_tts_audio,
             commands::separation_models,
             commands::generate_subtitles,
             commands::export_subtitle,

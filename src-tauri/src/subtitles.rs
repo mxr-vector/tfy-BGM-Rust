@@ -24,7 +24,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use bgm_core::Song;
 use bgm_core::export::safe_file_name;
 use bgm_core::library::{AUDIO_EXTENSIONS, audio_extension};
-use bgm_core::loudness::ffmpeg_path;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -429,59 +428,15 @@ fn migrated_stored(stored: &StoredSubtitle, to: &str, song: Option<&Song>) -> St
     next
 }
 
-fn stderr_tail(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        "（ffmpeg 未输出错误信息）".to_owned()
-    } else {
-        trimmed
-            .chars()
-            .rev()
-            .take(400)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect()
-    }
-}
-
 /// 把分离后的人声 WAV 归一化为 16 kHz 单声道 PCM（sherpa-onnx 要求）。
 ///
 /// 分离阶段已强制要求 ffmpeg，这里不再保留「直接使用源文件」的降级路径；
 /// 返回的临时文件由调用方在识别结束后删除。
 fn normalize_to_wav(app: &AppHandle, source: &Path, key: &str) -> Result<PathBuf> {
-    let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        anyhow!("未检测到 ffmpeg，无法归一化人声轨。请安装 ffmpeg 或设置 TFY_FFMPEG 环境变量后重试")
-    })?;
-
     let target = wav_path_for(app, key)?;
-    let output = bgm_core::process::quiet_command(&ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
-        .arg(source)
-        .args([
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            "-f",
-            "wav",
-        ])
-        .arg(&target)
-        .output()
-        .with_context(|| format!("无法启动 ffmpeg 转换：{}", ffmpeg.display()))?;
-
-    if !output.status.success() {
+    if let Err(error) = crate::speech_audio::to_asr_wav(source, &target) {
         let _ = fs::remove_file(&target);
-        bail!("音频归一化失败：{}", stderr_tail(&output.stderr));
-    }
-    let size = fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
-    if size == 0 {
-        let _ = fs::remove_file(&target);
-        bail!("音频归一化失败：ffmpeg 输出为空");
+        return Err(error).context("无法归一化人声轨");
     }
     Ok(target)
 }

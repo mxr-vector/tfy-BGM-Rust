@@ -81,6 +81,9 @@ Copy-Item (Join-Path $repo "README.md") $package -Force
 # so assets/bg has to ship next to the executable.
 New-Item -ItemType Directory -Force (Join-Path $package "assets") | Out-Null
 Copy-Item (Join-Path $repo "assets\bg") (Join-Path $package "assets") -Recurse -Force
+$voicesTarget = Join-Path $package "voices"
+New-Item -ItemType Directory -Force $voicesTarget | Out-Null
+Copy-Item (Join-Path $repo "models\voices\*.wav") $voicesTarget -Force
 
 $bgmTarget = Join-Path $package "bgm"
 $audioExtensions = @(".mp3", ".m4a", ".flac", ".wav", ".ogg")
