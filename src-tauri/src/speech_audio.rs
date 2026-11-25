@@ -264,13 +264,31 @@ pub fn pause_after(text: &str, rate: u32) -> usize {
     rate as usize * milliseconds / 1000
 }
 
-/// 优先用 ffmpeg 做两遍响度归一化；不可用时退回不削峰的线性增益。
-pub fn normalize_output(source: &Path, target: &Path, rate: u32) -> Result<()> {
+pub fn fit_subtitle_audio(samples: &[f32], max_frames: usize, rate: u32) -> Result<Vec<f32>> {
+    let tempo = (samples.len() as f64 / max_frames as f64) * 1.05;
+    ensure!(tempo <= 2.0, "字幕时槽太短，无法清晰读完整句");
+    let source = tempfile::NamedTempFile::new()?;
+    let target = tempfile::NamedTempFile::new()?;
+    crate::separation::write_wav16_slices(source.path(), &[samples], rate)?;
+    convert(
+        source.path(),
+        target.path(),
+        Some(&format!("atempo={tempo:.6}")),
+        None,
+        rate,
+    )?;
+    let wave = read_wave(target.path())?;
+    let fitted = polish_segment(wave.samples(), rate)?;
+    ensure!(fitted.len() <= max_frames, "字幕时槽太短，无法清晰读完整句");
+    Ok(fitted)
+}
+
+pub fn normalize_output(source: &Path, target: &Path, rate: u32, frames: usize) -> Result<()> {
     if let Some(ffmpeg) = ffmpeg_path()
         && normalize_wav(&ffmpeg, source, target, rate, OUTPUT_PRESET).is_ok()
         && let Ok(wave) = read_wave(target)
         && wave.sample_rate() == rate as i32
-        && !wave.samples().is_empty()
+        && wave.samples().len() == frames
     {
         return Ok(());
     }
@@ -287,9 +305,18 @@ fn normalize_samples(samples: &mut [f32], rate: u32) {
     if samples.is_empty() || rate == 0 || samples.iter().any(|sample| !sample.is_finite()) {
         return;
     }
-    let mean = samples.iter().map(|sample| *sample as f64).sum::<f64>() / samples.len() as f64;
-    for sample in samples.iter_mut() {
-        *sample = (*sample as f64 - mean) as f32;
+    let mut sum = 0.0;
+    let mut active_samples = 0;
+    for &sample in samples.iter().filter(|&&sample| sample != 0.0) {
+        sum += f64::from(sample);
+        active_samples += 1;
+    }
+    if active_samples == 0 {
+        return;
+    }
+    let mean = sum / f64::from(active_samples);
+    for sample in samples.iter_mut().filter(|sample| **sample != 0.0) {
+        *sample = (f64::from(*sample) - mean) as f32;
     }
     let peak = samples
         .iter()
@@ -420,6 +447,26 @@ mod tests {
         assert!(after > before * 2.0);
         assert!(after <= limit + 1e-5);
         assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples[12_000..].iter().all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn subtitle_audio_fits_the_slot_without_resampling() {
+        if ffmpeg_path().is_none() {
+            return;
+        }
+        let samples: Vec<f32> = (0..24_000)
+            .map(|index| (index as f32 * 0.11).sin() * 0.25)
+            .collect();
+        let fitted = fit_subtitle_audio(&samples, 18_000, 24_000).unwrap();
+        assert!((16_000..=18_000).contains(&fitted.len()));
+        let rising_crossings = fitted
+            .windows(2)
+            .filter(|pair| pair[0] <= 0.0 && pair[1] > 0.0)
+            .count();
+        let pitch = rising_crossings as f32 * 24_000.0 / fitted.len() as f32;
+        assert!((410.0..430.0).contains(&pitch), "unexpected pitch: {pitch}");
+        assert!(fit_subtitle_audio(&samples, 6_000, 24_000).is_err());
     }
 
     #[test]
@@ -430,7 +477,7 @@ mod tests {
             .map(|index| (index as f32 * 0.11).sin() * 0.05)
             .collect();
         crate::separation::write_wav16_slices(source.path(), &[&samples], 24_000).unwrap();
-        normalize_output(source.path(), target.path(), 24_000).unwrap();
+        normalize_output(source.path(), target.path(), 24_000, samples.len()).unwrap();
         let wave = read_wave(target.path()).unwrap();
         assert_eq!(wave.sample_rate(), 24_000);
         assert!(!wave.samples().is_empty());

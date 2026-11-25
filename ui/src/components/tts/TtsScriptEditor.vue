@@ -18,6 +18,7 @@ const formatOptions = [
   { value: 'lrc', label: 'LRC 字幕' },
   { value: 'srt', label: 'SRT 字幕' },
 ];
+const fileInput = ref<HTMLInputElement | null>(null);
 const title = ref('未载入文本');
 const segments = ref<Segment[]>([]);
 const hasText = computed(() => Boolean(sourceText.value.trim()));
@@ -92,12 +93,13 @@ defineExpose({ hasText, segments, parseText });
       <span>{{ segments.length }} 段文本</span>
     </div>
     <div class="tts-import-actions">
-      <label class="tts-action tts-file-label"><Icon name="upload" />导入文本<input type="file" accept=".txt,.lrc,.srt,text/plain" @change="importText"></label>
+      <button type="button" class="tts-action" @click="fileInput?.click()"><Icon name="upload" />导入文本</button>
+      <input ref="fileInput" type="file" hidden accept=".txt,.lrc,.srt,text/plain" @change="importText">
       <AppSelect :model-value="format" :options="formatOptions" label="文本格式" :min-menu-width="132" @update:model-value="setFormat" />
       <button type="button" class="tts-action" @click="parseText">解析文本</button>
     </div>
     <textarea v-model="sourceText" class="tts-textarea" spellcheck="false" placeholder="粘贴口播稿或字幕内容。纯文本会合并段内换行，优先按标点分段；LRC 与 SRT 按字幕条目分段。" @input="invalidateText"></textarea>
-    <p v-if="format !== 'txt'" class="tts-timing-note">字幕时间戳仅用于分段与预览，不会限制语音时长、语速或音质。</p>
+    <p v-if="format !== 'txt'" class="tts-timing-note">语音按字幕时间开始，空档保留静音。台词超出时槽时会加快语速。</p>
     <div v-if="segments.length" class="tts-segment-preview">
       <div class="tts-card-heading"><h3>{{ title }}</h3><span>{{ segments.length }} 条</span></div>
       <div v-for="(segment, index) in segments.slice(0, 4)" :key="index" class="tts-segment-row">

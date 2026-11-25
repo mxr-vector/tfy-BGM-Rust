@@ -573,10 +573,11 @@ fn synthesize_track(
     job_id: uuid::Uuid,
     token: &CancellationToken,
     engine: &OfflineTts,
-    generation: GenerationConfig,
+    mut generation: GenerationConfig,
     sample_rate: u32,
 ) -> Result<SynthesisResult> {
     let mut track = Vec::new();
+    let timed = request.segments[0].start_ms.is_some();
     let total = request.segments.len();
     let _ = app.emit(
         "tts-synthesis-progress",
@@ -587,21 +588,45 @@ fn synthesize_track(
         },
     );
     for (index, segment) in request.segments.iter().enumerate() {
-        check_cancelled(token)?;
-        let cancel = token.clone();
-        let audio = engine.generate_with_config(
-            segment.text.trim(),
-            &generation,
-            Some(move |_: &[f32], _: f32| !cancel.is_cancelled()),
-        );
-        check_cancelled(token)?;
-        let audio = audio
-            .filter(|audio| {
-                !audio.samples().is_empty() && audio.sample_rate() == sample_rate as i32
-            })
-            .with_context(|| format!("第 {} 段未生成有效语音", index + 1))?;
-        append_segment(&mut track, segment, audio.samples(), sample_rate)
-            .with_context(|| format!("第 {} 段音频处理失败", index + 1))?;
+        let generate = |config: &GenerationConfig| -> Result<Vec<f32>> {
+            check_cancelled(token)?;
+            let cancel = token.clone();
+            let audio = engine.generate_with_config(
+                segment.text.trim(),
+                config,
+                Some(move |_: &[f32], _: f32| !cancel.is_cancelled()),
+            );
+            check_cancelled(token)?;
+            let audio = audio
+                .filter(|audio| {
+                    !audio.samples().is_empty() && audio.sample_rate() == sample_rate as i32
+                })
+                .context("未生成有效语音")?;
+            speech_audio::polish_segment(audio.samples(), sample_rate)
+        };
+        let mut process = || -> Result<()> {
+            generation.speed = 1.0;
+            let mut samples = generate(&generation)?;
+            if let Some((start, end)) = segment.start_ms.zip(segment.end_ms) {
+                let capacity = frames(end, sample_rate) - frames(start, sample_rate);
+                if samples.len() > capacity {
+                    generation.speed = (samples.len() as f32 / capacity as f32 * 1.05).min(2.0);
+                    if let Ok(faster) = generate(&generation)
+                        && faster.len() < samples.len()
+                    {
+                        samples = faster;
+                    }
+                    check_cancelled(token)?;
+                    if samples.len() > capacity {
+                        samples =
+                            speech_audio::fit_subtitle_audio(&samples, capacity, sample_rate)?;
+                    }
+                }
+            }
+            check_cancelled(token)?;
+            append_segment(&mut track, segment, &samples, sample_rate)
+        };
+        process().with_context(|| format!("第 {} 段音频处理失败", index + 1))?;
         let _ = app.emit(
             "tts-synthesis-progress",
             SynthesisProgress {
@@ -611,11 +636,21 @@ fn synthesize_track(
             },
         );
     }
-    while track.last() == Some(&0.0) {
-        track.pop();
+    if !timed {
+        while track.last() == Some(&0.0) {
+            track.pop();
+        }
     }
-    if track.is_empty() {
+    let peak = track
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    if peak == 0.0 {
         bail!("合成结果没有有效声音");
+    }
+    if peak > 1.0 {
+        for sample in &mut track {
+            *sample /= peak;
+        }
     }
     check_cancelled(token)?;
     let dir = result_dir(app)?;
@@ -631,7 +666,7 @@ fn synthesize_track(
         .prefix("speech-normalized-")
         .suffix(".wav")
         .tempfile_in(&dir)?;
-    speech_audio::normalize_output(raw.path(), normalized.path(), sample_rate)
+    speech_audio::normalize_output(raw.path(), normalized.path(), sample_rate, track.len())
         .context("语音响度归一化失败")?;
     check_cancelled(token)?;
     let wave = speech_audio::read_wave(normalized.path())?;
@@ -666,14 +701,30 @@ fn append_segment(
     samples: &[f32],
     rate: u32,
 ) -> Result<()> {
-    let samples = speech_audio::polish_segment(samples, rate)?;
-    let pause = speech_audio::pause_after(&segment.text, rate);
-    let added = samples.len().checked_add(pause).context("音轨过长")?;
-    if track.len().checked_add(added).context("音轨过长")? > frames(MAX_DURATION_MS, rate) {
+    let start = segment
+        .start_ms
+        .map_or(track.len(), |start| frames(start, rate));
+    let voice_end = start.checked_add(samples.len()).context("音轨过长")?;
+    let end = match (segment.start_ms, segment.end_ms) {
+        (_, Some(end)) => {
+            let end = frames(end, rate);
+            if voice_end > end {
+                bail!("字幕时槽太短，无法清晰读完整句");
+            }
+            end
+        }
+        (Some(_), None) => voice_end,
+        (None, None) => voice_end
+            .checked_add(speech_audio::pause_after(&segment.text, rate))
+            .context("音轨过长")?,
+    };
+    if end > frames(MAX_DURATION_MS, rate) {
         bail!("音轨不能超过 30 分钟");
     }
-    track.extend_from_slice(&samples);
-    track.resize(track.len() + pause, 0.0);
+    track.resize(track.len().max(end), 0.0);
+    for (target, &sample) in track[start..voice_end].iter_mut().zip(samples) {
+        *target += sample;
+    }
     Ok(())
 }
 
@@ -723,47 +774,57 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_timestamps_do_not_change_speech_timing() {
-        let samples = vec![0.5; 2_000];
-        let mut natural = Vec::new();
-        let mut timed = Vec::new();
-        for (index, (start_ms, end_ms)) in
-            [(10_000, 10_100), (20_000, 20_050)].into_iter().enumerate()
-        {
-            let text = if index == 0 {
-                "第一句。"
-            } else {
-                "第二句！"
+    fn subtitles_preserve_offsets_gaps_overlaps_and_end_times() {
+        let mut track = Vec::new();
+        let rate = 8_000;
+        for (start_ms, end_ms) in [(100, Some(250)), (150, Some(225)), (300, Some(450))] {
+            let cue = TtsSegment {
+                text: "字幕。".into(),
+                start_ms: Some(start_ms),
+                end_ms,
             };
-            append_segment(
-                &mut natural,
-                &TtsSegment {
-                    text: text.into(),
-                    start_ms: None,
-                    end_ms: None,
-                },
-                &samples,
-                24_000,
-            )
-            .unwrap();
-            append_segment(
-                &mut timed,
-                &TtsSegment {
-                    text: text.into(),
-                    start_ms: Some(start_ms),
-                    end_ms: Some(end_ms),
-                },
-                &samples,
-                24_000,
-            )
-            .unwrap();
+            append_segment(&mut track, &cue, &[0.25; 600], rate).unwrap();
         }
-        assert_eq!(natural, timed);
-        assert_eq!(
-            natural.len(),
-            4_000 + 2 * speech_audio::pause_after("。", 24_000)
-        );
-        assert_eq!(natural[0], 0.0);
+        assert_eq!(track.len(), frames(450, rate));
+        assert!(track[..800].iter().all(|&sample| sample == 0.0));
+        assert_eq!(track[800], 0.25);
+        assert_eq!(track[1_200], 0.5);
+        assert_eq!(track[1_400], 0.25);
+        assert!(track[1_800..2_400].iter().all(|&sample| sample == 0.0));
+        assert_eq!(track[2_400], 0.25);
+        assert!(track[3_000..].iter().all(|&sample| sample == 0.0));
+
+        let last = TtsSegment {
+            text: "末句。".into(),
+            start_ms: Some(500),
+            end_ms: None,
+        };
+        append_segment(&mut track, &last, &[0.25; 600], rate).unwrap();
+        assert_eq!(track.len(), frames(500, rate) + 600);
+        assert_eq!(track[4_000], 0.25);
+
+        let short = TtsSegment {
+            end_ms: Some(501),
+            ..last
+        };
+        assert!(append_segment(&mut track, &short, &[0.25; 600], rate).is_err());
+        assert_eq!(track.len(), 4_600);
+    }
+
+    #[test]
+    fn plain_text_appends_audio_with_punctuation_pauses() {
+        let mut track = Vec::new();
+        let cue = TtsSegment {
+            text: "一句话。".into(),
+            start_ms: None,
+            end_ms: None,
+        };
+        for _ in 0..2 {
+            append_segment(&mut track, &cue, &[0.25; 2_000], 24_000).unwrap();
+        }
+        assert_eq!(track.len(), 2 * (2_000 + 3_840));
+        assert!(track[2_000..5_840].iter().all(|&sample| sample == 0.0));
+        assert_eq!(track[5_840], 0.25);
     }
 
     #[test]
