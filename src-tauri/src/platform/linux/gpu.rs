@@ -5,5 +5,6 @@ pub fn apply<R: tauri::Runtime>(_context: &mut tauri::Context<R>, enabled: bool)
         return;
     }
     // 关掉合成模式会让页面走软件渲染，代价是动画变慢，换取老显卡上不闪屏。
+    // SAFETY: 本函数在创建 WebView 之前调用，此时尚无其它线程并发读取环境变量。
     unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
 }

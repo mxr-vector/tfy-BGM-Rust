@@ -89,7 +89,9 @@ pub struct AppState {
 struct Runtime {
     root: PathBuf,
     source: LibrarySource,
-    library: LibrarySnapshot,
+    /// 曲库快照以 `Arc` 持有：文件监听、索引同步等高频路径只克隆指针，
+    /// 真正需要拥有数据时（返回给前端）才复制一次。
+    library: Arc<LibrarySnapshot>,
 }
 
 #[derive(Serialize)]
@@ -217,7 +219,7 @@ impl AppState {
             runtime: RwLock::new(Runtime {
                 root,
                 source,
-                library,
+                library: Arc::new(library),
             }),
             meta_cache,
             watcher: Mutex::new(None),
@@ -229,7 +231,7 @@ impl AppState {
     pub fn bootstrap(&self) -> Bootstrap {
         Bootstrap {
             prefs: self.prefs.read().clone(),
-            library: self.runtime.read().library.clone(),
+            library: self.runtime.read().library.as_ref().clone(),
             config: self.config.read().clone(),
             schedule: self.schedule.read().clone(),
             loops: self.loops.read().clone(),
@@ -374,8 +376,15 @@ impl AppState {
         self.runtime.read().library.song(key).cloned()
     }
 
+    /// 曲目是否存在；只做查询，不复制曲目数据。
+    fn contains_song(&self, key: &str) -> bool {
+        self.runtime.read().library.song(key).is_some()
+    }
+
     /// 当前曲库快照（供开放接口读取，不占用界面）。
-    pub fn library_snapshot(&self) -> LibrarySnapshot {
+    ///
+    /// 返回共享指针：调用方持有期间无需复制整份曲目列表。
+    pub fn library_snapshot(&self) -> Arc<LibrarySnapshot> {
         self.runtime.read().library.clone()
     }
 
@@ -582,7 +591,7 @@ impl AppState {
         end: f64,
         enabled: bool,
     ) -> Result<LoopBook> {
-        if self.song(key).is_none() {
+        if !self.contains_song(key) {
             bail!("曲目不存在：{key}");
         }
         let mut current = self.loops.write();
@@ -637,7 +646,7 @@ impl AppState {
             (
                 runtime.root.clone(),
                 runtime.source,
-                runtime.library.clone(),
+                Arc::clone(&runtime.library),
             )
         };
         let categories = self.category_items();
@@ -656,23 +665,23 @@ impl AppState {
         }
 
         if content_changed {
+            let shared = Arc::new(next);
             *self.runtime.write() = Runtime {
                 root,
                 source,
-                library: next.clone(),
+                library: Arc::clone(&shared),
             };
             self.library_revision.fetch_add(1, Ordering::Relaxed);
+            self.queue_audio_index_update(app);
+            return Some(LibraryChange {
+                library: shared.as_ref().clone(),
+                added: diff.added,
+                removed: diff.removed,
+                moved: diff.moved,
+            });
         }
         self.queue_audio_index_update(app);
-        if !content_changed {
-            return None;
-        }
-        Some(LibraryChange {
-            library: next,
-            added: diff.added,
-            removed: diff.removed,
-            moved: diff.moved,
-        })
+        None
     }
 
     /// 当前索引快照（`Arc` 克隆，持有期间不阻塞任何写入，也无需长时间占读锁）。
@@ -714,7 +723,7 @@ impl AppState {
         app: &AppHandle,
         retry: bool,
     ) -> Result<audio_index::IndexSyncReport> {
-        let (revision, root, songs, categories, snapshot) = {
+        let (revision, root, library, categories, snapshot) = {
             let _guard = self.ops_lock.lock();
             let runtime = self.runtime.read();
             let snapshot = self.audio_index_snapshot();
@@ -724,7 +733,7 @@ impl AppState {
             (
                 self.library_revision.load(Ordering::Relaxed),
                 runtime.root.clone(),
-                runtime.library.songs.clone(),
+                Arc::clone(&runtime.library),
                 self.category_items(),
                 snapshot,
             )
@@ -734,7 +743,7 @@ impl AppState {
         if retry && ffmpeg.is_some() {
             next.retry_failed();
         }
-        let plan = next.plan_sync(&root, &categories, &songs);
+        let plan = next.plan_sync(&root, &categories, &library.songs);
         let analysis =
             audio_index::analyze_plan_while(&plan, ffmpeg.as_deref(), |current, total, title| {
                 if self.library_revision.load(Ordering::Relaxed) != revision {
@@ -1047,18 +1056,17 @@ impl AppState {
         category: &str,
     ) -> Result<LibraryMutation> {
         let _guard = self.ops_lock.lock();
-        let song = self
-            .song(key)
-            .ok_or_else(|| anyhow::anyhow!("曲目不存在：{key}"))?;
+        let root = self.root();
         let categories = self.category_items();
-        let change = ops::update_song(
-            &self.root(),
-            &categories,
-            &song,
-            Some(title),
-            Some(category),
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let change = {
+            let runtime = self.runtime.read();
+            let song = runtime
+                .library
+                .song(key)
+                .ok_or_else(|| anyhow::anyhow!("曲目不存在：{key}"))?;
+            ops::update_song(&root, &categories, song, Some(title), Some(category))
+                .map_err(|error| anyhow::anyhow!("{error}"))?
+        };
 
         let mut report = BatchReport {
             total: 1,
@@ -1082,54 +1090,59 @@ impl AppState {
         if !self.has_category(category) {
             bail!("未注册的分类：{category}");
         }
-        let songs = self.songs_for_keys(keys)?;
-        let refs: Vec<&Song> = songs.iter().collect();
+        let root = self.root();
         let categories = self.category_items();
         let BatchOutcome {
             changes,
             removed,
             report,
-        } = ops::move_songs(&self.root(), &categories, &refs, category);
+        } = {
+            let runtime = self.runtime.read();
+            let songs = Self::songs_for_keys(&runtime.library, keys)?;
+            ops::move_songs(&root, &categories, &songs, category)
+        };
         self.finish_mutation(app, changes, removed, report)
     }
 
     /// 软删除：移入曲库根目录下的 `.tfy-trash`，并清理对应收藏。
     pub fn delete_tracks(&self, app: &AppHandle, keys: &[String]) -> Result<LibraryMutation> {
         let _guard = self.ops_lock.lock();
-        let songs = self.songs_for_keys(keys)?;
-        let refs: Vec<&Song> = songs.iter().collect();
+        let root = self.root();
         let categories = self.category_items();
         let BatchOutcome {
             changes,
             removed,
             report,
-        } = ops::trash_songs(&self.root(), &categories, &refs);
+        } = {
+            let runtime = self.runtime.read();
+            let songs = Self::songs_for_keys(&runtime.library, keys)?;
+            ops::trash_songs(&root, &categories, &songs)
+        };
         self.finish_mutation(app, changes, removed, report)
     }
 
     /// 批量导出到指定文件夹，不改变曲库内容。
     pub fn export_tracks(&self, keys: &[String], dest_dir: &Path) -> Result<BatchOutcome> {
-        let songs = self.songs_for_keys(keys)?;
-        let refs: Vec<&Song> = songs.iter().collect();
+        let root = self.root();
         let categories = self.category_items();
+        let settings = self.export_settings();
+        let runtime = self.runtime.read();
+        let songs = Self::songs_for_keys(&runtime.library, keys)?;
         Ok(ops::export_songs(
-            &self.root(),
+            &root,
             &categories,
             dest_dir,
-            &refs,
-            self.export_settings(),
+            &songs,
+            settings,
         ))
     }
 
-    fn songs_for_keys(&self, keys: &[String]) -> Result<Vec<Song>> {
+    /// 按 key 取出曲目引用；借用 `library`，避免批量操作前复制整批曲目。
+    fn songs_for_keys<'a>(library: &'a LibrarySnapshot, keys: &[String]) -> Result<Vec<&'a Song>> {
         if keys.is_empty() {
             bail!("未选择任何曲目");
         }
-        let runtime = self.runtime.read();
-        let songs: Vec<Song> = keys
-            .iter()
-            .filter_map(|key| runtime.library.song(key).cloned())
-            .collect();
+        let songs: Vec<&Song> = keys.iter().filter_map(|key| library.song(key)).collect();
         if songs.is_empty() {
             bail!("选中的曲目均已不在曲库中");
         }
@@ -1279,7 +1292,7 @@ impl AppState {
         *self.runtime.write() = Runtime {
             root,
             source,
-            library: library.clone(),
+            library: Arc::new(library.clone()),
         };
         self.library_revision.fetch_add(1, Ordering::Relaxed);
         Ok(library)
@@ -1322,6 +1335,8 @@ fn same_content(previous: &LibrarySnapshot, next: &LibrarySnapshot) -> bool {
 }
 
 /// 以 key 为基准比较新旧曲目，并把「同名文件换了分类目录」识别为移动。
+///
+/// 候选按 (文件名, 曲名) 建索引，重复文件较多时也不会退化成逐条全表扫描。
 fn diff_songs(previous: &[Song], next: &[Song]) -> SongDiff {
     let old_by_key: HashMap<&str, &Song> = previous
         .iter()
@@ -1329,6 +1344,16 @@ fn diff_songs(previous: &[Song], next: &[Song]) -> SongDiff {
         .collect();
     let new_by_key: HashMap<&str, &Song> =
         next.iter().map(|song| (song.key.as_str(), song)).collect();
+
+    let mut candidates: HashMap<(&str, &str), Vec<&Song>> = HashMap::new();
+    for song in next {
+        if !old_by_key.contains_key(song.key.as_str()) {
+            candidates
+                .entry((song.file_name.as_str(), song.title.as_str()))
+                .or_default()
+                .push(song);
+        }
+    }
 
     let mut moved = Vec::new();
     let mut removed = Vec::new();
@@ -1338,12 +1363,13 @@ fn diff_songs(previous: &[Song], next: &[Song]) -> SongDiff {
         if new_by_key.contains_key(old_song.key.as_str()) {
             continue;
         }
-        let candidate = next.iter().find(|song| {
-            !old_by_key.contains_key(song.key.as_str())
-                && !consumed.contains(song.key.as_str())
-                && song.file_name == old_song.file_name
-                && song.title == old_song.title
-        });
+        let candidate = candidates
+            .get(&(old_song.file_name.as_str(), old_song.title.as_str()))
+            .and_then(|list| {
+                list.iter()
+                    .copied()
+                    .find(|song| !consumed.contains(song.key.as_str()))
+            });
         match candidate {
             Some(song) => {
                 consumed.insert(song.key.as_str());
