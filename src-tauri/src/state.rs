@@ -459,8 +459,12 @@ impl AppState {
     pub fn save_model_download_url(&self, tts: bool, url: String) -> Result<String> {
         let mut current = self.prefs.write();
         let mut next = current.clone();
-        let url = if !tts && url.is_empty() {
-            models::DEFAULT_DOWNLOAD_URL.to_owned()
+        let url = if url.is_empty() {
+            if tts {
+                bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL.to_owned()
+            } else {
+                models::DEFAULT_DOWNLOAD_URL.to_owned()
+            }
         } else {
             url
         };

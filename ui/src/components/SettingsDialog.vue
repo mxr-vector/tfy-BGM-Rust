@@ -78,7 +78,8 @@ import {
 } from '@/stores/settings';
 import { state } from '@/stores/state';
 import {
-  cancelTtsInstall, installTtsModel, manageTtsModel, openModelDownloadSource, refreshTtsModels,
+  cancelTtsInstall, DEFAULT_TTS_DOWNLOAD_SOURCE, installTtsModel, manageTtsModel,
+  openModelDownloadSource, refreshTtsModels, showCosyVoiceRuntimeSetup,
   ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelActionLabel,
   ttsModelBusy, ttsModels, ttsModelsLoading, type TtsModel,
 } from '@/stores/tts';
@@ -163,13 +164,13 @@ async function editDownloadSource(tts: boolean): Promise<void> {
   const result = await showModal({
     title: `修改 ${family} 下载源`,
     description: tts
-      ? '填写镜像目录地址，目录中需包含模型压缩包及 ZipVoice 依赖文件。留空恢复默认源。'
+      ? 'ModelScope 仓库地址仅用于 CosyVoice3，其他 HTTP(S) 镜像目录仅用于 Kokoro 和 ZipVoice。留空恢复各模型的默认下载源。'
       : '填写 ModelScope 仓库地址或 0.6B-int8 文件所在目录的直链。留空恢复默认源。',
     fields: [{
       name: 'url',
       label: '下载源地址',
       value: tts ? prefs.value?.ttsDownloadUrl : modelsInfo.value?.downloadUrl,
-      placeholder: tts ? '默认使用 sherpa-onnx 发布源' : modelsInfo.value?.defaultDownloadUrl,
+      placeholder: tts ? DEFAULT_TTS_DOWNLOAD_SOURCE : modelsInfo.value?.defaultDownloadUrl,
     }],
     confirmText: '保存',
     validate: ({ url }) => {
@@ -177,7 +178,7 @@ async function editDownloadSource(tts: boolean): Promise<void> {
       if (!source) return null;
       if (!/^https?:\/\//i.test(source) || !URL.canParse(source) || /[\s\x00-\x1f\x7f]/.test(source)
         || Array.from(source).length > 1024) return '请输入有效的 HTTP 或 HTTPS 地址';
-      if (tts && /[?#]/.test(source)) return '请输入不含查询参数或片段的目录地址';
+      if (tts && /[?#]/.test(source)) return 'TTS 下载源不能包含查询参数或片段';
       return null;
     },
   });
@@ -868,11 +869,12 @@ watch(settingsOpen, async (open) => {
                   <div class="settings-subgroup-head">
                     <h4>TTS 语音模型</h4>
                     <div class="settings-subgroup-actions">
+                      <button type="button" class="settings-link" @click="showCosyVoiceRuntimeSetup">CosyVoice3 运行配置</button>
                       <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource(true)">修改下载源</button>
                       <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true)">访问下载源</button>
                     </div>
                   </div>
-                  <p class="settings-hint">Kokoro 适合口播与知识解说：自然语调、多语音、低延迟，适合长文本朗读和讲解。ZipVoice 适合零样本声音克隆：短参考音频即可复刻音色，支持中英文；合成时需同时提供录音文本。</p>
+                  <p class="settings-hint">CosyVoice3 使用 5–15 秒参考音频和对应文本进行零样本克隆。应用负责下载模型文件，加载前需配置 Python 运行环境。Kokoro 适合多音色朗读，ZipVoice 支持中英文声音克隆。</p>
                   <div class="settings-models">
                     <SettingsModelRow
                       v-for="model in ttsModels"
@@ -883,13 +885,16 @@ watch(settingsOpen, async (open) => {
                       :loaded="model.loaded"
                       :status="model.installed ? '已安装' : model.hasFiles ? '文件不完整' : undefined"
                     >
-                        <template v-if="!model.hasFiles" #details> · {{ model.package }}</template>
+                        <template #details>
+                          <template v-if="model.recommended"> · 推荐</template>
+                          <template v-if="!model.hasFiles"> · {{ model.package }}</template>
+                        </template>
                         <span v-if="ttsModelActionLabel(model.id)" class="settings-muted" role="status">{{ ttsModelActionLabel(model.id) }}</span>
                         <button v-if="model.installed" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'load')">
                           {{ model.loaded ? '重新加载' : '加载' }}
                         </button>
                         <button v-else type="button" class="settings-btn" :disabled="ttsModelBusy || savingDownloadSource" @click="installTtsModel(model, 'settings')">
-                          {{ ttsInstalling === model.id ? '安装中…' : '下载' }}
+                          {{ ttsInstalling === model.id ? '正在下载…' : '下载' }}
                         </button>
                         <button v-if="model.loaded" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'release')">释放模型</button>
                         <button v-if="model.hasFiles" type="button" class="settings-btn is-danger" :disabled="ttsModelBusy" @click="confirmDeleteTtsModel(model)">删除</button>

@@ -374,7 +374,10 @@ mod tests {
             let (normalized, transcript) = prepare_builtin_reference(&path, &bytes)
                 .unwrap_or_else(|err| panic!("{name}: {err:#}"));
             assert!(transcript.is_some(), "missing transcript for {name}");
-            assert!((MIN_REFERENCE_SAMPLES..=MAX_REFERENCE_SAMPLES).contains(&read_reference(&normalized).unwrap().len()));
+            assert!(
+                (MIN_REFERENCE_SAMPLES..=MAX_REFERENCE_SAMPLES)
+                    .contains(&read_reference(&normalized).unwrap().len())
+            );
         }
     }
 

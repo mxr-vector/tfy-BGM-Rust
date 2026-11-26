@@ -12,9 +12,9 @@ use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
 use crate::tts::check_cancelled;
+use bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL;
 
 pub const DIR: &str = "tts";
-pub const RELEASE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models";
 const ASSETS: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
 const AUXILIARY: &[(&str, &str, &str, u64)] = &[
     (
@@ -39,6 +39,7 @@ pub struct TtsModel {
     pub family: &'static str,
     pub package: &'static str,
     pub size_bytes: u64,
+    pub recommended: bool,
     pub installed: bool,
     pub has_files: bool,
     pub loaded: bool,
@@ -65,6 +66,9 @@ impl TtsModel {
 
     fn complete(&self) -> bool {
         let dir = Path::new(&self.path);
+        if self.family == "CosyVoice3" {
+            return cosyvoice_complete(dir);
+        }
         let required = if self.family == "Kokoro" {
             [
                 self.acoustic_file(),
@@ -94,7 +98,129 @@ struct Spec {
     hash: &'static str,
     size: u64,
 }
+const COSYVOICE_ID: &str = "cosyvoice3-0.5b-2512";
+const COSYVOICE_ONNX_REPO: &str = "Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX";
+const COSYVOICE_ONNX_REV: &str = "879e1017e3143bb19a739309cf3522da2e2a7a6a";
+const COSYVOICE_OFFICIAL_REPO: &str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512";
+const COSYVOICE_OFFICIAL_REV: &str = "9f9c56f2514700ef79d64fd0afb693e0d672373b";
+
+struct CosyVoiceFile {
+    path: &'static str,
+    size: u64,
+    hash: &'static str,
+    official: bool,
+}
+
+const fn onnx(path: &'static str, size: u64, hash: &'static str) -> CosyVoiceFile {
+    CosyVoiceFile {
+        path,
+        size,
+        hash,
+        official: false,
+    }
+}
+
+const fn official(path: &'static str, size: u64, hash: &'static str) -> CosyVoiceFile {
+    CosyVoiceFile {
+        path,
+        size,
+        hash,
+        official: true,
+    }
+}
+
+const COSYVOICE_FILES: &[CosyVoiceFile] = &[
+    onnx(
+        "flow_fp32.onnx",
+        1_335_578_680,
+        "cbcd99556e71c91229fc19ed7655133222a50c35dccbf3b74b0527f18ca024dd",
+    ),
+    onnx(
+        "hift.onnx",
+        342_661_124,
+        "9831daaeda8662730c703cf3c763617e6a60bd04c23c4f07f595fd6a7601a6f1",
+    ),
+    official(
+        "cosyvoice3.yaml",
+        6_934,
+        "f5a6b2c6f05139d0f18861a1fe506f751e787026b77c05f7e8fef9f8a4405965",
+    ),
+    official(
+        "llm.pt",
+        2_024_669_519,
+        "69f43bd545131c30e98947fb360ea8b4dc9916d8e83dded7757c7ea4f5a24970",
+    ),
+    official(
+        "flow.pt",
+        1_329_116_148,
+        "a6fab32a7825e5b0bc855ddd948f8db9370b0a786fbc249caa4595e95b608e4b",
+    ),
+    official(
+        "hift.pt",
+        83_202_622,
+        "b279d7641eb97ae55b3b540cfba4f953c26492a2df758328a89a4d007ab87a65",
+    ),
+    official(
+        "campplus.onnx",
+        28_303_423,
+        "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73",
+    ),
+    official(
+        "speech_tokenizer_v3.onnx",
+        969_451_503,
+        "23236a74175dbdda47afc66dbadd5bcb41303c467a57c261cb8539ad9db9208d",
+    ),
+    official(
+        "CosyVoice-BlankEN/config.json",
+        659,
+        "168aa1bd401abc3bc262ba15ba4e499627a8b4e006e9d050b47c22de20660185",
+    ),
+    official(
+        "CosyVoice-BlankEN/generation_config.json",
+        242,
+        "e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6",
+    ),
+    official(
+        "CosyVoice-BlankEN/model.safetensors",
+        988_097_824,
+        "130282af0dfa9fe5840737cc49a0d339d06075f83c5a315c3372c9a0740d0b96",
+    ),
+    official(
+        "CosyVoice-BlankEN/tokenizer_config.json",
+        1_287,
+        "482bd979881423375ca5414e4e0d94cd7c5349dbb17fffd46b4d36d71e62a1bc",
+    ),
+    official(
+        "CosyVoice-BlankEN/vocab.json",
+        2_776_833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+    official(
+        "CosyVoice-BlankEN/merges.txt",
+        1_402_109,
+        "ac8ff86a72bee70828fbc1119bc4398c6f3a9a6e490d7b0dbe917be025478bd0",
+    ),
+];
+
+const COSYVOICE_SIZE: u64 = {
+    let mut total = 0;
+    let mut i = 0;
+    while i < COSYVOICE_FILES.len() {
+        total += COSYVOICE_FILES[i].size;
+        i += 1;
+    }
+    total
+};
+
 const SPECS: &[Spec] = &[
+    Spec {
+        id: COSYVOICE_ID,
+        name: "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+        family: "CosyVoice3",
+        package: "cosyvoice3",
+        hash: "",
+        size: COSYVOICE_SIZE,
+    },
     Spec {
         id: "kokoro-int8",
         name: "Kokoro · INT8",
@@ -129,6 +255,13 @@ const SPECS: &[Spec] = &[
     },
 ];
 
+fn cosyvoice_complete(dir: &Path) -> bool {
+    COSYVOICE_FILES.iter().all(|file| {
+        fs::metadata(dir.join(file.path))
+            .is_ok_and(|info| info.is_file() && info.len() == file.size)
+    })
+}
+
 fn present(dir: &Path, name: &str) -> bool {
     fs::metadata(dir.join(name)).is_ok_and(|info| info.is_file() && info.len() > 0)
 }
@@ -139,6 +272,7 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
         family: spec.family,
         package: spec.package,
         size_bytes: spec.size,
+        recommended: spec.id == COSYVOICE_ID,
         installed: false,
         has_files: dir.is_dir(),
         loaded: false,
@@ -210,8 +344,15 @@ pub fn install(
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(1800))
+        .timeout(Duration::from_secs(7200))
+        .user_agent(concat!("tfy-bgm/", env!("CARGO_PKG_VERSION")))
+        .referer(false)
         .build()?;
+    let source = DownloadSource::parse(source)?;
+    if spec.id == COSYVOICE_ID {
+        return install_cosyvoice3(app, &client, &target, &source, job_id, token);
+    }
+    let source = source.legacy_mirror();
     if spec.family == "ZipVoice" {
         for &(file, url, hash, size) in AUXILIARY {
             let valid_size = fs::metadata(root.join(file))
@@ -301,24 +442,170 @@ pub fn install(
         .find(|dir| dir.is_dir() && entry(spec, dir).complete())
         .context("模型压缩包缺少推理文件")?;
     check_cancelled(token)?;
-    if target.exists() {
-        let backup_dir = tempfile::Builder::new()
-            .prefix(".incomplete-")
-            .tempdir_in(&root)?
-            .keep();
-        let backup = backup_dir.join(package_dir(spec));
-        fs::rename(&target, &backup).context("无法移开原有的不完整模型目录")?;
-        if let Err(err) = fs::rename(staged, &target) {
-            fs::rename(&backup, &target)
-                .with_context(|| format!("未能恢复原目录，文件保存在 {}", backup.display()))?;
-            let _ = fs::remove_dir_all(&backup_dir);
-            return Err(err).context("安装 TTS 模型失败");
+    publish_model(&staged, &target)
+}
+
+fn publish_model(staged: &Path, target: &Path) -> Result<()> {
+    match target.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return fs::rename(staged, target).context("安装 TTS 模型失败");
         }
-        fs::remove_dir_all(&backup_dir).context("模型已安装，但清理旧模型副本失败")?;
-    } else {
-        fs::rename(staged, &target).context("安装 TTS 模型失败")?;
+        Ok(info)
+            if info.is_dir()
+                && target.canonicalize()?
+                    == target
+                        .parent()
+                        .context("模型目录无效")?
+                        .canonicalize()?
+                        .join(target.file_name().context("模型目录无效")?) => {}
+        Ok(_) => bail!("现有模型路径不是普通目录，无法替换"),
+        Err(error) => return Err(error).context("无法检查现有模型目录"),
+    }
+    let backup_dir = tempfile::Builder::new()
+        .prefix(".incomplete-")
+        .tempdir_in(target.parent().context("模型目录无效")?)?;
+    let backup = backup_dir.path().join("model");
+    fs::rename(target, &backup).context("无法移开原有的不完整模型目录")?;
+    if let Err(error) = fs::rename(staged, target) {
+        if let Err(restore) = fs::rename(&backup, target) {
+            let kept = backup_dir.keep();
+            return Err(restore).with_context(|| {
+                format!("安装失败且无法恢复原模型，原文件保存在 {}", kept.display())
+            });
+        }
+        return Err(error).context("安装 TTS 模型失败");
     }
     Ok(())
+}
+
+enum DownloadSource<'a> {
+    Default,
+    ModelScope { origin: String, repo: String },
+    Mirror(&'a str),
+}
+
+impl<'a> DownloadSource<'a> {
+    fn parse(source: &'a str) -> Result<Self> {
+        if source.is_empty() {
+            return Ok(Self::Default);
+        }
+        let url = reqwest::Url::parse(source).context("无效的 TTS 下载源")?;
+        if !matches!(url.host_str(), Some("modelscope.cn" | "www.modelscope.cn"))
+            || !matches!(url.path(), "/models") && !url.path().starts_with("/models/")
+        {
+            return Ok(Self::Mirror(source));
+        }
+        let parts: Vec<_> = url.path().trim_end_matches('/').split('/').collect();
+        let (owner, name) = match parts.as_slice() {
+            ["", "models", owner, name] | ["", "models", owner, name, "files"] => (*owner, *name),
+            _ => bail!("请输入 ModelScope 模型仓库首页或 /files 地址"),
+        };
+        if ![owner, name].iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        }) {
+            bail!("ModelScope 模型仓库名称无效");
+        }
+        if source == DEFAULT_TTS_DOWNLOAD_URL {
+            return Ok(Self::Default);
+        }
+        Ok(Self::ModelScope {
+            origin: url.origin().ascii_serialization(),
+            repo: format!("{owner}/{name}"),
+        })
+    }
+
+    fn legacy_mirror(&self) -> &str {
+        match self {
+            Self::Mirror(source) => source,
+            _ => "",
+        }
+    }
+
+    fn cosyvoice_url(&self, file: &CosyVoiceFile) -> Result<reqwest::Url> {
+        let default_origin = "https://www.modelscope.cn";
+        let (origin, repo, revision) = if file.official {
+            (
+                default_origin,
+                COSYVOICE_OFFICIAL_REPO,
+                COSYVOICE_OFFICIAL_REV,
+            )
+        } else if let Self::ModelScope { origin, repo } = self {
+            (
+                origin.as_str(),
+                repo.as_str(),
+                if repo == COSYVOICE_ONNX_REPO {
+                    COSYVOICE_ONNX_REV
+                } else {
+                    "master"
+                },
+            )
+        } else {
+            (default_origin, COSYVOICE_ONNX_REPO, COSYVOICE_ONNX_REV)
+        };
+        let mut url = reqwest::Url::parse(&format!("{origin}/api/v1/models/{repo}/repo"))?;
+        url.query_pairs_mut()
+            .append_pair("Revision", revision)
+            .append_pair("FilePath", file.path);
+        Ok(url)
+    }
+}
+
+pub fn validate_download_source(source: &str) -> Result<()> {
+    DownloadSource::parse(source).map(|_| ())
+}
+
+fn install_cosyvoice3(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    target: &Path,
+    source: &DownloadSource<'_>,
+    job_id: uuid::Uuid,
+    token: &CancellationToken,
+) -> Result<()> {
+    let root = target.parent().context("模型目录无效")?;
+    let staging = tempfile::tempdir_in(root)?;
+    let mut received = 0;
+    for file in COSYVOICE_FILES {
+        check_cancelled(token)?;
+        let url = source.cosyvoice_url(file)?;
+        let destination = staging.path().join(file.path);
+        fs::create_dir_all(destination.parent().context("模型文件路径无效")?)?;
+        let temporary = download_verified(
+            client,
+            staging.path(),
+            token,
+            file.path,
+            url.as_str(),
+            file.hash,
+            file.size,
+            |bytes| {
+                let _ = app.emit(
+                    "tts-download-progress",
+                    DownloadProgress {
+                        job_id,
+                        id: COSYVOICE_ID,
+                        file: file.path,
+                        received: received + bytes,
+                        total: COSYVOICE_SIZE,
+                    },
+                );
+            },
+        )?;
+        temporary.persist(destination)?;
+        received += file.size;
+    }
+    if !cosyvoice_complete(staging.path()) {
+        bail!("CosyVoice3 模型文件不完整");
+    }
+    let config = target.join("runtime.json");
+    if config.symlink_metadata().is_ok_and(|info| info.is_file()) {
+        fs::copy(config, staging.path().join("runtime.json"))?;
+    }
+    check_cancelled(token)?;
+    publish_model(staging.path(), target)
 }
 
 struct CancellableReader<'a, R> {
@@ -346,6 +633,32 @@ fn download(
     hash: &str,
     total: u64,
 ) -> Result<tempfile::NamedTempFile> {
+    download_verified(client, root, token, file, url, hash, total, |received| {
+        let _ = app.emit(
+            "tts-download-progress",
+            DownloadProgress {
+                job_id,
+                id,
+                file,
+                received,
+                total,
+            },
+        );
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_verified(
+    client: &reqwest::Client,
+    root: &Path,
+    token: &CancellationToken,
+    file: &str,
+    url: &str,
+    hash: &str,
+    total: u64,
+    mut progress: impl FnMut(u64),
+) -> Result<tempfile::NamedTempFile> {
+    progress(0);
     let mut response =
         tauri::async_runtime::block_on(token.run_until_cancelled(client.get(url).send()))
             .context("语音任务已取消")?
@@ -355,16 +668,6 @@ fn download(
     let mut hasher = Sha256::new();
     let mut received = 0;
     let mut last = Instant::now();
-    let _ = app.emit(
-        "tts-download-progress",
-        DownloadProgress {
-            job_id,
-            id,
-            file,
-            received,
-            total,
-        },
-    );
     loop {
         let Some(chunk) =
             tauri::async_runtime::block_on(token.run_until_cancelled(response.chunk()))
@@ -381,21 +684,132 @@ fn download(
         hasher.update(&chunk);
         output.write_all(&chunk)?;
         if last.elapsed() >= Duration::from_millis(200) || received == total {
-            let _ = app.emit(
-                "tts-download-progress",
-                DownloadProgress {
-                    job_id,
-                    id,
-                    file,
-                    received,
-                    total,
-                },
-            );
+            progress(received);
             last = Instant::now();
         }
     }
-    if received != total || format!("{:x}", hasher.finalize()) != hash {
+    if received != total {
+        bail!("{file} 大小与发布文件不符");
+    }
+    if format!("{:x}", hasher.finalize()) != hash {
         bail!("{file} 的 SHA-256 校验失败");
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sources_route_modelscope_to_cosyvoice_and_flat_mirrors_to_sherpa() {
+        let file = &COSYVOICE_FILES[0];
+        for source in [
+            DEFAULT_TTS_DOWNLOAD_URL,
+            "https://modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX",
+        ] {
+            let source = DownloadSource::parse(source).unwrap();
+            assert_eq!(source.legacy_mirror(), "");
+            let url = source.cosyvoice_url(file).unwrap();
+            assert!(
+                url.path()
+                    .ends_with("/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX/repo")
+            );
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "Revision" && value == COSYVOICE_ONNX_REV)
+            );
+        }
+        let source = DownloadSource::parse("https://example.com/models").unwrap();
+        assert_eq!(source.legacy_mirror(), "https://example.com/models");
+        assert_eq!(
+            source.cosyvoice_url(file).unwrap().host_str(),
+            Some("www.modelscope.cn")
+        );
+        let custom =
+            DownloadSource::parse("https://www.modelscope.cn/models/example/mirror/files").unwrap();
+        assert!(
+            custom
+                .cosyvoice_url(file)
+                .unwrap()
+                .path()
+                .ends_with("/example/mirror/repo")
+        );
+        assert!(
+            custom
+                .cosyvoice_url(&COSYVOICE_FILES[2])
+                .unwrap()
+                .path()
+                .contains(COSYVOICE_OFFICIAL_REPO)
+        );
+        assert!(DownloadSource::parse("https://modelscope.cn/models/owner").is_err());
+    }
+
+    #[test]
+    fn failed_publish_restores_partial_install() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("cosyvoice3");
+        let staged = root.path().join("staged");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("runtime.json"), b"{}").unwrap();
+        assert!(publish_model(&staged, &target).is_err());
+        assert_eq!(fs::read(target.join("runtime.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn download_checks_size_and_digest_before_installing() {
+        use std::net::TcpListener;
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let hash = format!("{:x}", Sha256::digest(b"abc"));
+        for (expected_hash, size, succeeds) in [
+            (hash.as_str(), 3, true),
+            ("wrong", 3, false),
+            (hash.as_str(), 2, false),
+        ] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).unwrap();
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+                    )
+                    .unwrap();
+            });
+            let mut bytes = Vec::new();
+            let result = download_verified(
+                &client,
+                dir.path(),
+                &CancellationToken::new(),
+                "model",
+                &url,
+                expected_hash,
+                size,
+                |count| bytes.push(count),
+            );
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(file) = result {
+                assert_eq!(fs::read(file.path()).unwrap(), b"abc");
+                assert_eq!(bytes, [0, 3]);
+            }
+        }
+        let token = CancellationToken::new();
+        token.cancel();
+        let error = download_verified(
+            &client,
+            dir.path(),
+            &token,
+            "model",
+            "http://127.0.0.1:1",
+            &hash,
+            3,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("取消"));
+    }
 }

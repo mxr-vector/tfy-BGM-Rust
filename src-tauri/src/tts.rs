@@ -6,6 +6,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig};
+
+mod cosyvoice;
+mod kokoro;
+mod zipvoice;
 use tauri::{
     AppHandle, Emitter, Manager, State,
     ipc::{InvokeBody, Request, Response},
@@ -32,7 +36,21 @@ static LOADED_PATH: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::n
 
 struct LoadedTts {
     path: String,
-    engine: OfflineTts,
+    engine: TtsEngine,
+}
+
+enum TtsEngine {
+    Sherpa(OfflineTts),
+    CosyVoice(cosyvoice::Engine),
+}
+
+impl LoadedTts {
+    fn is_alive(&mut self) -> bool {
+        match &mut self.engine {
+            TtsEngine::Sherpa(_) => true,
+            TtsEngine::CosyVoice(engine) => engine.is_alive(),
+        }
+    }
 }
 
 fn set_engine(slot: &mut Option<LoadedTts>, engine: Option<LoadedTts>) {
@@ -40,7 +58,16 @@ fn set_engine(slot: &mut Option<LoadedTts>, engine: Option<LoadedTts>) {
     *slot = engine;
 }
 
+fn clear_dead_engine(slot: &mut Option<LoadedTts>) {
+    if slot.as_mut().is_some_and(|loaded| !loaded.is_alive()) {
+        set_engine(slot, None);
+    }
+}
+
 fn catalog(root: &Path) -> Vec<tts_models::TtsModel> {
+    if let Some(mut slot) = ENGINE.try_lock() {
+        clear_dead_engine(&mut slot);
+    }
     let mut models = tts_models::catalog(root);
     let loaded = LOADED_PATH.read();
     for model in &mut models {
@@ -175,10 +202,10 @@ pub struct SynthesisResult {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SynthesisProgress {
-    job_id: uuid::Uuid,
-    current: usize,
-    total: usize,
+pub(super) struct SynthesisProgress {
+    pub(super) job_id: uuid::Uuid,
+    pub(super) current: usize,
+    pub(super) total: usize,
 }
 
 async fn worker<T: Send + 'static>(
@@ -221,13 +248,9 @@ fn validated_source(source: &str, tts: bool) -> Result<String> {
         bail!("请输入有效的 HTTP 或 HTTPS 地址");
     }
     if tts && (url.query().is_some() || url.fragment().is_some()) {
-        bail!("TTS 下载源需要使用可直接拼接文件名的目录地址");
+        bail!("TTS 下载源不能包含查询参数或片段");
     }
-    if tts {
-        Ok(source.trim_end_matches('/').to_owned())
-    } else {
-        Ok(source.to_owned())
-    }
+    Ok(source.trim_end_matches('/').to_owned())
 }
 
 #[tauri::command]
@@ -237,6 +260,9 @@ pub fn save_model_download_source(
     url: String,
 ) -> CommandResult<String> {
     let source = validated_source(&url, tts).map_err(|error| format!("{error:#}"))?;
+    if tts {
+        tts_models::validate_download_source(&source).map_err(|error| error.to_string())?;
+    }
     state
         .save_model_download_url(tts, source)
         .map_err(|error| format!("{error:#}"))
@@ -254,8 +280,8 @@ pub fn open_model_download_source(
         state.asr_download_url()
     };
     let source = validated_source(&source, tts).map_err(|error| format!("{error:#}"))?;
-    let url = if source.is_empty() {
-        tts_models::RELEASE_URL
+    let url = if source.is_empty() && tts {
+        bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL
     } else {
         &source
     };
@@ -273,13 +299,8 @@ pub async fn load_tts_model(app: AppHandle, id: String) -> CommandResult<()> {
             if !model.installed {
                 bail!("模型文件不齐全，请先安装模型");
             }
-            if engine
-                .as_ref()
-                .is_some_and(|loaded| loaded.path == model.path)
-            {
-                set_engine(engine, None);
-            }
-            let loaded = create_engine(&root, &model)?;
+            set_engine(engine, None);
+            let loaded = create_engine(&root, &model, &CancellationToken::new())?;
             set_engine(engine, Some(loaded));
             Ok(())
         })
@@ -426,7 +447,7 @@ pub async fn save_tts_audio(app: AppHandle, name: String) -> CommandResult<bool>
     .await
 }
 
-fn result_dir(app: &AppHandle) -> Result<PathBuf> {
+pub(super) fn result_dir(app: &AppHandle) -> Result<PathBuf> {
     Ok(app.path().app_cache_dir()?.join("tts"))
 }
 
@@ -436,7 +457,12 @@ fn is_result_name(name: &str) -> bool {
         .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn prune_results(dir: &Path, incoming: u64, max_results: usize, max_bytes: u64) -> Result<()> {
+pub(super) fn prune_results(
+    dir: &Path,
+    incoming: u64,
+    max_results: usize,
+    max_bytes: u64,
+) -> Result<()> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -471,7 +497,10 @@ fn synthesize(
 ) -> Result<SynthesisResult> {
     check_cancelled(token)?;
     tts_script::validate_segments(&mut request.segments, MAX_DURATION_MS)?;
-    if !matches!(request.family.as_str(), "Kokoro" | "ZipVoice") {
+    if !matches!(
+        request.family.as_str(),
+        "Kokoro" | "ZipVoice" | "CosyVoice3"
+    ) {
         bail!("未知的 TTS 模型类别");
     }
     if request
@@ -485,100 +514,147 @@ fn synthesize(
     if !model.installed || model.family != request.family {
         bail!("模型文件不齐全或型号不匹配，请检查模型配置");
     }
-    let mut generation = GenerationConfig {
-        silence_scale: 0.3,
-        ..GenerationConfig::default()
-    };
-    if model.family == "Kokoro" {
-        generation.sid = request.voice_id;
+    let reference = if model.family == "Kokoro" {
+        None
     } else {
-        generation.reference_text = Some(
-            request
-                .reference_text
-                .take()
-                .map(|text| text.trim().to_owned())
-                .filter(|text| speech_audio::valid_reference_text(text))
-                .context("请填写与参考录音完全对应的参考文本")?,
-        );
-        let reference = request
+        let audio = request
             .reference_audio
             .as_deref()
-            .context("ZipVoice 需要 5–15 秒参考音频")?;
-        generation.reference_audio = Some(speech_audio::read_reference(reference)?);
-        generation.reference_sample_rate = speech_audio::REFERENCE_RATE as i32;
-        generation.num_steps = 4;
-    }
+            .context("请提供参考录音")?;
+        let text = request
+            .reference_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| speech_audio::valid_reference_text(text))
+            .context("请填写与参考录音完全对应的参考文本")?;
+        Some((speech_audio::read_reference(audio)?, text))
+    };
     check_cancelled(token)?;
+    clear_dead_engine(slot);
     if slot.as_ref().is_none_or(|loaded| loaded.path != model.path) {
+        let _ = app.emit(
+            "tts-synthesis-progress",
+            SynthesisProgress {
+                job_id,
+                current: 0,
+                total: request.segments.len(),
+            },
+        );
         set_engine(slot, None);
-        let loaded = create_engine(root, &model)?;
+        let loaded = create_engine(root, &model, token)?;
         check_cancelled(token)?;
         set_engine(slot, Some(loaded));
     }
-    let engine = &slot.as_ref().unwrap().engine;
-    let sample_rate = u32::try_from(engine.sample_rate())
-        .ok()
-        .filter(|rate| (8_000..=65_535).contains(rate))
-        .context("模型的采样率无效")?;
-    if model.family == "Kokoro" && !(0..engine.num_speakers()).contains(&generation.sid) {
-        bail!("所选 Kokoro 语音不可用");
-    }
-    synthesize_track(app, request, job_id, token, engine, generation, sample_rate)
+    let result = match &mut slot.as_mut().context("TTS 模型未加载")?.engine {
+        TtsEngine::Sherpa(engine) => {
+            let sample_rate = sherpa_sample_rate(engine)?;
+            let mut generation = match (model.family, reference) {
+                ("Kokoro", _) => kokoro::generation(request.voice_id, engine)?,
+                ("ZipVoice", Some((audio, text))) => zipvoice::generation(audio, text),
+                _ => bail!("未知的 TTS 模型类别"),
+            };
+            synthesize_track(
+                app,
+                &request.segments,
+                job_id,
+                token,
+                sample_rate,
+                |text, speed| {
+                    generation.speed = speed;
+                    generate_sherpa(engine, &generation, text, sample_rate, token)
+                },
+            )
+        }
+        TtsEngine::CosyVoice(engine) => {
+            let (audio, reference_text) = reference.context("请提供参考录音")?;
+            let scratch = tempfile::tempdir()?;
+            let prompt = scratch.path().join("prompt.wav");
+            let output = scratch.path().join("speech.wav");
+            crate::separation::write_wav16_slices(
+                &prompt,
+                &[&audio],
+                speech_audio::REFERENCE_RATE,
+            )?;
+            let sample_rate = engine.sample_rate();
+            synthesize_track(
+                app,
+                &request.segments,
+                job_id,
+                token,
+                sample_rate,
+                |text, speed| engine.generate(text, reference_text, &prompt, &output, speed, token),
+            )
+        }
+    };
+    clear_dead_engine(slot);
+    result
 }
 
-fn create_engine(root: &Path, model: &tts_models::TtsModel) -> Result<LoadedTts> {
-    let path = Path::new(&model.path);
-    let mut config = OfflineTtsConfig::default();
-    config.model.num_threads =
-        std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
-    config.max_num_sentences = 3;
-    let join = |file: &str| path.join(file).to_string_lossy().into_owned();
-    if model.family == "Kokoro" {
-        config.model.kokoro.model = Some(join(model.acoustic_file()));
-        config.model.kokoro.voices = Some(join("voices.bin"));
-        config.model.kokoro.tokens = Some(join("tokens.txt"));
-        config.model.kokoro.lexicon = Some(format!(
-            "{},{}",
-            join("lexicon-us-en.txt"),
-            join("lexicon-zh.txt")
-        ));
+fn sherpa_sample_rate(engine: &OfflineTts) -> Result<u32> {
+    u32::try_from(engine.sample_rate())
+        .ok()
+        .filter(|rate| (8_000..=65_535).contains(rate))
+        .context("模型的采样率无效")
+}
+
+fn create_engine(
+    root: &Path,
+    model: &tts_models::TtsModel,
+    token: &CancellationToken,
+) -> Result<LoadedTts> {
+    let engine = if model.family == "CosyVoice3" {
+        TtsEngine::CosyVoice(cosyvoice::Engine::load(Path::new(&model.path), token)?)
     } else {
-        let (encoder, decoder) = model.zipvoice_files();
-        let deps = root.join(tts_models::DIR);
-        config.model.zipvoice.tokens = Some(join("tokens.txt"));
-        config.model.zipvoice.encoder = Some(join(encoder));
-        config.model.zipvoice.decoder = Some(join(decoder));
-        config.model.zipvoice.vocoder =
-            Some(deps.join("vocos_24khz.onnx").to_string_lossy().into_owned());
-        config.model.zipvoice.lexicon = Some(format!(
-            "{},{}",
-            join("lexicon.txt"),
-            deps.join("lexicon-en-us.txt").display()
-        ));
-        config.model.zipvoice.feat_scale = 0.1;
-        config.model.zipvoice.t_shift = 0.5;
-        config.model.zipvoice.target_rms = 0.1;
-        config.model.zipvoice.guidance_scale = 1.0;
-    }
-    let engine = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
+        let mut config = OfflineTtsConfig::default();
+        config.model.num_threads =
+            std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
+        config.max_num_sentences = 3;
+        match model.family {
+            "Kokoro" => kokoro::configure(&mut config, model),
+            "ZipVoice" => zipvoice::configure(&mut config, root, model),
+            _ => bail!("未知的 TTS 模型类别"),
+        }
+        let engine = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
+        sherpa_sample_rate(&engine)?;
+        TtsEngine::Sherpa(engine)
+    };
     Ok(LoadedTts {
         path: model.path.clone(),
         engine,
     })
 }
 
+fn generate_sherpa(
+    engine: &OfflineTts,
+    config: &GenerationConfig,
+    text: &str,
+    sample_rate: u32,
+    token: &CancellationToken,
+) -> Result<Vec<f32>> {
+    let cancel = token.clone();
+    let audio = engine.generate_with_config(
+        text,
+        config,
+        Some(move |_: &[f32], _: f32| !cancel.is_cancelled()),
+    );
+    check_cancelled(token)?;
+    let audio = audio
+        .filter(|audio| audio.sample_rate() == sample_rate as i32)
+        .context("未生成有效语音")?;
+    Ok(audio.samples().to_vec())
+}
+
 fn synthesize_track(
     app: &AppHandle,
-    request: SynthesisRequest,
+    segments: &[TtsSegment],
     job_id: uuid::Uuid,
     token: &CancellationToken,
-    engine: &OfflineTts,
-    mut generation: GenerationConfig,
     sample_rate: u32,
+    mut generate: impl FnMut(&str, f32) -> Result<Vec<f32>>,
 ) -> Result<SynthesisResult> {
     let mut track = Vec::new();
-    let timed = request.segments[0].start_ms.is_some();
-    let total = request.segments.len();
+    let timed = segments[0].start_ms.is_some();
+    let total = segments.len();
     let _ = app.emit(
         "tts-synthesis-progress",
         SynthesisProgress {
@@ -587,31 +663,20 @@ fn synthesize_track(
             total,
         },
     );
-    for (index, segment) in request.segments.iter().enumerate() {
-        let generate = |config: &GenerationConfig| -> Result<Vec<f32>> {
-            check_cancelled(token)?;
-            let cancel = token.clone();
-            let audio = engine.generate_with_config(
-                segment.text.trim(),
-                config,
-                Some(move |_: &[f32], _: f32| !cancel.is_cancelled()),
-            );
-            check_cancelled(token)?;
-            let audio = audio
-                .filter(|audio| {
-                    !audio.samples().is_empty() && audio.sample_rate() == sample_rate as i32
-                })
-                .context("未生成有效语音")?;
-            speech_audio::polish_segment(audio.samples(), sample_rate)
-        };
+    for (index, segment) in segments.iter().enumerate() {
         let mut process = || -> Result<()> {
-            generation.speed = 1.0;
-            let mut samples = generate(&generation)?;
+            let mut generate = |speed| {
+                check_cancelled(token)?;
+                let samples = generate(segment.text.trim(), speed)?;
+                check_cancelled(token)?;
+                speech_audio::polish_segment(&samples, sample_rate)
+            };
+            let mut samples = generate(1.0)?;
             if let Some((start, end)) = segment.start_ms.zip(segment.end_ms) {
                 let capacity = frames(end, sample_rate) - frames(start, sample_rate);
                 if samples.len() > capacity {
-                    generation.speed = (samples.len() as f32 / capacity as f32 * 1.05).min(2.0);
-                    if let Ok(faster) = generate(&generation)
+                    let speed = (samples.len() as f32 / capacity as f32 * 1.05).min(2.0);
+                    if let Ok(faster) = generate(speed)
                         && faster.len() < samples.len()
                     {
                         samples = faster;
@@ -691,11 +756,11 @@ fn synthesize_track(
     })
 }
 
-fn frames(ms: u64, rate: u32) -> usize {
+pub(super) fn frames(ms: u64, rate: u32) -> usize {
     ((ms * u64::from(rate) + 500) / 1000) as usize
 }
 
-fn append_segment(
+pub(super) fn append_segment(
     track: &mut Vec<f32>,
     segment: &TtsSegment,
     samples: &[f32],

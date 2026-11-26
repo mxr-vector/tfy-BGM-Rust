@@ -5,16 +5,16 @@ import Icon from '@/components/Icon.vue';
 import TtsScriptEditor from './TtsScriptEditor.vue';
 import { useSoundRecording } from '@/composables/useSoundRecording';
 import { COMMANDS, EVENTS } from '@/lib/constants';
-import { formatTime, normalizeError } from '@/lib/format';
+import { formatBytes, formatTime, normalizeError } from '@/lib/format';
 import { assetUrl, invoke, invokeBinary, listen } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import { suspendPlayback } from '@/stores/audio-engine';
 import { openSettings } from '@/stores/settings';
 import {
   cancelTtsInstall, cancelTtsJob, installTtsModel, openModelDownloadSource, refreshTtsModels,
-  ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelBusy,
-  ttsModels, ttsModelsLoading, ttsSynthesizing,
-  type TtsJob,
+  showCosyVoiceRuntimeSetup, ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling,
+  ttsInstalling, ttsModelBusy, ttsModels, ttsModelsLoading, ttsPreferredFamily,
+  ttsPreferredModelIds, ttsSynthesizing, type TtsFamily, type TtsJob,
 } from '@/stores/tts';
 
 interface BuiltinReference { audio: number[]; text: string | null }
@@ -27,9 +27,24 @@ const referenceModeOptions = [
 const RECORDING_PROMPT = '心之所向，素履所往，生如逆旅，一苇以航。';
 interface SynthesisProgress { jobId: string; current: number; total: number }
 
-const families = ['Kokoro', 'ZipVoice'] as const;
-type Family = typeof families[number];
-const family = ref<Family>('Kokoro');
+const families = ['CosyVoice3', 'Kokoro', 'ZipVoice'] as const;
+const familyDescriptions: Record<TtsFamily, string> = {
+  CosyVoice3: '零样本克隆',
+  Kokoro: '自然朗读',
+  ZipVoice: '声音克隆',
+};
+// Wait for a fresh catalog after entering the workspace, even if Settings populated the cache.
+const cachedCatalog = ttsModels.value;
+const catalog = computed(() => ttsModels.value === cachedCatalog ? null : ttsModels.value);
+const defaultModel = computed(() => {
+  const models = catalog.value ?? [];
+  return models.find(model => model.installed && model.recommended)
+    ?? models.find(model => model.installed && model.family === 'Kokoro')
+    ?? models.find(model => model.installed && model.family === 'ZipVoice')
+    ?? models.find(model => model.installed)
+    ?? models[0];
+});
+const family = computed(() => ttsPreferredFamily.value ?? defaultModel.value?.family ?? 'CosyVoice3');
 const synthesisProgress = ref<SynthesisProgress | null>(null);
 const synthesisCancelling = ref(false);
 let synthesisJob: TtsJob | null = null;
@@ -37,7 +52,6 @@ let disposed = false;
 const scriptEditor = useTemplateRef('scriptEditor');
 const voiceSearch = ref('');
 const voiceId = ref(3);
-const modelId = ref('');
 const referenceText = ref('');
 const referenceAudio = ref<number[] | null>(null);
 const referenceMode = ref<ReferenceMode>('builtin');
@@ -45,28 +59,41 @@ const builtinVoice = ref('');
 const builtinVoices = ref<string[]>([]);
 const referenceKind = ref('');
 const referencePreviewUrl = ref('');
-let initialModelDetection = true;
 const generating = ref(false);
 const recordingClip = ref(false);
 const outputUrl = ref('');
 const outputName = ref('');
 const outputRate = ref(0);
 const outputDuration = ref(0);
-const outputFamily = ref<Family>('Kokoro');
-const familyModels = computed(() => ttsModels.value.filter(model => model.family === family.value));
+const outputFamily = ref<TtsFamily>('CosyVoice3');
+const familyModels = computed(() => catalog.value?.filter(model => model.family === family.value) ?? []);
 const installedModels = computed(() => familyModels.value.filter(model => model.installed));
-const isReady = computed(() => installedModels.value.length > 0);
-const modelOptions = computed(() => installedModels.value.map(model => ({ value: model.id, label: model.name })));
+const selectedModel = computed(() => {
+  const preferredId = ttsPreferredModelIds.value[family.value];
+  return installedModels.value.find(model => model.id === preferredId) ?? installedModels.value[0];
+});
+const modelId = computed(() => selectedModel.value?.id ?? '');
+const isReady = computed(() => Boolean(selectedModel.value));
+const modelOptions = computed(() => installedModels.value
+  .map(model => ({ value: model.id, label: model.recommended ? `${model.name} · 推荐` : model.name })));
+const modelEmptyTitle = computed(() => ttsModelsLoading.value
+  ? '正在扫描本地模型…'
+  : catalog.value === null ? '无法读取模型列表，请刷新后重试' : `${family.value} 模型尚未安装`);
+const modelHelp: Record<TtsFamily, string> = {
+  CosyVoice3: '应用从 ModelScope 下载模型。加载和合成前需配置本地 Python 运行环境。',
+  Kokoro: '适合口播与知识讲解，支持多音色低延迟朗读。',
+  ZipVoice: '支持以 5–15 秒参考音频及对应文本克隆声音。',
+};
 const voiceOptions = computed(() => voiceNames.map((name, id) => ({ value: String(id), label: `${name} · ${id < 3 ? '英' : '中'}` })));
 const visibleVoices = computed(() => voiceOptions.value.filter(voice => voice.value === String(voiceId.value)
   || voice.label.toLowerCase().includes(voiceSearch.value.trim().toLowerCase())));
 const parsingForGeneration = ref(false);
 const generationBlocker = computed(() => {
-  if (!installedModels.value.some(model => model.id === modelId.value)) return '请先安装并选择本地模型';
+  if (!isReady.value) return '请先安装并选择本地模型';
   if (ttsModelBusy.value) return '模型正在忙，请稍后再试';
   if (captureActive.value || recordingClip.value) return '参考音频正在录制或处理';
   if (!scriptEditor.value?.hasText) return '请在左侧输入或导入合成文本';
-  if (family.value === 'ZipVoice') {
+  if (family.value === 'ZipVoice' || family.value === 'CosyVoice3') {
     if (!referenceAudio.value) return '请先载入或录制参考音色';
     if (!referenceText.value.trim()) return '请录制参考音色';
   }
@@ -90,21 +117,10 @@ async function refreshBuiltinVoices(): Promise<void> {
   }
 }
 
-function syncModels(): void {
-  if (initialModelDetection && ttsModels.value.length) {
-    const hasKokoro = ttsModels.value.some(model => model.installed && model.family === 'Kokoro');
-    const hasZipVoice = ttsModels.value.some(model => model.installed && model.family === 'ZipVoice');
-    if (!hasKokoro && hasZipVoice) family.value = 'ZipVoice';
-    initialModelDetection = false;
-  }
-  selectFamilyModel();
-}
-
-function selectFamilyModel(): void {
-  const candidate = installedModels.value.find(model => model.id === modelId.value)
-    ?? installedModels.value[0];
-  const nextModelId = candidate?.id ?? '';
-  modelId.value = nextModelId;
+function selectModel(value: string): void {
+  if (!installedModels.value.some(model => model.id === value)) return;
+  ttsPreferredFamily.value = family.value;
+  ttsPreferredModelIds.value[family.value] = value;
 }
 
 function setReferenceMode(value: string): void {
@@ -145,7 +161,7 @@ async function loadBuiltinReference(): Promise<void> {
   const model = modelId.value;
   try {
     const reference = await invoke<BuiltinReference>(COMMANDS.loadTtsBuiltinReference, { voice });
-    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model
+    if (disposed || family.value === 'Kokoro' || modelId.value !== model
       || referenceMode.value !== 'builtin' || builtinVoice.value !== voice) return;
     setReferenceAudio(Uint8Array.from(reference.audio), voice, reference.text);
   } catch (error) { toast(`内置参考音频不可用：${normalizeError(error)}`, 'error'); }
@@ -162,7 +178,7 @@ async function acceptReference(blob: Blob, label: string): Promise<void> {
     if (!await checkClipDuration(bytes.slice(0))) return;
     if (disposed) return;
     const normalized = await invokeBinary<ArrayBuffer>(COMMANDS.normalizeTtsReference, bytes);
-    if (disposed || family.value !== 'ZipVoice' || modelId.value !== model || referenceMode.value !== 'custom') return;
+    if (disposed || family.value === 'Kokoro' || modelId.value !== model || referenceMode.value !== 'custom') return;
     setReferenceAudio(new Uint8Array(normalized), label, RECORDING_PROMPT);
     toast('参考音频已响度归一化为 16 kHz 单声道', 'success');
   } catch (error) { toast(`参考音频不可用：${normalizeError(error)}`, 'error'); }
@@ -228,8 +244,8 @@ async function generate(): Promise<void> {
     modelId: modelId.value,
     voiceId: voiceId.value,
     segments: editor.segments,
-    referenceAudio: selectedFamily === 'ZipVoice' ? referenceAudio.value : null,
-    referenceText: selectedFamily === 'ZipVoice' ? referenceText.value.trim() : null,
+    referenceAudio: selectedFamily !== 'Kokoro' ? referenceAudio.value : null,
+    referenceText: selectedFamily !== 'Kokoro' ? referenceText.value.trim() : null,
   };
   let unlisten: (() => void) | null = null;
   try {
@@ -275,16 +291,14 @@ async function downloadOutput(): Promise<void> {
   catch (error) { toast(`导出失败：${normalizeError(error)}`, 'error'); }
 }
 
-watch([ttsModels, family], syncModels);
 watch([family, modelId], resetReference);
 watch([modelId, builtinVoice, referenceMode], ([selectedModel, , mode]) => {
-  if (family.value === 'ZipVoice' && selectedModel && mode === 'builtin' && !referenceAudio.value) {
+  if ((family.value === 'ZipVoice' || family.value === 'CosyVoice3') && selectedModel && mode === 'builtin' && !referenceAudio.value) {
     void loadBuiltinReference();
   }
 });
 watch(captureActive, (active) => { if (!active) endCapture(); }, { flush: 'sync' });
 onMounted(() => {
-  syncModels();
   void refreshTtsModels();
   void refreshBuiltinVoices();
 });
@@ -307,7 +321,17 @@ onBeforeUnmount(() => {
     </header>
 
     <nav class="tts-tabs" aria-label="TTS 模型">
-      <button v-for="item in families" :key="item" type="button" :class="{ 'is-active': family === item }" :disabled="captureActive || recordingClip" @click="initialModelDetection = false; family = item">{{ item }}<span>{{ item === 'Kokoro' ? '自然朗读' : '声音克隆' }}</span></button>
+      <button
+        v-for="item in families"
+        :key="item"
+        type="button"
+        :class="{ 'is-active': family === item }"
+        :aria-pressed="family === item"
+        :disabled="captureActive || recordingClip"
+        @click="ttsPreferredFamily = item"
+      >
+        {{ item }}<span>{{ familyDescriptions[item] }}</span>
+      </button>
     </nav>
 
     <div class="tts-layout">
@@ -315,14 +339,26 @@ onBeforeUnmount(() => {
 
       <div class="tts-side">
         <section class="tts-card tts-voice-card">
-          <div class="tts-card-heading"><div><span class="tts-overline">VOICE PALETTE</span><h2>{{ family === 'Kokoro' ? '挑选朗读声音' : '选择克隆音色' }}</h2></div><span class="tts-native">模型原生采样率</span></div>
+          <div class="tts-card-heading"><div><span class="tts-overline">VOICE PALETTE</span><h2>{{ family === 'Kokoro' ? '挑选朗读声音' : family === 'CosyVoice3' ? 'CosyVoice3 零样本克隆' : '选择克隆音色' }}</h2></div><span class="tts-native">模型原生采样率</span></div>
           <div v-if="isReady" class="tts-field">
             <span>本地模型</span>
-            <AppSelect v-model="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择已安装的 TTS 模型" />
+            <AppSelect :model-value="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择已安装的 TTS 模型" @update:model-value="selectModel" />
           </div>
           <template v-if="!isReady">
-            <div class="tts-model-empty"><Icon name="chip"/><strong>{{ ttsModelsLoading ? '正在扫描本地模型…' : `${family} 模型尚未安装` }}</strong><span>{{ family === 'Kokoro' ? '适合口播与知识讲解：自然语调、多语音、低延迟。' : '适合零样本声音克隆：提供 5–15 秒参考音频及对应文本。' }}</span></div>
-            <article v-for="model in familyModels" :key="model.id" class="tts-model-row"><div><strong>{{ model.name }}</strong><span>{{ (model.sizeBytes / 1e9).toFixed(2) }} GB · {{ model.package }}</span></div><button type="button" class="tts-action tts-accent-action" :disabled="ttsModelBusy" @click="installTtsModel(model, 'workspace')">{{ ttsDownloadProgress?.id === model.id ? `${ttsDownloadPercent}%` : ttsInstalling === model.id ? '安装中…' : '下载' }}</button></article>
+            <div class="tts-model-empty">
+              <Icon name="chip" />
+              <strong>{{ modelEmptyTitle }}</strong>
+              <span>{{ modelHelp[family] }}</span>
+            </div>
+            <article v-for="model in familyModels" :key="model.id" class="tts-model-row">
+              <div>
+                <strong :title="model.name">{{ model.name }}</strong>
+                <span>{{ formatBytes(model.sizeBytes) }} · {{ model.package }}{{ model.recommended ? ' · 推荐' : '' }}</span>
+              </div>
+              <button type="button" class="tts-action tts-accent-action" :disabled="ttsModelBusy || ttsModelsLoading" @click="installTtsModel(model, 'workspace')">
+                {{ ttsDownloadProgress?.id === model.id ? `${ttsDownloadPercent}%` : ttsInstalling === model.id ? '准备下载…' : '下载' }}
+              </button>
+            </article>
             <button type="button" class="tts-action" @click="openSettings('models')">前往模型管理</button>
             <button type="button" class="tts-source-link" @click="openModelDownloadSource(true)">访问 TTS 下载源</button>
           </template>
@@ -334,10 +370,10 @@ onBeforeUnmount(() => {
               </div>
             </template>
             <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : '内置音色附带逐字稿；麦克风录音请朗读下方参考句。' }}</p>
-            <template v-if="family === 'ZipVoice'">
+            <template v-if="family === 'ZipVoice' || family === 'CosyVoice3'">
               <div class="tts-field">
                 <span>参考来源</span>
-                <AppSelect :model-value="referenceMode" :options="referenceModeOptions" :disabled="recordingClip || captureActive" label="ZipVoice 参考音色来源" @update:model-value="setReferenceMode" />
+                <AppSelect :model-value="referenceMode" :options="referenceModeOptions" :disabled="recordingClip || captureActive" label="参考音色来源" @update:model-value="setReferenceMode" />
               </div>
               <template v-if="referenceMode === 'builtin'">
                 <div v-if="builtinVoiceOptions.length" class="tts-reference-actions">
@@ -372,6 +408,7 @@ onBeforeUnmount(() => {
               <p v-if="referenceAudio && referenceMode === 'builtin'" class="tts-reference-status">已载入配套逐字稿</p>
             </template>
           </template>
+          <button v-if="family === 'CosyVoice3'" type="button" class="tts-source-link" @click="showCosyVoiceRuntimeSetup">CosyVoice3 运行配置</button>
           <div v-if="ttsInstalling" class="tts-download-status">
             <p v-if="ttsDownloadProgress">{{ ttsDownloadProgress.file }} · {{ (ttsDownloadProgress.received / 1e6).toFixed(1) }} / {{ (ttsDownloadProgress.total / 1e6).toFixed(1) }} MB · {{ ttsDownloadPercent }}%</p>
             <p v-else>正在准备模型下载…</p>

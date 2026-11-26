@@ -39,6 +39,9 @@ const MAX_SEPARATION_MODEL_LEN: usize = 256;
 /// 偏好里留空即表示使用此地址，下载地址的唯一真源放在 core，避免多处定义漂移。
 pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
     "https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B";
+/// CosyVoice3 ONNX 模型默认下载仓库。
+pub const DEFAULT_TTS_DOWNLOAD_URL: &str =
+    "https://www.modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX/files";
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -269,7 +272,7 @@ impl Default for Prefs {
             close_action: CloseAction::Ask,
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
-            tts_download_url: String::new(),
+            tts_download_url: DEFAULT_TTS_DOWNLOAD_URL.to_owned(),
             last_asr_model: None,
             separation_model: None,
             desktop_lyrics_enabled: false,
@@ -425,10 +428,11 @@ impl Prefs {
             DEFAULT_ASR_DOWNLOAD_URL.to_owned()
         };
         let tts_url = self.tts_download_url.trim();
+        let tts_url = tts_url.trim_end_matches('/');
         self.tts_download_url = if is_download_url(tts_url) && !tts_url.contains(['?', '#']) {
-            tts_url.trim_end_matches('/').to_owned()
+            tts_url.to_owned()
         } else {
-            String::new()
+            DEFAULT_TTS_DOWNLOAD_URL.to_owned()
         };
 
         // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，
@@ -900,6 +904,20 @@ mod tests {
         assert!(invalid.models_dir.is_none());
         // 非法地址回退到内置默认地址，而不是留下一个无法请求的链接。
         assert_eq!(invalid.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
+        for url in ["", "file:///models", "https://example.com/files?query=1"] {
+            let prefs = Prefs {
+                tts_download_url: url.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(prefs.tts_download_url, DEFAULT_TTS_DOWNLOAD_URL);
+        }
+        let legacy = Prefs {
+            tts_download_url: " https://example.com/tts/ ".into(),
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(legacy.tts_download_url, "https://example.com/tts");
 
         // Windows canonicalize 的 verbatim 前缀不能写进配置，否则与扫描路径不相等。
         let verbatim = Prefs {
