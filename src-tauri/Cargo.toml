@@ -1,6 +1,6 @@
 [package]
 name = "tfy-bgm"
-version = "1.0.0"
+version = "0.8.0"
 description = "听风吟 · 视频剪辑 BGM 音频素材库（Rust + Tauri 桌面客户端）"
 edition = "2024"
 rust-version = "1.90"
