@@ -51,6 +51,63 @@ def log(message):
     print('[cosyvoice] ' + str(message), file=sys.stderr, flush=True)
 
 
+def pin_high_performance():
+    """把进程绑定到大小核里的 P 核。
+
+    DirectML 每个算子的调度都在主线程上同步提交；线程一旦被调度到 E 核，
+    逐 token 解码会慢 2-3 倍。这里读取 Windows 的 CPU Set EfficiencyClass，
+    只在大核存在时收紧亲和性，避免影响普通机器。
+    """
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        get_info = kernel32.GetSystemCpuSetInformation
+        get_info.restype = wintypes.BOOL
+        length = wintypes.ULONG(0)
+        get_info(None, 0, ctypes.byref(length), None, 0)
+        if not length.value:
+            return
+        buffer = ctypes.create_string_buffer(length.value)
+        if not get_info(buffer, length.value, ctypes.byref(length), None, 0):
+            return
+        entries = []
+        offset = 0
+        while offset + 20 <= length.value:
+            size = ctypes.c_ulong.from_buffer(buffer, offset).value
+            if size < 20:
+                break
+            if ctypes.c_ulong.from_buffer(buffer, offset + 4).value == 0:
+                group = ctypes.c_ushort.from_buffer(buffer, offset + 12).value
+                logical = ctypes.c_ubyte.from_buffer(buffer, offset + 14).value
+                efficiency = ctypes.c_ubyte.from_buffer(buffer, offset + 18).value
+                entries.append((efficiency, group, logical))
+            offset += size
+        if not entries:
+            return
+        best = max(entry[0] for entry in entries)
+        if all(entry[0] == best for entry in entries):
+            return
+        mask = 0
+        count = 0
+        for efficiency, group, logical in entries:
+            if efficiency == best and group == 0:
+                mask |= 1 << logical
+                count += 1
+        if not mask:
+            return
+        # SetProcessAffinityMask 只覆盖单一处理器组（<=64 逻辑核心），已覆盖绝大多数机器。
+        kernel32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+        kernel32.SetProcessAffinityMask.restype = wintypes.BOOL
+        if kernel32.SetProcessAffinityMask(kernel32.GetCurrentProcess(), mask):
+            log(f'已绑定 {count} 个性能核')
+    except Exception as exc:
+        log(f'性能核绑定失败：{exc}')
+
+
 def thread_count():
     return max(1, min(os.cpu_count() or 4, 8))
 
@@ -171,8 +228,21 @@ class LlmOnnx:
         logits = next(item for item in self.session.get_outputs() if item.name == 'logits')
         if int(logits.shape[-1]) != SPEECH_TOKEN_SIZE + 200:
             raise RuntimeError(f'LLM 词表大小异常：{logits.shape[-1]}')
+        # DirectML 在一次多 token 前向之后，同一 session 的逐 token 解码会明显变慢
+        # （约 2-3 倍）。前向填充与自回归解码分开用两个 session，可让解码始终
+        # 走快路径；CPU 没有这个现象，保持单 session 以节省内存。
+        if not use_gpu:
+            self.decode_session = self.session
+        else:
+            decode = make_session(path, use_gpu, intra)
+            if {'CUDAExecutionProvider', 'DmlExecutionProvider'} & set(decode.get_providers()):
+                self.decode_session = decode
+            else:
+                # 显存不足时第二个会话会回退 CPU，这比共享前一个会话还慢。
+                log('第二个 LLM 会话未获得显卡，回退为单会话解码')
+                self.decode_session = self.session
 
-    def step(self, token_ids, token_types, past):
+    def step(self, session, token_ids, token_types, past):
         import numpy as np
         new_length = token_ids.shape[1]
         past_length = 0 if past is None else past[0].shape[2]
@@ -189,7 +259,7 @@ class LlmOnnx:
             feeds.update({name: empty for name in self.past_names})
         else:
             feeds.update(dict(zip(self.past_names, past)))
-        outputs = self.session.run(['logits', *self.present_names], feeds)
+        outputs = session.run(['logits', *self.present_names], feeds)
         return outputs[0], outputs[1:]
 
     def infer(self, text, prompt_text, prompt_speech, seed=NOISE_SEED, min_ratio=2, max_ratio=20):
@@ -212,9 +282,8 @@ class LlmOnnx:
         minimum = int(text.shape[1] * min_ratio)
         maximum = int(text.shape[1] * max_ratio)
         decoded = []
-        past = None
+        logits, past = self.step(self.session, token_ids, token_types, None)
         for index in range(maximum):
-            logits, past = self.step(token_ids, token_types, past)
             scores = logits[0, -1].astype(np.float32)
             scores = scores - scores.max()
             scores -= np.log(np.exp(scores).sum())
@@ -226,6 +295,7 @@ class LlmOnnx:
             decoded.append(token)
             token_ids = np.array([[token]], dtype=np.int64)
             token_types = np.array([[SPEECH_TOKEN_TYPE]], dtype=np.int64)
+            logits, past = self.step(self.decode_session, token_ids, token_types, past)
         if not decoded:
             raise RuntimeError('LLM 没有生成任何语音 Token')
         return decoded
@@ -316,14 +386,14 @@ class HiftOnnx:
 
 
 def speaker_key(prompt_path, prompt_text):
+    # 参考音频每次合成都会写到新的临时路径，路径与 mtime 不适合做缓存键；
+    # 用内容哈希保证同一音色跨请求复用已提取的 prompt 特征。
     digest = hashlib.sha1()
-    digest.update(os.fsencode(os.path.abspath(prompt_path)))
+    with open(prompt_path, 'rb') as prompt_file:
+        for block in iter(lambda: prompt_file.read(1 << 20), b''):
+            digest.update(block)
     digest.update(b'\x00')
     digest.update(prompt_text.encode('utf-8'))
-    try:
-        digest.update(str(os.stat(prompt_path).st_mtime_ns).encode('ascii'))
-    except OSError:
-        pass
     return 'tfy:' + digest.hexdigest()
 
 
@@ -390,6 +460,7 @@ def synthesize(frontend, llm, flow, hift, rate, request):
 def main():
     home, model_dir = sys.argv[1:3]
     sys.path[:0] = [home, os.path.join(home, 'third_party', 'Matcha-TTS')]
+    pin_high_performance()
     import soundfile as sf
     rate, frontend, llm, flow, hift = build_runtime(model_dir)
     reply('ready', sample_rate=rate)
@@ -408,6 +479,7 @@ def main():
 def self_test():
     home, model_dir = sys.argv[1:3]
     sys.path[:0] = [home, os.path.join(home, 'third_party', 'Matcha-TTS')]
+    pin_high_performance()
     import numpy as np
     rate, frontend, llm, flow, hift = build_runtime(model_dir)
     tokens = np.arange(20, dtype=np.int64)[None, :]
