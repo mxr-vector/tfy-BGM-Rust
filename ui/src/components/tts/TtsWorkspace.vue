@@ -12,9 +12,9 @@ import { suspendPlayback } from '@/stores/audio-engine';
 import { openSettings } from '@/stores/settings';
 import {
   cancelTtsInstall, cancelTtsJob, installTtsModel, openModelDownloadSource, refreshTtsModels,
-  showCosyVoiceRuntimeSetup, ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling,
-  ttsInstalling, ttsModelBusy, ttsModels, ttsModelsLoading, ttsPreferredFamily,
-  ttsPreferredModelIds, ttsSynthesizing, type TtsFamily, type TtsJob,
+  ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelBusy,
+  ttsModels, ttsModelsLoading, ttsPreferredFamily, ttsPreferredModelIds, ttsSynthesizing,
+  type TtsFamily, type TtsJob,
 } from '@/stores/tts';
 
 interface BuiltinReference { audio: number[]; text: string | null }
@@ -80,7 +80,7 @@ const modelEmptyTitle = computed(() => ttsModelsLoading.value
   ? '正在扫描本地模型…'
   : catalog.value === null ? '无法读取模型列表，请刷新后重试' : `${family.value} 模型尚未安装`);
 const modelHelp: Record<TtsFamily, string> = {
-  CosyVoice3: '应用从 ModelScope 下载模型。加载和合成前需配置本地 Python 运行环境。',
+  CosyVoice3: '首次加载会自动准备本地运行环境。',
   Kokoro: '适合口播与知识讲解，支持多音色低延迟朗读。',
   ZipVoice: '支持以 5–15 秒参考音频及对应文本克隆声音。',
 };
@@ -355,12 +355,14 @@ onBeforeUnmount(() => {
                 <strong :title="model.name">{{ model.name }}</strong>
                 <span>{{ formatBytes(model.sizeBytes) }} · {{ model.package }}{{ model.recommended ? ' · 推荐' : '' }}</span>
               </div>
-              <button type="button" class="tts-action tts-accent-action" :disabled="ttsModelBusy || ttsModelsLoading" @click="installTtsModel(model, 'workspace')">
-                {{ ttsDownloadProgress?.id === model.id ? `${ttsDownloadPercent}%` : ttsInstalling === model.id ? '准备下载…' : '下载' }}
-              </button>
+              <div class="tts-model-actions">
+                <button type="button" class="tts-action" :title="`访问 ${model.name} 下载源`" @click="openModelDownloadSource(true, model.id)">源</button>
+                <button type="button" class="tts-action tts-accent-action" :disabled="ttsModelBusy || ttsModelsLoading" @click="installTtsModel(model, 'workspace')">
+                  {{ ttsDownloadProgress?.id === model.id ? `${ttsDownloadPercent}%` : ttsInstalling === model.id ? '准备下载…' : '下载' }}
+                </button>
+              </div>
             </article>
             <button type="button" class="tts-action" @click="openSettings('models')">前往模型管理</button>
-            <button type="button" class="tts-source-link" @click="openModelDownloadSource(true)">访问 TTS 下载源</button>
           </template>
           <template v-else>
             <template v-if="family === 'Kokoro'">
@@ -408,7 +410,6 @@ onBeforeUnmount(() => {
               <p v-if="referenceAudio && referenceMode === 'builtin'" class="tts-reference-status">已载入配套逐字稿</p>
             </template>
           </template>
-          <button v-if="family === 'CosyVoice3'" type="button" class="tts-source-link" @click="showCosyVoiceRuntimeSetup">CosyVoice3 运行配置</button>
           <div v-if="ttsInstalling" class="tts-download-status">
             <p v-if="ttsDownloadProgress">{{ ttsDownloadProgress.file }} · {{ (ttsDownloadProgress.received / 1e6).toFixed(1) }} / {{ (ttsDownloadProgress.total / 1e6).toFixed(1) }} MB · {{ ttsDownloadPercent }}%</p>
             <p v-else>正在准备模型下载…</p>
@@ -467,7 +468,7 @@ onBeforeUnmount(() => {
 .tts-reference-status{display:block;margin-top:4px;color:var(--text-3);font-size:11px}
 .tts-native,.tts-live-dot{color:var(--accent-bright);font:10px ui-monospace,Consolas,monospace}
 .tts-download-status{margin-top:10px;color:var(--accent-bright);font-size:11px}
-.tts-source-link{display:flex;align-items:center;gap:6px;margin-top:13px;color:var(--text-3);font-size:11px;text-decoration:none}
+.tts-model-actions{display:flex;flex:0 0 auto;align-items:center;gap:8px;min-width:0}
 .tts-model-empty{display:grid;justify-items:center;gap:4px;margin:7px 0;padding:8px;border:1px dashed var(--line-strong);border-radius:8px;text-align:center}
 .tts-model-empty :deep([data-icon]){color:var(--accent-bright)}
 .tts-model-empty strong{font-size:13px}
@@ -478,7 +479,6 @@ onBeforeUnmount(() => {
 .tts-model-row strong{font-size:12px}
 .tts-model-row span{margin-top:4px;color:var(--text-3);font-size:10px}
 .tts-accent-action{border-color:rgba(25,217,139,.3);color:var(--accent-bright)}
-.tts-source-link:hover{color:var(--accent-bright)}
 .tts-voice-note{margin-top:5px;color:var(--text-3);font-size:11px}
 .tts-voice-preview{display:block;width:100%;height:32px;margin-top:6px}
 .tts-render-card>p{margin:5px 0 7px;color:var(--text-3);font-size:12px}
@@ -504,7 +504,6 @@ onBeforeUnmount(() => {
   .tts-model-empty :deep([data-icon]),.tts-model-empty span{display:none}
   .tts-model-row{padding-block:4px}
   .tts-page :deep(.tts-action){min-height:32px;padding-block:4px}
-  .tts-source-link{display:inline-flex;margin:0 0 0 8px}
   .tts-generate{min-height:36px;margin-top:6px}
 }
 @media(max-width:880px){.tts-layout{grid-template-columns:1fr}}

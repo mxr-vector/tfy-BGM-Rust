@@ -8,10 +8,12 @@ export interface ModalOption {
 export interface ModalField {
   name: string;
   label: string;
-  type?: 'text' | 'select' | 'color';
+  type?: 'text' | 'select' | 'color' | 'textarea';
   value?: string;
   placeholder?: string;
   options?: ModalOption[];
+  /** 多行输入的行数，仅 `textarea` 生效。 */
+  rows?: number;
   /** 只读展示字段：仍随表单返回，但不可编辑。 */
   readonly?: boolean;
 }

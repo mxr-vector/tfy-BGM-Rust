@@ -3857,6 +3857,16 @@ input[type="checkbox"]:indeterminate::after {
   width: 100%;
 }
 
+.modal-textarea {
+  height: auto;
+  min-height: 76px;
+  padding: 9px 11px;
+  line-height: 1.5;
+  resize: vertical;
+  word-break: break-all;
+  font-family: inherit;
+}
+
 .modal-color {
   padding: 3px;
   cursor: pointer;

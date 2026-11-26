@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -31,6 +32,7 @@ const CACHE_MAX_RESULTS: usize = 8;
 const CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 static SYNTHESIS: JobSlot = JobSlot::new();
 static INSTALL: JobSlot = JobSlot::new();
+static LOAD: JobSlot = JobSlot::new();
 static ENGINE: parking_lot::Mutex<Option<LoadedTts>> = parking_lot::Mutex::new(None);
 static LOADED_PATH: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
 
@@ -64,7 +66,7 @@ fn clear_dead_engine(slot: &mut Option<LoadedTts>) {
     }
 }
 
-fn catalog(root: &Path) -> Vec<tts_models::TtsModel> {
+fn catalog(root: &Path, sources: &BTreeMap<String, String>) -> Vec<tts_models::TtsModel> {
     if let Some(mut slot) = ENGINE.try_lock() {
         clear_dead_engine(&mut slot);
     }
@@ -72,6 +74,9 @@ fn catalog(root: &Path) -> Vec<tts_models::TtsModel> {
     let loaded = LOADED_PATH.read();
     for model in &mut models {
         model.loaded = model.installed && loaded.as_deref() == Some(model.path.as_str());
+        if let Some(source) = sources.get(model.id) {
+            model.custom_download_url = source.clone();
+        }
     }
     models
 }
@@ -166,6 +171,7 @@ pub(crate) fn check_cancelled(token: &CancellationToken) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub enum TtsJobKind {
     Install,
+    Load,
     Synthesis,
 }
 
@@ -173,6 +179,7 @@ pub enum TtsJobKind {
 pub fn cancel_tts_job(kind: TtsJobKind, job_id: uuid::Uuid) {
     match kind {
         TtsJobKind::Install => &INSTALL,
+        TtsJobKind::Load => &LOAD,
         TtsJobKind::Synthesis => &SYNTHESIS,
     }
     .cancel(job_id);
@@ -208,6 +215,23 @@ pub(super) struct SynthesisProgress {
     pub(super) total: usize,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsLoadProgress {
+    job_id: uuid::Uuid,
+    stage: String,
+}
+
+fn emit_load_progress(app: &AppHandle, job_id: uuid::Uuid, stage: &str) {
+    let _ = app.emit(
+        "tts-load-progress",
+        TtsLoadProgress {
+            job_id,
+            stage: stage.to_owned(),
+        },
+    );
+}
+
 async fn worker<T: Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> CommandResult<T> {
@@ -220,7 +244,8 @@ async fn worker<T: Send + 'static>(
 #[tauri::command]
 pub async fn tts_models(state: State<'_, AppState>) -> CommandResult<Vec<tts_models::TtsModel>> {
     let root = state.models_root();
-    worker(move || Ok(catalog(&root))).await
+    let sources = state.tts_download_urls();
+    worker(move || Ok(catalog(&root, &sources))).await
 }
 
 #[tauri::command]
@@ -232,7 +257,12 @@ pub async fn install_tts_model(
     worker(move || {
         let job = INSTALL.start(job_id, "已有 TTS 模型安装任务正在进行")?;
         let state = app.state::<AppState>();
-        let source = validated_source(&state.tts_download_url(), true)?;
+        let source = state
+            .tts_download_urls()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let source = validated_source(&source, true)?;
         tts_models::install(&app, &state.models_root(), &id, &source, job_id, &job.token)
     })
     .await
@@ -257,14 +287,31 @@ fn validated_source(source: &str, tts: bool) -> Result<String> {
 pub fn save_model_download_source(
     state: State<'_, AppState>,
     tts: bool,
+    id: Option<String>,
     url: String,
 ) -> CommandResult<String> {
     let source = validated_source(&url, tts).map_err(|error| format!("{error:#}"))?;
-    if tts {
-        tts_models::validate_download_source(&source).map_err(|error| error.to_string())?;
-    }
+    let (id, source) = if tts {
+        let id = id
+            .filter(|id| !id.trim().is_empty())
+            .context("缺少 TTS 模型 id")
+            .map_err(|error| format!("{error:#}"))?;
+        // 填回默认地址等同于“恢复默认”，避免把默认页误存成覆盖项；
+        // 必须先判断默认值，再走 family 校验（默认浏览页可能不是可下载目录）。
+        let (browse, base) =
+            tts_models::default_urls_for(&id).map_err(|error| format!("{error:#}"))?;
+        let source = if source == browse || source == base {
+            String::new()
+        } else {
+            tts_models::validate_source(&id, &source).map_err(|error| format!("{error:#}"))?;
+            source
+        };
+        (Some(id), source)
+    } else {
+        (None, source)
+    };
     state
-        .save_model_download_url(tts, source)
+        .save_model_download_url(tts, id.as_deref(), source)
         .map_err(|error| format!("{error:#}"))
 }
 
@@ -273,26 +320,38 @@ pub fn open_model_download_source(
     app: AppHandle,
     state: State<'_, AppState>,
     tts: bool,
+    id: Option<String>,
 ) -> CommandResult<()> {
-    let source = if tts {
-        state.tts_download_url()
+    let url = if tts {
+        let id = id
+            .filter(|id| !id.trim().is_empty())
+            .context("缺少 TTS 模型 id")
+            .map_err(|error| format!("{error:#}"))?;
+        let custom = state
+            .tts_download_urls()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        if custom.is_empty() {
+            tts_models::default_urls_for(&id)
+                .map_err(|error| format!("{error:#}"))?
+                .0
+                .to_owned()
+        } else {
+            custom
+        }
     } else {
         state.asr_download_url()
     };
-    let source = validated_source(&source, tts).map_err(|error| format!("{error:#}"))?;
-    let url = if source.is_empty() && tts {
-        bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL
-    } else {
-        &source
-    };
     app.opener()
-        .open_url(url, None::<&str>)
+        .open_url(url.as_str(), None::<&str>)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn load_tts_model(app: AppHandle, id: String) -> CommandResult<()> {
+pub async fn load_tts_model(app: AppHandle, id: String, job_id: uuid::Uuid) -> CommandResult<()> {
     worker(move || {
+        let job = LOAD.start(job_id, "已有 TTS 模型加载任务正在进行")?;
         with_idle_models(|engine| {
             let root = app.state::<AppState>().models_root();
             let model = tts_models::model(&root, &id)?;
@@ -300,7 +359,12 @@ pub async fn load_tts_model(app: AppHandle, id: String) -> CommandResult<()> {
                 bail!("模型文件不齐全，请先安装模型");
             }
             set_engine(engine, None);
-            let loaded = create_engine(&root, &model, &CancellationToken::new())?;
+            let app_cache = app.path().app_cache_dir()?;
+            let progress = |stage: &str| emit_load_progress(&app, job_id, stage);
+            progress("正在加载 TTS 模型…");
+            let loaded = create_engine(&root, &model, &app_cache, &job.token, &progress)?;
+            check_cancelled(&job.token)?;
+            progress("正在完成模型加载…");
             set_engine(engine, Some(loaded));
             Ok(())
         })
@@ -541,7 +605,8 @@ fn synthesize(
             },
         );
         set_engine(slot, None);
-        let loaded = create_engine(root, &model, token)?;
+        let app_cache = app.path().app_cache_dir()?;
+        let loaded = create_engine(root, &model, &app_cache, token, &|_| {})?;
         check_cancelled(token)?;
         set_engine(slot, Some(loaded));
     }
@@ -559,6 +624,7 @@ fn synthesize(
                 job_id,
                 token,
                 sample_rate,
+                true,
                 |text, speed| {
                     generation.speed = speed;
                     generate_sherpa(engine, &generation, text, sample_rate, token)
@@ -582,7 +648,8 @@ fn synthesize(
                 job_id,
                 token,
                 sample_rate,
-                |text, speed| engine.generate(text, reference_text, &prompt, &output, speed, token),
+                false,
+                |text, _| engine.generate(text, reference_text, &prompt, &output, token),
             )
         }
     };
@@ -600,10 +667,17 @@ fn sherpa_sample_rate(engine: &OfflineTts) -> Result<u32> {
 fn create_engine(
     root: &Path,
     model: &tts_models::TtsModel,
+    app_cache: &Path,
     token: &CancellationToken,
+    progress: &dyn Fn(&str),
 ) -> Result<LoadedTts> {
     let engine = if model.family == "CosyVoice3" {
-        TtsEngine::CosyVoice(cosyvoice::Engine::load(Path::new(&model.path), token)?)
+        TtsEngine::CosyVoice(cosyvoice::Engine::load(
+            Path::new(&model.path),
+            app_cache,
+            token,
+            progress,
+        )?)
     } else {
         let mut config = OfflineTtsConfig::default();
         config.model.num_threads =
@@ -650,6 +724,7 @@ fn synthesize_track(
     job_id: uuid::Uuid,
     token: &CancellationToken,
     sample_rate: u32,
+    supports_model_speed: bool,
     mut generate: impl FnMut(&str, f32) -> Result<Vec<f32>>,
 ) -> Result<SynthesisResult> {
     let mut track = Vec::new();
@@ -675,11 +750,13 @@ fn synthesize_track(
             if let Some((start, end)) = segment.start_ms.zip(segment.end_ms) {
                 let capacity = frames(end, sample_rate) - frames(start, sample_rate);
                 if samples.len() > capacity {
-                    let speed = (samples.len() as f32 / capacity as f32 * 1.05).min(2.0);
-                    if let Ok(faster) = generate(speed)
-                        && faster.len() < samples.len()
-                    {
-                        samples = faster;
+                    if supports_model_speed {
+                        let speed = (samples.len() as f32 / capacity as f32 * 1.05).min(2.0);
+                        if let Ok(faster) = generate(speed)
+                            && faster.len() < samples.len()
+                        {
+                            samples = faster;
+                        }
                     }
                     check_cancelled(token)?;
                     if samples.len() > capacity {

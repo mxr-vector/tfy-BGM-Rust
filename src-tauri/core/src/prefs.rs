@@ -3,7 +3,7 @@
 //! 所有来自前端的数据都会经过 `normalize`，落盘采用「临时文件 + 重命名」，
 //! 损坏的偏好文件回退为默认值而不是让应用启动失败。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +15,7 @@ use crate::loudness::find_preset;
 use crate::paths::strip_verbatim_prefix;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 4;
+pub const PREFS_VERSION: u32 = 5;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 /// 切歌交叉淡入淡出的默认时长（秒）；`0` 表示硬切。
@@ -35,13 +35,32 @@ const MAX_MODELS_DIR_LEN: usize = 512;
 const MAX_DOWNLOAD_URL_LEN: usize = 1024;
 /// 分离模型 id 长度上限。
 const MAX_SEPARATION_MODEL_LEN: usize = 256;
+/// 按模型保存下载源时的模型 id 长度上限。
+const MAX_TTS_MODEL_ID_LEN: usize = 128;
+/// 按模型保存的 TTS 下载源数量上限，避免异常配置无限增长。
+const MAX_TTS_DOWNLOAD_SOURCES: usize = 8;
 /// ASR 模型默认下载地址：ModelScope 上的 0.6B-int8 模型目录。
 /// 偏好里留空即表示使用此地址，下载地址的唯一真源放在 core，避免多处定义漂移。
 pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
     "https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B";
 /// CosyVoice3 ONNX 模型默认下载仓库。
 pub const DEFAULT_TTS_DOWNLOAD_URL: &str =
-    "https://www.modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX/files";
+    "https://www.modelscope.cn/models/zhangluoyang/cosyvoice3-onnx/files";
+/// Kokoro / ZipVoice 默认浏览页；仅用于「访问下载源」，不能拼接文件名下载。
+pub const DEFAULT_TTS_RELEASE_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models";
+/// Kokoro / ZipVoice 默认下载基址；自定义镜像需保持同样的「目录 + 文件名」结构。
+pub const DEFAULT_TTS_MIRROR_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
+/// CosyVoice3 的稳定模型 id，与运行时 `tts_models::SPECS` 保持一致。
+pub const TTS_COSYVOICE_MODEL_ID: &str = "cosyvoice3-0.5b-2512";
+/// 走 sherpa-onnx release（压缩包 + 平铺镜像）的 TTS 模型 id。
+pub const TTS_SHERPA_MODEL_IDS: [&str; 4] = [
+    "kokoro-int8",
+    "kokoro-fp32",
+    "zipvoice-int8",
+    "zipvoice-fp32",
+];
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -219,7 +238,8 @@ pub struct Prefs {
     pub models_dir: Option<String>,
     /// ASR 模型下载地址；空字符串表示使用 `DEFAULT_ASR_DOWNLOAD_URL`（0.6B-int8）。
     pub asr_download_url: String,
-    pub tts_download_url: String,
+    /// 按模型 id 覆盖的 TTS 下载源；缺失表示使用该模型内置默认源。
+    pub tts_download_urls: BTreeMap<String, String>,
     /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
     /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
     pub last_asr_model: Option<String>,
@@ -272,7 +292,7 @@ impl Default for Prefs {
             close_action: CloseAction::Ask,
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
-            tts_download_url: DEFAULT_TTS_DOWNLOAD_URL.to_owned(),
+            tts_download_urls: BTreeMap::new(),
             last_asr_model: None,
             separation_model: None,
             desktop_lyrics_enabled: false,
@@ -427,13 +447,27 @@ impl Prefs {
         } else {
             DEFAULT_ASR_DOWNLOAD_URL.to_owned()
         };
-        let tts_url = self.tts_download_url.trim();
-        let tts_url = tts_url.trim_end_matches('/');
-        self.tts_download_url = if is_download_url(tts_url) && !tts_url.contains(['?', '#']) {
-            tts_url.to_owned()
-        } else {
-            DEFAULT_TTS_DOWNLOAD_URL.to_owned()
-        };
+        self.tts_download_urls = self
+            .tts_download_urls
+            .into_iter()
+            .filter_map(|(id, url)| {
+                let id = id.trim();
+                if id.is_empty()
+                    || id.chars().count() > MAX_TTS_MODEL_ID_LEN
+                    || !id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                {
+                    return None;
+                }
+                let url = url.trim().trim_end_matches('/');
+                if url.is_empty() || !is_download_url(url) || url.contains(['?', '#']) {
+                    return None;
+                }
+                Some((id.to_owned(), url.to_owned()))
+            })
+            .take(MAX_TTS_DOWNLOAD_SOURCES)
+            .collect();
 
         // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，
         // 避免手改配置后启动时去加载模型目录以外的文件。
@@ -904,20 +938,30 @@ mod tests {
         assert!(invalid.models_dir.is_none());
         // 非法地址回退到内置默认地址，而不是留下一个无法请求的链接。
         assert_eq!(invalid.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
-        for url in ["", "file:///models", "https://example.com/files?query=1"] {
-            let prefs = Prefs {
-                tts_download_url: url.into(),
-                ..Prefs::default()
-            }
-            .normalize();
-            assert_eq!(prefs.tts_download_url, DEFAULT_TTS_DOWNLOAD_URL);
-        }
-        let legacy = Prefs {
-            tts_download_url: " https://example.com/tts/ ".into(),
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "kokoro-int8".into(),
+            " https://mirror.example.com/tts/ ".into(),
+        );
+        sources.insert("../bad".into(), "https://mirror.example.com/x".into());
+        sources.insert("zipvoice-int8".into(), "file:///tmp".into());
+        sources.insert(
+            TTS_COSYVOICE_MODEL_ID.into(),
+            "https://www.modelscope.cn/models/owner/repo/files?x=1".into(),
+        );
+        let normalized = Prefs {
+            tts_download_urls: sources,
             ..Prefs::default()
         }
         .normalize();
-        assert_eq!(legacy.tts_download_url, "https://example.com/tts");
+        assert_eq!(normalized.tts_download_urls.len(), 1);
+        assert_eq!(
+            normalized
+                .tts_download_urls
+                .get("kokoro-int8")
+                .map(String::as_str),
+            Some("https://mirror.example.com/tts")
+        );
 
         // Windows canonicalize 的 verbatim 前缀不能写进配置，否则与扫描路径不相等。
         let verbatim = Prefs {

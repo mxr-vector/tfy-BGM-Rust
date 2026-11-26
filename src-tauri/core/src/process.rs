@@ -28,8 +28,13 @@ pub fn quiet_command(program: &Path) -> Command {
     command
 }
 
+/// 就地关闭控制台窗口，供已经组装好参数/环境/工作目录的命令复用。
+pub fn suppress_console(command: &mut Command) {
+    apply_suppress_console(command);
+}
+
 #[cfg(windows)]
-fn suppress_console(command: &mut Command) {
+fn apply_suppress_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
 
     // CREATE_NO_WINDOW
@@ -38,4 +43,4 @@ fn suppress_console(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn suppress_console(_command: &mut Command) {}
+fn apply_suppress_console(_command: &mut Command) {}

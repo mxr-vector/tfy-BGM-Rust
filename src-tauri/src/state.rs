@@ -4,7 +4,7 @@
 //! 本模块只负责持有多份运行时状态、串联核心写操作，并保证「先持久化再更新内存」。
 //! 所有写操作先落盘再更新内存，并通过独立的命令修改曲库目录，避免前端偏好覆盖目录选择。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -257,7 +257,7 @@ impl AppState {
         next.models_dir = current.models_dir.clone();
         next.last_asr_model = current.last_asr_model.clone();
         next.asr_download_url = current.asr_download_url.clone();
-        next.tts_download_url = current.tts_download_url.clone();
+        next.tts_download_urls = current.tts_download_urls.clone();
         next.desktop_lyrics_enabled = current.desktop_lyrics_enabled;
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
@@ -452,30 +452,40 @@ impl AppState {
         }
     }
 
-    pub fn tts_download_url(&self) -> String {
-        self.prefs.read().tts_download_url.clone()
+    /// 按模型保存的 TTS 下载源；没有覆盖项的模型使用各自内置默认源。
+    pub fn tts_download_urls(&self) -> BTreeMap<String, String> {
+        self.prefs.read().tts_download_urls.clone()
     }
 
-    pub fn save_model_download_url(&self, tts: bool, url: String) -> Result<String> {
+    /// 保存下载源。ASR 只有一个可下载模型，沿用单一字段；TTS 按模型 id 写入 map，
+    /// 空地址表示删除覆盖项、恢复该模型内置默认源。
+    pub fn save_model_download_url(
+        &self,
+        tts: bool,
+        id: Option<&str>,
+        url: String,
+    ) -> Result<String> {
         let mut current = self.prefs.write();
         let mut next = current.clone();
-        let url = if url.is_empty() {
-            if tts {
-                bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL.to_owned()
+        let saved = if tts {
+            let id = id.context("缺少 TTS 模型 id")?;
+            if url.is_empty() {
+                next.tts_download_urls.remove(id);
             } else {
-                models::DEFAULT_DOWNLOAD_URL.to_owned()
+                next.tts_download_urls.insert(id.to_owned(), url.clone());
             }
-        } else {
             url
-        };
-        if tts {
-            next.tts_download_url = url.clone();
         } else {
-            next.asr_download_url = url.clone();
-        }
+            next.asr_download_url = if url.is_empty() {
+                models::DEFAULT_DOWNLOAD_URL.to_owned()
+            } else {
+                url
+            };
+            next.asr_download_url.clone()
+        };
         next.save(&self.prefs_path).context("保存模型下载源失败")?;
         *current = next;
-        Ok(url)
+        Ok(saved)
     }
 
     /// 「模型」分组快照：每次进入分组都重新扫描目录下的 `.onnx`。

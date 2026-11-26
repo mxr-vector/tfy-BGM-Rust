@@ -78,9 +78,9 @@ import {
 } from '@/stores/settings';
 import { state } from '@/stores/state';
 import {
-  cancelTtsInstall, DEFAULT_TTS_DOWNLOAD_SOURCE, installTtsModel, manageTtsModel,
-  openModelDownloadSource, refreshTtsModels, showCosyVoiceRuntimeSetup,
-  ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelActionLabel,
+  cancelTtsInstall, cancelTtsLoad, installTtsModel, manageTtsModel,
+  openModelDownloadSource, refreshTtsModels, ttsDownloadPercent, ttsDownloadProgress,
+  ttsInstallCancelling, ttsInstalling, ttsLoadCancelling, ttsLoadProgress, ttsModelActionLabel,
   ttsModelBusy, ttsModels, ttsModelsLoading, type TtsModel,
 } from '@/stores/tts';
 import FontSelect from './FontSelect.vue';
@@ -159,18 +159,36 @@ const defaultModel = computed(() => modelsInfo.value?.defaultModel ?? null);
 const loadedModel = computed(() => modelsInfo.value?.loaded ?? null);
 const savingDownloadSource = ref(false);
 
-async function editDownloadSource(tts: boolean): Promise<void> {
-  const family = tts ? 'TTS' : 'ASR';
+type DownloadSourceTarget =
+  | { kind: 'asr' }
+  | { kind: 'tts'; model: TtsModel };
+
+function ttsSourceDescription(model: TtsModel): string {
+  return model.family === 'CosyVoice3'
+    ? '填写 ModelScope 模型仓库首页或 /files 地址，仓库需保持 CosyVoice3 ONNX 的目录结构。留空恢复默认源。'
+    : `默认地址指向发布页；自定义时请填写可直接拼接文件名的 HTTP(S) 镜像目录，例如 ${model.defaultSourceUrl}。ZipVoice 还需镜像 vocos_24khz.onnx、lexicon-en-us.txt 等依赖。留空恢复默认源。`;
+}
+
+async function editDownloadSource(target: DownloadSourceTarget): Promise<void> {
+  const tts = target.kind === 'tts';
+  const model = target.kind === 'tts' ? target.model : null;
+  const label = tts ? `「${model!.name}」` : 'ASR 模型';
   const result = await showModal({
-    title: `修改 ${family} 下载源`,
+    title: `修改${label}下载源`,
     description: tts
-      ? 'ModelScope 仓库地址仅用于 CosyVoice3，其他 HTTP(S) 镜像目录仅用于 Kokoro 和 ZipVoice。留空恢复各模型的默认下载源。'
+      ? ttsSourceDescription(model!)
       : '填写 ModelScope 仓库地址或 0.6B-int8 文件所在目录的直链。留空恢复默认源。',
     fields: [{
       name: 'url',
       label: '下载源地址',
-      value: tts ? prefs.value?.ttsDownloadUrl : modelsInfo.value?.downloadUrl,
-      placeholder: tts ? DEFAULT_TTS_DOWNLOAD_SOURCE : modelsInfo.value?.defaultDownloadUrl,
+      type: 'textarea',
+      rows: 3,
+      // 默认地址直接填进输入框而不是灰字占位，长 URL 才能完整看到；
+      // 保存默认值等同于恢复默认，不会写成覆盖项。
+      value: tts
+        ? (model!.customDownloadUrl || model!.defaultDownloadUrl)
+        : modelsInfo.value?.downloadUrl,
+      placeholder: tts ? model!.defaultSourceUrl : modelsInfo.value?.defaultDownloadUrl,
     }],
     confirmText: '保存',
     validate: ({ url }) => {
@@ -183,17 +201,25 @@ async function editDownloadSource(tts: boolean): Promise<void> {
     },
   });
   if (!result) return;
+  const cleared = !result.url.trim();
   savingDownloadSource.value = true;
   try {
-    const url = await invoke<string>(COMMANDS.saveModelDownloadSource, { tts, url: result.url });
-    if (state.prefs) {
-      if (tts) state.prefs.ttsDownloadUrl = url;
-      else state.prefs.asrDownloadUrl = url;
+    const url = await invoke<string>(COMMANDS.saveModelDownloadSource, {
+      tts,
+      id: model?.id ?? null,
+      url: result.url,
+    });
+    if (tts) {
+      await refreshTtsModels();
+    } else {
+      if (state.prefs) state.prefs.asrDownloadUrl = url;
+      await refreshModels();
     }
-    if (!tts) await refreshModels();
-    toast(result.url.trim() ? `${family} 下载源已保存` : `已恢复默认 ${family} 下载源`, 'success');
+    // TTS 后端把默认值归一成空串，因此以返回值为准判断是否恢复默认。
+    const reset = tts ? url === '' : cleared;
+    toast(reset ? `已恢复${label}默认下载源` : `${label}下载源已保存`, 'success');
   } catch (error) {
-    toast(`保存 ${family} 下载源失败：${normalizeError(error)}`, 'error');
+    toast(`保存${label}下载源失败：${normalizeError(error)}`, 'error');
   } finally {
     savingDownloadSource.value = false;
   }
@@ -748,10 +774,6 @@ watch(settingsOpen, async (open) => {
               <div class="settings-subgroup">
                 <div class="settings-subgroup-head">
                   <h4>ASR 模型列表</h4>
-                  <div class="settings-subgroup-actions">
-                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource(false)">修改下载源</button>
-                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(false)">访问下载源</button>
-                  </div>
                 </div>
 
                 <div v-if="loadStatus.phase === 'failed'" class="settings-subgroup-actions" role="status">
@@ -776,14 +798,18 @@ watch(settingsOpen, async (open) => {
                       <template v-else> · 尚未下载</template>
                     </small>
                   </div>
-                  <button
-                    type="button"
-                    class="settings-btn is-primary"
-                    :disabled="modelDownloading || savingDownloadSource"
-                    @click="downloadDefaultModel"
-                  >
-                    {{ autoLoading ? '自动加载中…' : modelDownloading ? '下载中…' : '下载' }}
-                  </button>
+                  <div class="settings-subgroup-actions">
+                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource({ kind: 'asr' })">修改下载源</button>
+                    <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(false)">访问下载源</button>
+                    <button
+                      type="button"
+                      class="settings-btn is-primary"
+                      :disabled="modelDownloading || savingDownloadSource"
+                      @click="downloadDefaultModel"
+                    >
+                      {{ autoLoading ? '自动加载中…' : modelDownloading ? '下载中…' : '下载' }}
+                    </button>
+                  </div>
                 </div>
 
                 <!-- 下载完成后命令仍在自动加载模型：此时隐藏下载进度与「取消下载」，
@@ -819,6 +845,10 @@ watch(settingsOpen, async (open) => {
                       <template v-if="loadedModel?.path === model.path">· {{ loadedModel.engine }} · {{ loadedModel.threads }} 线程</template>
                       <template v-if="model.missing.length">· 缺少 {{ model.missing.join('、') }}</template>
                     </template>
+                      <template v-if="model.isDefault && defaultModel?.installed">
+                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource({ kind: 'asr' })">修改下载源</button>
+                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(false)">访问下载源</button>
+                      </template>
                       <button
                         type="button"
                         class="settings-btn"
@@ -868,13 +898,8 @@ watch(settingsOpen, async (open) => {
               <div class="settings-subgroup">
                   <div class="settings-subgroup-head">
                     <h4>TTS 语音模型</h4>
-                    <div class="settings-subgroup-actions">
-                      <button type="button" class="settings-link" @click="showCosyVoiceRuntimeSetup">CosyVoice3 运行配置</button>
-                      <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource(true)">修改下载源</button>
-                      <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true)">访问下载源</button>
-                    </div>
                   </div>
-                  <p class="settings-hint">CosyVoice3 使用 5–15 秒参考音频和对应文本进行零样本克隆。应用负责下载模型文件，加载前需配置 Python 运行环境。Kokoro 适合多音色朗读，ZipVoice 支持中英文声音克隆。</p>
+                  <p class="settings-hint">CosyVoice3 使用 5–15 秒参考音频和对应文本进行零样本克隆，首次加载自动准备运行环境。Kokoro 适合多音色朗读，ZipVoice 支持中英文声音克隆。</p>
                   <div class="settings-models">
                     <SettingsModelRow
                       v-for="model in ttsModels"
@@ -890,6 +915,8 @@ watch(settingsOpen, async (open) => {
                           <template v-if="!model.hasFiles"> · {{ model.package }}</template>
                         </template>
                         <span v-if="ttsModelActionLabel(model.id)" class="settings-muted" role="status">{{ ttsModelActionLabel(model.id) }}</span>
+                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource({ kind: 'tts', model })">修改下载源</button>
+                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true, model.id)">访问下载源</button>
                         <button v-if="model.installed" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'load')">
                           {{ model.loaded ? '重新加载' : '加载' }}
                         </button>
@@ -905,6 +932,10 @@ watch(settingsOpen, async (open) => {
                     <div class="settings-download-bar"><span class="settings-download-fill" :style="{ width: `${ttsDownloadPercent}%` }"></span></div>
                     <p class="settings-hint">{{ ttsDownloadProgress ? `${ttsDownloadProgress.file} · ${formatBytes(ttsDownloadProgress.received)} / ${formatBytes(ttsDownloadProgress.total)} · ${ttsDownloadPercent}%` : '正在准备安全校验的模型下载…' }}</p>
                     <button type="button" class="settings-btn" :disabled="ttsInstallCancelling" @click="cancelTtsInstall()">{{ ttsInstallCancelling ? '正在取消…' : '取消下载' }}</button>
+                  </div>
+                  <div v-else-if="ttsLoadProgress" class="settings-download" role="status" aria-live="polite">
+                    <p class="settings-hint">{{ ttsLoadProgress.stage }}</p>
+                    <button type="button" class="settings-btn" :disabled="ttsLoadCancelling" @click="cancelTtsLoad">{{ ttsLoadCancelling ? '正在取消…' : '取消加载' }}</button>
                   </div>
                   <p v-else-if="!ttsModels.some(model => model.installed)" class="settings-hint">模型安装后才会出现在“文生语音”可选项中。</p>
               </div>

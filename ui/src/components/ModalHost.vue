@@ -34,7 +34,7 @@ watch(
 
     await nextTick();
     const first = panel.value?.querySelector<HTMLElement>(
-      'input:not([type="hidden"]), .app-select-trigger',
+      'input:not([type="hidden"]), textarea, .app-select-trigger',
     );
     if (first) {
       first.focus();
@@ -126,6 +126,17 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown, true));
                 type="color"
                 :name="field.name"
               />
+              <textarea
+                v-else-if="field.type === 'textarea'"
+                v-model="values[field.name]"
+                class="modal-input modal-textarea"
+                :name="field.name"
+                :readonly="field.readonly === true"
+                :placeholder="field.placeholder ?? ''"
+                :rows="field.rows ?? 3"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
               <input
                 v-else
                 v-model="values[field.name]"

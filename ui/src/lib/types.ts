@@ -124,7 +124,8 @@ export interface Prefs {
   modelsDir: string | null;
   /** ASR 模型下载地址；空字符串表示内置的 0.6B-int8 地址。 */
   asrDownloadUrl: string;
-  ttsDownloadUrl: string;
+  /** 按模型 id 覆盖的 TTS 下载源；缺失表示使用该模型内置默认源。 */
+  ttsDownloadUrls: Record<string, string>;
   /** 上次加载成功的模型 id（相对模型目录）；由后端维护，启动时自动恢复。 */
   lastAsrModel: string | null;
   /** 上次确认的人声分离模型 id；每次生成前仍会再次确认。 */

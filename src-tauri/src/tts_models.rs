@@ -12,10 +12,13 @@ use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
 use crate::tts::check_cancelled;
-use bgm_core::prefs::DEFAULT_TTS_DOWNLOAD_URL;
+use bgm_core::prefs::{
+    DEFAULT_TTS_DOWNLOAD_URL, DEFAULT_TTS_MIRROR_URL, DEFAULT_TTS_RELEASE_URL,
+    TTS_COSYVOICE_MODEL_ID, TTS_SHERPA_MODEL_IDS,
+};
 
 pub const DIR: &str = "tts";
-const ASSETS: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
+const ASSETS: &str = DEFAULT_TTS_MIRROR_URL;
 const AUXILIARY: &[(&str, &str, &str, u64)] = &[
     (
         "vocos_24khz.onnx",
@@ -44,6 +47,12 @@ pub struct TtsModel {
     pub has_files: bool,
     pub loaded: bool,
     pub path: String,
+    /// 默认浏览地址；「访问下载源」在未自定义时打开它。
+    pub default_download_url: String,
+    /// 可安装的默认基址；编辑下载源时作为输入占位。
+    pub default_source_url: String,
+    /// 用户按模型覆盖的下载源；空字符串表示使用内置默认源。
+    pub custom_download_url: String,
 }
 
 impl TtsModel {
@@ -98,9 +107,13 @@ struct Spec {
     hash: &'static str,
     size: u64,
 }
-const COSYVOICE_ID: &str = "cosyvoice3-0.5b-2512";
-const COSYVOICE_ONNX_REPO: &str = "Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX";
-const COSYVOICE_ONNX_REV: &str = "879e1017e3143bb19a739309cf3522da2e2a7a6a";
+const COSYVOICE_ID: &str = TTS_COSYVOICE_MODEL_ID;
+const KOKORO_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[0];
+const KOKORO_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[1];
+const ZIPVOICE_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[2];
+const ZIPVOICE_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[3];
+const COSYVOICE_ONNX_REPO: &str = "zhangluoyang/cosyvoice3-onnx";
+const COSYVOICE_ONNX_REV: &str = "4e43c04c7bb86d5551da5bc7dc912f3c326ffe30";
 const COSYVOICE_OFFICIAL_REPO: &str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512";
 const COSYVOICE_OFFICIAL_REV: &str = "9f9c56f2514700ef79d64fd0afb693e0d672373b";
 
@@ -129,16 +142,47 @@ const fn official(path: &'static str, size: u64, hash: &'static str) -> CosyVoic
     }
 }
 
+/// 只下载非流式一套可跑通的文件：跳过 model_stream.onnx、旧版 llm.pt/flow.pt/hift.pt。
 const COSYVOICE_FILES: &[CosyVoiceFile] = &[
     onnx(
-        "flow_fp32.onnx",
-        1_335_578_680,
-        "cbcd99556e71c91229fc19ed7655133222a50c35dccbf3b74b0527f18ca024dd",
+        "frontend/campplus.onnx",
+        28_303_423,
+        "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73",
     ),
     onnx(
-        "hift.onnx",
-        342_661_124,
-        "9831daaeda8662730c703cf3c763617e6a60bd04c23c4f07f595fd6a7601a6f1",
+        "frontend/speech_tokenizer_v3.onnx",
+        969_451_503,
+        "23236a74175dbdda47afc66dbadd5bcb41303c467a57c261cb8539ad9db9208d",
+    ),
+    onnx(
+        "llm/model.onnx",
+        436_205,
+        "05e08708b14d28c6eb25f888b967a0850b077dbe2ffa3155d893da82becd8df1",
+    ),
+    onnx(
+        "llm/model.onnx.data",
+        1_012_284_672,
+        "ce8d1bae8a03d6fd5c9917fe247982ed08da35a18567f51d5695191914d99686",
+    ),
+    onnx(
+        "flow/flow_conditioner.onnx",
+        4_464_695,
+        "73de655c255b01f754223ef31685cf61800f6454c94e0965ff80a136ea069520",
+    ),
+    onnx(
+        "flow/flow_dit_step.onnx",
+        1_045_701,
+        "ef559341bcb62d3e97130a591a0a1fc6ebf7a81286b5622457024896c4ce59e4",
+    ),
+    onnx(
+        "flow/flow_dit_step.onnx.data",
+        1_324_568_576,
+        "c9564d8ff035fb62142442aaaa1787c6dd2007790b4b0ae8c27c5860de16a371",
+    ),
+    onnx(
+        "hift/model.onnx",
+        83_397_707,
+        "ab1e8e957d6b2460e8521b3575c51df3a69f94f1bca5936309d8e266ec6ee9d1",
     ),
     official(
         "cosyvoice3.yaml",
@@ -146,44 +190,9 @@ const COSYVOICE_FILES: &[CosyVoiceFile] = &[
         "f5a6b2c6f05139d0f18861a1fe506f751e787026b77c05f7e8fef9f8a4405965",
     ),
     official(
-        "llm.pt",
-        2_024_669_519,
-        "69f43bd545131c30e98947fb360ea8b4dc9916d8e83dded7757c7ea4f5a24970",
-    ),
-    official(
-        "flow.pt",
-        1_329_116_148,
-        "a6fab32a7825e5b0bc855ddd948f8db9370b0a786fbc249caa4595e95b608e4b",
-    ),
-    official(
-        "hift.pt",
-        83_202_622,
-        "b279d7641eb97ae55b3b540cfba4f953c26492a2df758328a89a4d007ab87a65",
-    ),
-    official(
-        "campplus.onnx",
-        28_303_423,
-        "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73",
-    ),
-    official(
-        "speech_tokenizer_v3.onnx",
-        969_451_503,
-        "23236a74175dbdda47afc66dbadd5bcb41303c467a57c261cb8539ad9db9208d",
-    ),
-    official(
         "CosyVoice-BlankEN/config.json",
         659,
         "168aa1bd401abc3bc262ba15ba4e499627a8b4e006e9d050b47c22de20660185",
-    ),
-    official(
-        "CosyVoice-BlankEN/generation_config.json",
-        242,
-        "e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6",
-    ),
-    official(
-        "CosyVoice-BlankEN/model.safetensors",
-        988_097_824,
-        "130282af0dfa9fe5840737cc49a0d339d06075f83c5a315c3372c9a0740d0b96",
     ),
     official(
         "CosyVoice-BlankEN/tokenizer_config.json",
@@ -222,7 +231,7 @@ const SPECS: &[Spec] = &[
         size: COSYVOICE_SIZE,
     },
     Spec {
-        id: "kokoro-int8",
+        id: KOKORO_INT8_ID,
         name: "Kokoro · INT8",
         family: "Kokoro",
         package: "kokoro-int8-multi-lang-v1_1.tar.bz2",
@@ -230,7 +239,7 @@ const SPECS: &[Spec] = &[
         size: 147_052_523,
     },
     Spec {
-        id: "kokoro-fp32",
+        id: KOKORO_FP32_ID,
         name: "Kokoro · FP32",
         family: "Kokoro",
         package: "kokoro-multi-lang-v1_1.tar.bz2",
@@ -238,7 +247,7 @@ const SPECS: &[Spec] = &[
         size: 364_855_331,
     },
     Spec {
-        id: "zipvoice-int8",
+        id: ZIPVOICE_INT8_ID,
         name: "ZipVoice · INT8",
         family: "ZipVoice",
         package: "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2",
@@ -246,7 +255,7 @@ const SPECS: &[Spec] = &[
         size: 109_162_785,
     },
     Spec {
-        id: "zipvoice-fp32",
+        id: ZIPVOICE_FP32_ID,
         name: "ZipVoice · FP32",
         family: "ZipVoice",
         package: "sherpa-onnx-zipvoice-distill-fp32-zh-en-emilia.tar.bz2",
@@ -265,7 +274,29 @@ fn cosyvoice_complete(dir: &Path) -> bool {
 fn present(dir: &Path, name: &str) -> bool {
     fs::metadata(dir.join(name)).is_ok_and(|info| info.is_file() && info.len() > 0)
 }
+
+fn spec(id: &str) -> Result<&'static Spec> {
+    SPECS
+        .iter()
+        .find(|spec| spec.id == id)
+        .with_context(|| format!("未知的 TTS 模型：{id}"))
+}
+
+/// 默认地址：浏览地址用于「访问下载源」，安装基址用于编辑占位与镜像校验。
+fn default_urls(spec: &Spec) -> (&'static str, &'static str) {
+    if spec.family == "CosyVoice3" {
+        (DEFAULT_TTS_DOWNLOAD_URL, DEFAULT_TTS_DOWNLOAD_URL)
+    } else {
+        (DEFAULT_TTS_RELEASE_URL, DEFAULT_TTS_MIRROR_URL)
+    }
+}
+
+pub fn default_urls_for(id: &str) -> Result<(&'static str, &'static str)> {
+    Ok(default_urls(spec(id)?))
+}
+
 fn entry(spec: &Spec, dir: &Path) -> TtsModel {
+    let (default_download_url, default_source_url) = default_urls(spec);
     let mut model = TtsModel {
         id: spec.id,
         name: spec.name,
@@ -277,6 +308,9 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
         has_files: dir.is_dir(),
         loaded: false,
         path: dir.to_string_lossy().into_owned(),
+        default_download_url: default_download_url.to_owned(),
+        default_source_url: default_source_url.to_owned(),
+        custom_download_url: String::new(),
     };
     model.installed = model.complete()
         && (spec.family != "ZipVoice"
@@ -297,10 +331,7 @@ fn package_dir(spec: &Spec) -> &str {
 }
 
 pub fn model(root: &Path, id: &str) -> Result<TtsModel> {
-    let spec = SPECS
-        .iter()
-        .find(|spec| spec.id == id)
-        .context("未知的 TTS 模型")?;
+    let spec = spec(id)?;
     Ok(entry(spec, &root.join(DIR).join(package_dir(spec))))
 }
 
@@ -330,10 +361,8 @@ pub fn install(
     token: &CancellationToken,
 ) -> Result<()> {
     check_cancelled(token)?;
-    let spec = SPECS
-        .iter()
-        .find(|spec| spec.id == id)
-        .context("未知的 TTS 模型")?;
+    let spec = spec(id)?;
+    validate_source(id, source)?;
     let root = models_root.join(DIR);
     fs::create_dir_all(&root)?;
     let target = root.join(package_dir(spec));
@@ -553,8 +582,45 @@ impl<'a> DownloadSource<'a> {
     }
 }
 
-pub fn validate_download_source(source: &str) -> Result<()> {
-    DownloadSource::parse(source).map(|_| ())
+/// 模型文件后缀；自定义镜像必须填目录而不是具体文件。
+const FILE_SUFFIXES: [&str; 6] = [".tar.bz2", ".onnx", ".data", ".json", ".txt", ".bin"];
+
+fn is_modelscope_repo(url: &reqwest::Url) -> bool {
+    matches!(url.host_str(), Some("modelscope.cn" | "www.modelscope.cn"))
+        && (url.path() == "/models" || url.path().starts_with("/models/"))
+}
+
+/// 按模型校验下载源：CosyVoice3 只接受 ModelScope 仓库地址，
+/// Kokoro / ZipVoice 只接受可拼接文件名的 HTTP(S) 镜像目录。
+pub fn validate_source(id: &str, source: &str) -> Result<()> {
+    let spec = spec(id)?;
+    let source = source.trim().trim_end_matches('/');
+    if source.is_empty() {
+        return Ok(());
+    }
+    let url = reqwest::Url::parse(source).context("请输入有效的 HTTP 或 HTTPS 地址")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("请输入有效的 HTTP 或 HTTPS 地址");
+    }
+    if spec.family == "CosyVoice3" {
+        if !is_modelscope_repo(&url) {
+            bail!("CosyVoice3 下载源需为 ModelScope 模型仓库地址（例如 .../files）");
+        }
+        DownloadSource::parse(source)?;
+        return Ok(());
+    }
+    if is_modelscope_repo(&url) {
+        bail!("Kokoro / ZipVoice 下载源需为可直接拼接文件名的 HTTP(S) 镜像目录");
+    }
+    if url.path().contains("/releases/tag/") {
+        bail!("请填写可直接下载的镜像目录，而不是 GitHub release 页面");
+    }
+    let lower = source.to_ascii_lowercase();
+    if FILE_SUFFIXES.iter().any(|suffix| lower.ends_with(suffix)) {
+        bail!("请填写镜像目录基地址，而不是具体文件地址");
+    }
+    DownloadSource::parse(source)?;
+    Ok(())
 }
 
 fn install_cosyvoice3(
@@ -570,42 +636,86 @@ fn install_cosyvoice3(
     let mut received = 0;
     for file in COSYVOICE_FILES {
         check_cancelled(token)?;
-        let url = source.cosyvoice_url(file)?;
         let destination = staging.path().join(file.path);
         fs::create_dir_all(destination.parent().context("模型文件路径无效")?)?;
-        let temporary = download_verified(
-            client,
-            staging.path(),
-            token,
-            file.path,
-            url.as_str(),
-            file.hash,
-            file.size,
-            |bytes| {
-                let _ = app.emit(
-                    "tts-download-progress",
-                    DownloadProgress {
-                        job_id,
-                        id: COSYVOICE_ID,
-                        file: file.path,
-                        received: received + bytes,
-                        total: COSYVOICE_SIZE,
-                    },
-                );
-            },
-        )?;
+        let progress = |bytes| {
+            let _ = app.emit(
+                "tts-download-progress",
+                DownloadProgress {
+                    job_id,
+                    id: COSYVOICE_ID,
+                    file: file.path,
+                    received: received + bytes,
+                    total: COSYVOICE_SIZE,
+                },
+            );
+        };
+        let temporary = match reuse_cosyvoice_file(target, staging.path(), file, token)? {
+            Some(verified) => {
+                progress(file.size);
+                verified
+            }
+            None => download_verified(
+                client,
+                staging.path(),
+                token,
+                file.path,
+                source.cosyvoice_url(file)?.as_str(),
+                file.hash,
+                file.size,
+                progress,
+            )?,
+        };
         temporary.persist(destination)?;
         received += file.size;
     }
     if !cosyvoice_complete(staging.path()) {
         bail!("CosyVoice3 模型文件不完整");
     }
-    let config = target.join("runtime.json");
-    if config.symlink_metadata().is_ok_and(|info| info.is_file()) {
-        fs::copy(config, staging.path().join("runtime.json"))?;
-    }
     check_cancelled(token)?;
     publish_model(staging.path(), target)
+}
+
+fn reuse_cosyvoice_file(
+    target: &Path,
+    staging: &Path,
+    file: &CosyVoiceFile,
+    token: &CancellationToken,
+) -> Result<Option<tempfile::NamedTempFile>> {
+    let source = target.join(file.path);
+    if !source
+        .symlink_metadata()
+        .is_ok_and(|info| info.is_file() && info.len() == file.size)
+    {
+        return Ok(None);
+    }
+    let Ok(mut source) = fs::File::open(source) else {
+        return Ok(None);
+    };
+    let mut output = tempfile::NamedTempFile::new_in(staging)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 128 * 1024];
+    let mut size = 0;
+    loop {
+        check_cancelled(token)?;
+        let count = match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Ok(None),
+        };
+        size += count as u64;
+        if size > file.size {
+            return Ok(None);
+        }
+        hasher.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    if size == file.size && format!("{:x}", hasher.finalize()) == file.hash {
+        Ok(Some(output))
+    } else {
+        Ok(None)
+    }
 }
 
 struct CancellableReader<'a, R> {
@@ -703,21 +813,39 @@ mod tests {
 
     #[test]
     fn sources_route_modelscope_to_cosyvoice_and_flat_mirrors_to_sherpa() {
-        let file = &COSYVOICE_FILES[0];
+        let download: Vec<_> = COSYVOICE_FILES
+            .iter()
+            .filter(|file| !file.official)
+            .collect();
+        assert_eq!(download.len(), 8);
+        assert!(
+            COSYVOICE_FILES
+                .iter()
+                .all(|file| file.path != "hift/model_stream.onnx")
+        );
+        let file = download[0];
+        assert_eq!(file.path, "frontend/campplus.onnx");
+        assert!(
+            download
+                .iter()
+                .any(|file| file.path.ends_with(".onnx.data"))
+        );
+        assert_eq!(COSYVOICE_SIZE, 3_428_140_304);
         for source in [
             DEFAULT_TTS_DOWNLOAD_URL,
-            "https://modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX",
+            "https://modelscope.cn/models/zhangluoyang/cosyvoice3-onnx",
         ] {
             let source = DownloadSource::parse(source).unwrap();
             assert_eq!(source.legacy_mirror(), "");
             let url = source.cosyvoice_url(file).unwrap();
-            assert!(
-                url.path()
-                    .ends_with("/Lourdle/Fun-CosyVoice3-0.5B-2512_ONNX/repo")
-            );
+            assert!(url.path().ends_with("/zhangluoyang/cosyvoice3-onnx/repo"));
             assert!(
                 url.query_pairs()
                     .any(|(key, value)| key == "Revision" && value == COSYVOICE_ONNX_REV)
+            );
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "FilePath" && value == file.path)
             );
         }
         let source = DownloadSource::parse("https://example.com/models").unwrap();
@@ -735,14 +863,100 @@ mod tests {
                 .path()
                 .ends_with("/example/mirror/repo")
         );
-        assert!(
-            custom
-                .cosyvoice_url(&COSYVOICE_FILES[2])
-                .unwrap()
-                .path()
-                .contains(COSYVOICE_OFFICIAL_REPO)
-        );
+        for dependency in COSYVOICE_FILES.iter().filter(|file| file.official) {
+            assert!(
+                custom
+                    .cosyvoice_url(dependency)
+                    .unwrap()
+                    .path()
+                    .contains(COSYVOICE_OFFICIAL_REPO)
+            );
+        }
         assert!(DownloadSource::parse("https://modelscope.cn/models/owner").is_err());
+    }
+
+    #[test]
+    fn spec_ids_match_core_constants() {
+        assert_eq!(SPECS.len(), 1 + TTS_SHERPA_MODEL_IDS.len());
+        assert!(SPECS.iter().any(|spec| spec.id == TTS_COSYVOICE_MODEL_ID));
+        for id in TTS_SHERPA_MODEL_IDS {
+            assert!(SPECS.iter().any(|spec| spec.id == id), "缺少模型 {id}");
+        }
+    }
+
+    #[test]
+    fn default_urls_follow_model_family() {
+        let (browse, base) = default_urls_for(COSYVOICE_ID).unwrap();
+        assert_eq!(browse, DEFAULT_TTS_DOWNLOAD_URL);
+        assert_eq!(base, DEFAULT_TTS_DOWNLOAD_URL);
+
+        for id in TTS_SHERPA_MODEL_IDS {
+            let (browse, base) = default_urls_for(id).unwrap();
+            assert_eq!(browse, DEFAULT_TTS_RELEASE_URL);
+            assert_eq!(base, DEFAULT_TTS_MIRROR_URL);
+        }
+        assert!(default_urls_for("unknown").is_err());
+    }
+
+    #[test]
+    fn source_validation_is_family_aware() {
+        assert!(validate_source(COSYVOICE_ID, "").is_ok());
+        assert!(validate_source(COSYVOICE_ID, DEFAULT_TTS_DOWNLOAD_URL).is_ok());
+        assert!(validate_source(COSYVOICE_ID, "https://mirror.example.com/tts").is_err());
+        assert!(
+            validate_source(
+                COSYVOICE_ID,
+                "https://www.modelscope.cn/models/owner/repo/files"
+            )
+            .is_ok()
+        );
+
+        assert!(validate_source(KOKORO_INT8_ID, "").is_ok());
+        assert!(validate_source(KOKORO_INT8_ID, "https://mirror.example.com/tts").is_ok());
+        assert!(validate_source(KOKORO_INT8_ID, "https://mirror.example.com/tts/").is_ok());
+        assert!(validate_source(KOKORO_INT8_ID, DEFAULT_TTS_DOWNLOAD_URL).is_err());
+        assert!(
+            validate_source(
+                KOKORO_INT8_ID,
+                "https://mirror.example.com/tts/kokoro.tar.bz2"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_source(
+                KOKORO_INT8_ID,
+                "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models"
+            )
+            .is_err()
+        );
+        assert!(validate_source("unknown", "https://mirror.example.com/tts").is_err());
+    }
+
+    #[test]
+    fn reused_cosyvoice_files_must_match_digest() {
+        let target = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        let file = official(
+            "dependency.onnx",
+            3,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+        let path = target.path().join(file.path);
+        fs::write(&path, b"bad").unwrap();
+        assert!(
+            reuse_cosyvoice_file(target.path(), staging.path(), &file, &token)
+                .unwrap()
+                .is_none()
+        );
+        fs::write(&path, b"abc").unwrap();
+        let verified = reuse_cosyvoice_file(target.path(), staging.path(), &file, &token)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(verified.path()).unwrap(), b"abc");
+        token.cancel();
+        assert!(reuse_cosyvoice_file(target.path(), staging.path(), &file, &token).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"abc");
     }
 
     #[test]
@@ -751,9 +965,9 @@ mod tests {
         let target = root.path().join("cosyvoice3");
         let staged = root.path().join("staged");
         fs::create_dir(&target).unwrap();
-        fs::write(target.join("runtime.json"), b"{}").unwrap();
+        fs::write(target.join("cosyvoice3.yaml"), b"{}").unwrap();
         assert!(publish_model(&staged, &target).is_err());
-        assert_eq!(fs::read(target.join("runtime.json")).unwrap(), b"{}");
+        assert_eq!(fs::read(target.join("cosyvoice3.yaml")).unwrap(), b"{}");
     }
 
     #[test]

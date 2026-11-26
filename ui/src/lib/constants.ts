@@ -98,6 +98,7 @@ export const EVENTS = {
   modelLoadStatus: 'model-load-status',
   subtitleProgress: 'subtitle-progress',
   ttsDownloadProgress: 'tts-download-progress',
+  ttsLoadProgress: 'tts-load-progress',
   ttsSynthesisProgress: 'tts-synthesis-progress',
   desktopLyricsControl: 'desktop-lyrics-control',
   desktopLyricsData: 'desktop-lyrics-data',
