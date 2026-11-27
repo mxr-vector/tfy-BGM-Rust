@@ -394,7 +394,15 @@ mod tests {
         touch(&root.join("cheerful/notes.txt"));
         touch(&root.join("epic/x.MP3"));
 
-        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
+        let mut categories = categories();
+        categories.sort_by_key(|category| match category.id.as_str() {
+            "cheerful" => 0,
+            "epic" => 1,
+            _ => 2,
+        });
+        categories.retain(|category| matches!(category.id.as_str(), "cheerful" | "epic"));
+
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories);
 
         let keys: Vec<_> = snapshot
             .songs
@@ -403,10 +411,12 @@ mod tests {
             .collect();
         assert_eq!(keys, ["cheerful/a_first", "cheerful/z_last", "epic/x"]);
         assert_eq!(snapshot.songs[0].title, "a first");
+        assert_eq!(snapshot.categories.len(), 2);
+        assert_eq!(snapshot.categories[0].id, "cheerful");
         assert_eq!(snapshot.categories[0].count, 2);
         assert_eq!(snapshot.categories[0].icon, "sparkles");
-        assert_eq!(snapshot.categories[3].count, 1);
-        assert_eq!(snapshot.categories[5].count, 0);
+        assert_eq!(snapshot.categories[1].id, "epic");
+        assert_eq!(snapshot.categories[1].count, 1);
         assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
     }
 
@@ -507,6 +517,13 @@ mod tests {
         let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
 
         assert_eq!(snapshot.songs.len(), 1);
-        assert!(snapshot.warnings.iter().any(|w| w.contains("重复曲目标识")));
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|w| w.contains("跳过同名曲目 same.mp3")),
+            "{:?}",
+            snapshot.warnings
+        );
     }
 }
