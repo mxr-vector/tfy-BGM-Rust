@@ -751,7 +751,9 @@ watch(settingsOpen, async (open) => {
                 </div>
                 <template v-if="gpuEnvironmentModel">
                   <div v-if="ttsGpuInstalling && ttsLoadProgress" class="settings-download">
-                    <progress class="settings-gpu-progress" aria-label="GPU 环境安装进度"></progress>
+                    <div class="settings-download-bar" role="progressbar" aria-label="GPU 环境安装进度">
+                      <span class="settings-download-fill is-indeterminate"></span>
+                    </div>
                     <p class="settings-hint" role="status">{{ ttsLoadProgress.stage }}</p>
                     <button type="button" class="settings-btn" :disabled="ttsLoadCancelling" @click="cancelTtsLoad">{{ ttsLoadCancelling ? '正在取消…' : '取消安装' }}</button>
                   </div>
