@@ -125,8 +125,8 @@ def make_session(path, use_gpu, intra=1):
     options.inter_op_num_threads = 1
     providers = ['CPUExecutionProvider']
     if use_gpu:
-        # The selected UUID is the only visible device. CPU may still run shape ops.
-        providers.insert(0, (CUDA_EP, {'device_id': 0}))
+        # cuDNN's exhaustive search can fail to find a Conv plan on Blackwell.
+        providers.insert(0, (CUDA_EP, {'device_id': 0, 'cudnn_conv_algo_search': 'DEFAULT'}))
     session = ort.InferenceSession(path, sess_options=options, providers=providers,
                                    enable_fallback=False)
     # An advertised EP can still fail to register (e.g. missing CUDA/cuDNN DLLs).
