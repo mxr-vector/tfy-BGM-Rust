@@ -2,7 +2,7 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
@@ -35,6 +35,8 @@ const FRAME_PREFIX: &[u8] = b"TFY_COSYVOICE ";
 static RUNTIME_SETUP: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// 运行环境布局变化时递增，使旧缓存环境只迁移安装一次。
 const COSYVOICE_ENV: &str = "v2";
+// torch/torchaudio 2.3.1 使用 Python 3.11 系列；不固定补丁版本，由 uv 选择最新的 3.11.x。
+const PYTHON_VERSION: &str = "3.11";
 /// 低于该显存量直接使用 CPU，避免加载 0.5B 权重时显存不足。
 const MIN_GPU_MIB: u64 = 6_144;
 
@@ -71,12 +73,16 @@ fn runtime_ready(home: &Path) -> bool {
 }
 
 fn runtime_python(app_cache: &Path) -> PathBuf {
+    venv_python(&app_cache.join("cosyvoice/venv"))
+}
+
+fn venv_python(venv: &Path) -> PathBuf {
     let binary = if cfg!(windows) {
         "Scripts/python.exe"
     } else {
         "bin/python3"
     };
-    app_cache.join("cosyvoice/venv").join(binary)
+    venv.join(binary)
 }
 
 fn managed_cuda_dir(app_cache: &Path) -> PathBuf {
@@ -146,29 +152,39 @@ fn selected_cuda_python(app_cache: &Path) -> Option<PathBuf> {
     })
 }
 
-/// uv 管理的 Python 安装目录名由 `uv python install` 决定，格式为
-/// `cpython-<版本>-<系统>-<架构>-<libc>`（仅 Linux 区分 gnu/musl）。
-fn managed_python(root: &Path) -> PathBuf {
-    let os = std::env::consts::OS;
-    let environment = if os == "linux" {
-        if cfg!(target_env = "musl") {
-            "musl"
-        } else {
-            "gnu"
-        }
-    } else {
-        "none"
-    };
-    let directory = format!(
-        "cpython-3.11.14-{os}-{}-{environment}",
-        std::env::consts::ARCH
+/// 让 uv 自己发现托管解释器，避免依赖 python-build-standalone 的目录命名。
+fn find_managed_python(
+    uv: &Path,
+    install_dir: &Path,
+    token: &CancellationToken,
+) -> Result<Option<PathBuf>> {
+    let output = tempfile::NamedTempFile::new().context("无法创建 Python 发现日志")?;
+    let mut command = Command::new(uv);
+    command
+        .args([
+            "python",
+            "find",
+            "--managed-python",
+            "--no-python-downloads",
+            PYTHON_VERSION,
+        ])
+        .env("UV_PYTHON_INSTALL_DIR", install_dir)
+        .stdin(Stdio::null())
+        .stdout(output.reopen()?)
+        .stderr(Stdio::null());
+    if !run_cancellable_status(&mut command, token, SETUP_COMMAND_TIMEOUT)?.success() {
+        return Ok(None);
+    }
+    check_cancelled(token)?;
+    let text = fs::read_to_string(output.path())?;
+    let path = PathBuf::from(text.trim());
+    ensure!(!text.trim().is_empty(), "uv 未返回托管的 Python 解释器路径");
+    ensure!(
+        path.is_absolute() && path.is_file(),
+        "uv 返回的 Python 解释器路径无效：{}",
+        path.display()
     );
-    let binary = if cfg!(windows) {
-        "python.exe"
-    } else {
-        "bin/python3"
-    };
-    root.join("python").join(directory).join(binary)
+    Ok(Some(path))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -378,13 +394,12 @@ fn prepare_environment(
     progress("正在准备 CosyVoice3 Python 运行环境…");
     let root = app_cache.join("cosyvoice");
     let python = runtime_python(app_cache);
-    let python_home = managed_python(&root);
     let marker = root.join("venv/.tfy-bgm-cosyvoice-env");
     let expected = format!("{COSYVOICE_ENV}:cpu\n");
-    if python.is_file() && fs::read_to_string(&marker).is_ok_and(|current| current == expected) {
+    if environment_ready(&python, &marker, &expected) {
         return Ok(());
     }
-    let uv = prepare_python(app_cache, token)?;
+    let (uv, python_home) = prepare_python(app_cache, token)?;
     prepare_venv(
         &uv,
         app_cache,
@@ -400,37 +415,34 @@ fn prepare_environment(
     Ok(())
 }
 
-fn prepare_python(app_cache: &Path, token: &CancellationToken) -> Result<PathBuf> {
+fn prepare_python(app_cache: &Path, token: &CancellationToken) -> Result<(PathBuf, PathBuf)> {
     let root = app_cache.join("cosyvoice");
-    let python_home = managed_python(&root);
     fs::create_dir_all(&root)?;
     let uv = uv_path(&root);
     if !uv.is_file() {
         install_uv(&uv, &root, token)?;
     }
-    if !python_home.is_file() {
+    let install_dir = root.join("python");
+    fs::create_dir_all(&install_dir)?;
+    if find_managed_python(&uv, &install_dir, token)?.is_none() {
         // 全平台都用 uv 安装隔离的 Python，避免依赖系统里的 python3.11。
-        let install_dir = root.join("python");
-        fs::create_dir_all(&install_dir)?;
         let install_dir = install_dir.to_string_lossy();
         let mut args = vec![
             "python",
             "install",
-            "3.11.14",
+            PYTHON_VERSION,
             "--install-dir",
             install_dir.as_ref(),
+            "--no-bin",
         ];
         if cfg!(windows) {
             args.push("--no-registry");
         }
         run_setup(&uv, app_cache, token, &args).context("下载隔离的 Python 3.11 运行环境失败")?;
-        ensure!(
-            python_home.is_file(),
-            "Python 3.11 安装完成但未找到解释器：{}",
-            python_home.display()
-        );
     }
-    Ok(uv)
+    let python_home = find_managed_python(&uv, &install_dir, token)?
+        .with_context(|| format!("uv 未能发现已安装的 Python {PYTHON_VERSION}"))?;
+    Ok((uv, python_home))
 }
 
 fn prepare_venv(
@@ -441,18 +453,42 @@ fn prepare_venv(
     token: &CancellationToken,
     progress: &dyn Fn(&str),
 ) -> Result<()> {
-    if !venv.join("pyvenv.cfg").is_file() {
+    let python = venv_python(venv);
+    if !venv.join("pyvenv.cfg").is_file() || !python_probe(&python, "import sys") {
         progress("正在创建 CosyVoice3 Python 环境…");
         let mut command = Command::new(uv);
         command
-            .args(["venv", "--python"])
+            .args(["venv", "--clear", "--force", "--python"])
             .arg(python_home)
             .arg(venv)
             .env("UV_CACHE_DIR", app_cache.join("cosyvoice/uv-cache"));
         run_cancellable(&mut command, token, SETUP_COMMAND_TIMEOUT)
             .context("创建 CosyVoice Python 环境失败")?;
     }
+    ensure!(
+        python_probe(&python, "import sys"),
+        "CosyVoice Python 环境创建后仍无法启动：{}",
+        python.display()
+    );
     Ok(())
+}
+
+fn environment_ready(python: &Path, marker: &Path, expected: &str) -> bool {
+    fs::read_to_string(marker).is_ok_and(|current| current == expected)
+        && python_probe(
+            python,
+            "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(name) is None for name in ('numpy', 'onnxruntime', 'torch')))",
+        )
+}
+
+fn python_probe(python: &Path, code: &str) -> bool {
+    let mut command = bgm_core::process::command(python);
+    command
+        .args(["-c", code])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().is_ok_and(|status| status.success())
 }
 
 const CUDA_PACKAGES: &[&str] = &[
@@ -496,12 +532,11 @@ pub(super) fn install_managed_cuda(
     let home = runtime_source(app_cache, token, progress)?;
     let _setup = RUNTIME_SETUP.lock();
     progress("正在准备 CosyVoice3 CUDA Python 环境…");
-    let uv = prepare_python(app_cache, token)?;
-    let root = app_cache.join("cosyvoice");
+    let (uv, python_home) = prepare_python(app_cache, token)?;
     prepare_venv(
         &uv,
         app_cache,
-        &managed_python(&root),
+        &python_home,
         &managed_cuda_dir(app_cache),
         token,
         progress,
@@ -767,12 +802,31 @@ fn run_cancellable(
     run_cancellable_with_poll(command, token, timeout, || {})
 }
 
+fn run_cancellable_status(
+    command: &mut Command,
+    token: &CancellationToken,
+    timeout: Duration,
+) -> Result<ExitStatus> {
+    run_cancellable_with_poll_status(command, token, timeout, || {})
+}
+
 fn run_cancellable_with_poll(
     command: &mut Command,
     token: &CancellationToken,
     timeout: Duration,
     mut poll: impl FnMut(),
 ) -> Result<()> {
+    let status = run_cancellable_with_poll_status(command, token, timeout, &mut poll)?;
+    ensure!(status.success(), "CosyVoice 环境准备命令失败（{status}）");
+    Ok(())
+}
+
+fn run_cancellable_with_poll_status(
+    command: &mut Command,
+    token: &CancellationToken,
+    timeout: Duration,
+    mut poll: impl FnMut(),
+) -> Result<ExitStatus> {
     check_cancelled(token)?;
     bgm_core::process::suppress_console(command);
     let mut child = command.spawn()?;
@@ -792,8 +846,7 @@ fn run_cancellable_with_poll(
         let status = child.try_wait()?;
         poll();
         if let Some(status) = status {
-            ensure!(status.success(), "CosyVoice 环境准备命令失败（{status}）");
-            return Ok(());
+            return Ok(status);
         }
         thread::sleep(remaining.min(Duration::from_millis(100)));
     }
@@ -1358,11 +1411,8 @@ mod tests {
         let python = runtime_python(root);
         fs::create_dir_all(python.parent().unwrap()).unwrap();
         fs::write(python, b"invalid interpreter").unwrap();
-        fs::write(
-            root.join("cosyvoice/venv/.tfy-bgm-cosyvoice-env"),
-            format!("{COSYVOICE_ENV}:cpu\n"),
-        )
-        .unwrap();
+        let blocked_cache = root.join("blocked-cache");
+        fs::write(&blocked_cache, b"not a directory").unwrap();
         let (requests, pending) = mpsc::sync_channel(1);
         let (events, replies) = mpsc::channel();
         let engine = Engine {
@@ -1374,7 +1424,7 @@ mod tests {
             cpu_fallback: Some(CpuFallback {
                 home: root.to_owned(),
                 model: root.to_owned(),
-                app_cache: root.to_owned(),
+                app_cache: blocked_cache,
             }),
         };
         (engine, pending, events)
@@ -1446,22 +1496,20 @@ mod tests {
     }
 
     #[test]
-    fn managed_python_matches_python_build_standalone_layout() {
-        let python = managed_python(Path::new("cache"));
-        let text = python.to_string_lossy().replace('\\', "/");
-        assert!(
-            text.contains(&format!(
-                "cpython-3.11.14-{}-{}-",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )),
-            "{text}"
-        );
-        assert!(text.ends_with(if cfg!(windows) {
-            "python.exe"
-        } else {
-            "bin/python3"
-        }));
+    fn environment_ready_rejects_missing_interpreter_and_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let python = runtime_python(root);
+        let marker = root.join("cosyvoice/venv/.tfy-bgm-cosyvoice-env");
+        let expected = format!("{COSYVOICE_ENV}:cpu\n");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, &expected).unwrap();
+        assert!(!environment_ready(&python, &marker, &expected));
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, b"invalid interpreter").unwrap();
+        assert!(!environment_ready(&python, &marker, &expected));
+        fs::remove_file(&marker).unwrap();
+        assert!(!environment_ready(&python, &marker, &expected));
     }
 
     #[test]
