@@ -3,15 +3,19 @@
 #
 # Usage (from the repository root):
 #   powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
-#   powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
+#   powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -WithBgm
 #   powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -SkipBuild -NoZip
 #
-# Default: copy the repository bgm/ folder next to the exe (self-contained, ~350 MB).
-# -EmptyBgm: create an empty category scaffold (~3.7 MB); point the app at a library later.
+# Default: no audio. Only an empty category scaffold ships in bgm/ (package ~34 MB,
+# mostly built-in wallpapers and voice prompts), and the app points at a library
+# chosen on first use.
+# -WithBgm: copy the repository bgm/ folder next to the exe (self-contained, ~350 MB).
 #
 # Existing bgm/ files inside the package are preserved. For a clean rebuild, delete
-# dist\tfy-bgm manually. -EmptyBgm refuses to run if the existing bgm/ has audio files.
-# -WithBgm is kept for compatibility and is equivalent to the default.
+# dist\tfy-bgm manually. The default (no-audio) build refuses to run if the existing
+# bgm/ already has audio files, so a library is never shipped by accident; pass
+# -WithBgm to keep those files.
+# -EmptyBgm is kept for compatibility and is equivalent to the default.
 # -SkipBuild reuses src-tauri\target\release\tfy-bgm.exe. -NoZip only assembles the folder.
 # The bgm/ folder is never embedded into the executable.
 
@@ -95,16 +99,21 @@ if (Test-Path $bgmTarget) {
     ).Count
 }
 
-if ($EmptyBgm -and -not $WithBgm) {
-    if ($existingAudio -gt 0) {
-        throw "Existing bgm/ contains $existingAudio audio files. Move it or choose another -OutputDir before building an empty package."
-    }
-    New-Item -ItemType Directory -Force $bgmTarget | Out-Null
+# An empty bgm/ still needs the category folders so the first launch scans cleanly.
+function New-EmptyBgmScaffold([string]$Path) {
+    New-Item -ItemType Directory -Force $Path | Out-Null
     $categories = Get-Content (Join-Path $srcTauri "core\assets\categories.default.json") -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($category in $categories) {
-        New-Item -ItemType Directory -Force (Join-Path $bgmTarget $category.id) | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $Path $category.id) | Out-Null
     }
-    Write-Host "bgm/: empty category scaffold"
+}
+
+if (-not $WithBgm) {
+    if ($existingAudio -gt 0) {
+        throw "Existing bgm/ contains $existingAudio audio files. Delete $bgmTarget for a clean no-audio build, or pass -WithBgm to keep them."
+    }
+    New-EmptyBgmScaffold $bgmTarget
+    Write-Host "bgm/: empty category scaffold (no audio; pass -WithBgm to bundle the repository library)"
 } elseif (Test-Path $bgmSource) {
     if ($existingAudio -gt 0) {
         Write-Host "bgm/: kept existing $existingAudio audio files (not overwritten)"
@@ -113,11 +122,7 @@ if ($EmptyBgm -and -not $WithBgm) {
         Write-Host "bgm/: copied from $bgmSource"
     }
 } else {
-    New-Item -ItemType Directory -Force $bgmTarget | Out-Null
-    $categories = Get-Content (Join-Path $srcTauri "core\assets\categories.default.json") -Raw -Encoding UTF8 | ConvertFrom-Json
-    foreach ($category in $categories) {
-        New-Item -ItemType Directory -Force (Join-Path $bgmTarget $category.id) | Out-Null
-    }
+    New-EmptyBgmScaffold $bgmTarget
     Write-Host "bgm/: repository bgm/ not found; empty category scaffold"
 }
 

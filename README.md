@@ -632,6 +632,7 @@ cd src-tauri && cargo tauri dev
 ### 通用约定
 
 - **音频不进包**：`bgm/` 始终外置，运行时从 exe 同级或用户指定目录读取。
+- **绿色版默认不带音频**：zip 里只有空的 `bgm/<分类>/`（整体约 34 MB，主要是内置壁纸与语音提示音），曲库由用户首次启动后指定；只有显式加 `-WithBgm`（或 CI 选 `with-library`）才把仓库 `bgm/` 打进包。
 - **模型进安装包**：人声分离模型（约 174 MB）与内置壁纸经 `bundle.resources` 打入 NSIS / deb / rpm；绿色版脚本只复制 `assets/bg`，**不含 `models/`**，需要字幕生成时把仓库 `models/` 复制到 exe 同级。
 - **版本唯一来源**：`src-tauri/tauri.conf.json` 的 `version`；脚本会校验 `Cargo.toml` 的 `[package].version`，不一致直接报错。
 - **构建顺序**：前端必须先 `pnpm run build`。绿色版直接用 cargo 构建时**必须带 `--features custom-protocol`**，否则 Tauri 按开发模式加载 `devUrl`，exe 启动后白屏。
@@ -639,17 +640,17 @@ cd src-tauri && cargo tauri dev
 ### 方式一：Windows 绿色版
 
 ```powershell
-# 自带曲库（默认，约 350 MB，以音频为主）
+# 默认：不带音频，只建分类空目录（约 34 MB，主要是内置壁纸与语音提示音），启动后自行指定曲库
 powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
 
-# 精简包：只建分类空目录，启动后自行指定曲库
-powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
+# 自带曲库：把仓库 bgm/ 一起打包（自包含，约 350 MB，以音频为主）
+powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -WithBgm
 ```
 
 | 参数 | 作用 |
 | :--- | :--- |
-| 默认（或 `-WithBgm`） | 复制仓库 `bgm/`，解压即带曲库 |
-| `-EmptyBgm` | 只创建 6 个分类空目录；检测到已有音频时拒绝执行 |
+| 默认（或 `-EmptyBgm`） | 只创建 6 个分类空目录，**不含任何音频**；检测到组装目录已有音频时拒绝执行 |
+| `-WithBgm` | 复制仓库 `bgm/`，解压即带曲库；已有音频时保留不覆盖 |
 | `-SkipBuild` | 复用 `src-tauri/target/release/tfy-bgm.exe`，只组装与压缩 |
 | `-NoZip` | 只组装目录，不打 zip |
 | `-OutputDir` | 指定输出目录（默认 `dist`） |
@@ -660,10 +661,11 @@ powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -EmptyBgm
 dist/
   tfy-bgm-1.0.0-windows-x64-portable.zip   ← 对外分发
   SHA256SUMS.txt                           ← SHA-256 校验值
-  tfy-bgm/                                 ← 组装目录（exe + assets/bg + bgm/ + 说明文件）
+  tfy-bgm/                                 ← 组装目录（exe + assets/bg + voices + bgm/ + 说明文件）
 ```
 
-- 重复打包只更新 exe / 说明文件，保留 `dist\tfy-bgm\bgm` 里已有的曲库；要从仓库重新同步，先删除该目录。
+- 重复打包只更新 exe / 说明文件；`-WithBgm` 时保留 `dist\tfy-bgm\bgm` 里已有的曲库，要从仓库重新同步，先删除该目录。
+- 默认的「无音频」包如果发现 `dist\tfy-bgm\bgm` 里已有音频会直接报错，避免误把曲库打进分发包；确实要带库请加 `-WithBgm`。
 - 检测到组装目录中的程序正在运行时会提示先关闭，避免覆盖失败。
 - zip 内为单层 `tfy-bgm/`，条目分隔符统一 `/`，中文名按 UTF-8 存储，跨平台解压不乱码。
 - 手动构建时：
@@ -740,7 +742,7 @@ git push origin v1.0.0
 | :--- | :--- |
 | **包** | Windows 绿色版 / 安装版 / Linux deb / rpm，可任意组合 |
 | **架构** | `x64`（默认）/ `arm64` / `both`，arm64 走原生 ARM 运行器，不做交叉编译 |
-| **曲库** | `with-library` / `empty-library`（仅影响 Windows 绿色版） |
+| **曲库** | `empty-library`（默认，绿色版不带音频）/ `with-library`（把仓库 `bgm/` 打进绿色版） |
 
 几点说明：
 
@@ -748,7 +750,7 @@ git push origin v1.0.0
 - 缓存按「作业 + 架构」分开，`tauri-cli` 与 Rust 依赖命中后直接跳过编译。
 - artifact 只上传最终安装包，保留 3 天；`dist/tfy-bgm/` 组装目录不进 artifact。
 - Linux 使用 `ubuntu-24.04`，产物只支持 glibc ≥ 2.39 的系统。
-- 仓库 `bgm/` 约 350 MB，私有仓库建议手动触发时选 `empty-library` 以节省 Actions 存储配额。
+- 绿色版默认不带音频（zip 约 34 MB）；需要自带曲库时手动触发选 `with-library`。推 `v*` 标签发布的产物同样是空曲库包，仓库 `bgm/`（约 350 MB）只留在仓库里，不占 Actions 存储配额。
 
 Gitee 原生流水线位于 `.workflow/package.yml`。推送到 Gitee 的 `v*` 标签会校验版本，使用 `cargo-xwin` 在 Linux 托管环境交叉编译 **Windows x64 绿色版**，再由 `release@gitee` 创建发行版并上传压缩包与 `SHA256SUMS.txt`，无需配置 Token。
 

@@ -14,7 +14,7 @@
 #   - 架构：手动触发默认 x64，可选 arm64 / both；推送 v* 标签时固定构建 both（x64 + arm64）。
 #     arm64 用原生 ARM 运行器（windows-11-arm、ubuntu-24.04-arm），不做交叉编译；
 #     首次运行要重新编译依赖，会比 x64 慢。
-#   - 曲库：with-library / empty-library（仅影响 Windows 绿色版）。
+#   - 曲库：empty-library（默认，绿色版不带音频）/ with-library（把仓库 bgm/ 一起打包，仅影响 Windows 绿色版）。
 #   - 只勾绿色版时不安装 tauri-cli；同时勾安装版时先出 NSIS 再复用同一份 exe 组装绿色版，
 #     省掉一次前端构建与 Rust 增量检查。
 #
@@ -25,8 +25,8 @@
 #
 # 注意：
 #   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 plan 直接失败。
-#   - 仓库里含 bgm/ 曲库（约 350 MB），with-library 会产出 346 MB 的 zip；
-#     不想占用 Actions 存储配额时，手动触发时选 empty-library，或只勾选需要的包。
+#   - 仓库里含 bgm/ 曲库（约 350 MB），绿色版默认不带音频（空分类目录，约 34 MB 的 zip，主要是壁纸与语音提示音）；
+#     需要自带曲库时手动触发选 with-library，会产出约 350 MB 的 zip 并占用较多 Actions 存储配额。
 #   - Linux 用 ubuntu-24.04：只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），
 #     更老的发行版不在支持范围内，不再做兼容处理。
 #   - deb 与 rpm 都由 tauri 内置的纯 Rust 打包器直出，不需要 dpkg-deb / rpmbuild / Fedora。
@@ -75,9 +75,9 @@ on:
         description: "Windows 绿色版是否内置曲库"
         type: choice
         options:
-          - with-library
           - empty-library
-        default: with-library
+          - with-library
+        default: empty-library
 
 permissions:
   contents: write
@@ -166,7 +166,7 @@ jobs:
               "rpm": str(rpm).lower(),
               "windows_arch": json.dumps(arches("INPUT_WINDOWS_ARCH") if (portable or nsis) else []),
               "linux_arch": json.dumps(arches("INPUT_LINUX_ARCH") if (deb or rpm) else []),
-              "library": os.environ.get("INPUT_LIBRARY") or "with-library",
+              "library": os.environ.get("INPUT_LIBRARY") or "empty-library",
           }
           print(values)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
@@ -231,7 +231,7 @@ jobs:
         run: |
           $cmd = @("-ExecutionPolicy", "Bypass", "-File", "scripts/package-portable.ps1")
           if ('${{ needs.plan.outputs.nsis }}' -eq 'true') { $cmd += "-SkipBuild" }
-          if ('${{ needs.plan.outputs.library }}' -eq 'empty-library') { $cmd += "-EmptyBgm" }
+          if ('${{ needs.plan.outputs.library }}' -eq 'with-library') { $cmd += "-WithBgm" }
           powershell @cmd
 
       # 只传最终文件，dist/tfy-bgm/ 组装目录不进 artifact，省一次几百 MB 的上传。
