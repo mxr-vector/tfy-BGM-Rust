@@ -51,9 +51,21 @@ test -s "$resources/Assets.car"
 
 cargo build --target-dir "$target" "${cargo_flags[@]}"
 install -m 755 "$target/$profile/tfy-bgm-gpui" "$app/Contents/MacOS/tfy-bgm-gpui"
-if [[ -f "$repo/assets/bg/1.mp4" ]]; then
-    mkdir -p "$resources/bg"
-    install -m 644 "$repo/assets/bg/1.mp4" "$resources/bg/1.mp4"
+if [[ -d "$repo/assets/bg" ]]; then
+    mkdir -p "$resources/assets/bg"
+    for bg in "$repo/assets/bg"/*; do
+        [[ -f "$bg" ]] || continue
+        name="${bg##*/}"
+        [[ "$name" == .* || "$name" == *.thumb.* ]] && continue
+        install -m 644 "$bg" "$resources/assets/bg/$name"
+    done
+fi
+if [[ -d "$repo/models/voices" ]]; then
+    mkdir -p "$resources/voices"
+    for voice in "$repo/models/voices"/*; do
+        [[ -f "$voice" ]] || continue
+        install -m 644 "$voice" "$resources/voices/${voice##*/}"
+    done
 fi
 models="${TFY_SEPARATION_MODELS_DIR:-$repo/models}"
 for model in UVR-MDX-NET-Inst_HQ_3.onnx UVR-MDX-NET-Voc_FT.onnx sherpa-onnx-spleeter-2stems-int8.tar.bz2; do

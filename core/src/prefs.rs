@@ -3,7 +3,7 @@
 //! 所有来自前端的数据都会经过 `normalize`，落盘采用「临时文件 + 重命名」，
 //! 损坏的偏好文件回退为默认值而不是让应用启动失败。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -15,7 +15,7 @@ use crate::loudness::find_preset;
 use crate::paths::strip_verbatim_prefix;
 use crate::persist::{PersistError, write_json};
 
-pub const PREFS_VERSION: u32 = 4;
+pub const PREFS_VERSION: u32 = 5;
 pub const DEFAULT_VOLUME: f32 = 0.85;
 pub const PLAYBACK_RATES: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 /// 切歌交叉淡入淡出的默认时长（秒）；`0` 表示硬切。
@@ -35,10 +35,36 @@ const MAX_MODELS_DIR_LEN: usize = 512;
 const MAX_DOWNLOAD_URL_LEN: usize = 1024;
 /// 分离模型 id 长度上限。
 const MAX_SEPARATION_MODEL_LEN: usize = 256;
+/// 按模型保存下载源时的模型 id 长度上限。
+const MAX_TTS_MODEL_ID_LEN: usize = 128;
+/// 按模型保存的 TTS 下载源数量上限，避免异常配置无限增长。
+const MAX_TTS_DOWNLOAD_SOURCES: usize = 8;
 /// ASR 模型默认下载地址：ModelScope 上的 0.6B-int8 模型目录。
 /// 偏好里留空即表示使用此地址，下载地址的唯一真源放在 core，避免多处定义漂移。
 pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
     "https://modelscope.cn/models/zengshuishui/Qwen3-ASR-onnx/tree/master/model_0.6B";
+/// CosyVoice3 ONNX 模型默认下载仓库。
+pub const DEFAULT_TTS_DOWNLOAD_URL: &str =
+    "https://www.modelscope.cn/models/zhangluoyang/cosyvoice3-onnx/files";
+/// Kokoro / ZipVoice 默认浏览页；仅用于「访问下载源」，不能拼接文件名下载。
+pub const DEFAULT_TTS_RELEASE_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models";
+/// Kokoro / ZipVoice 默认下载基址；自定义镜像需保持同样的「目录 + 文件名」结构。
+pub const DEFAULT_TTS_MIRROR_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
+/// CUDA 环境安装默认使用的 PyPI 镜像源（清华）。
+pub const DEFAULT_CUDA_PYPI_MIRROR: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
+/// CUDA 环境安装默认使用的 PyTorch 轮子镜像源（南京大学）。
+pub const DEFAULT_CUDA_PYTORCH_MIRROR: &str = "https://mirrors.nju.edu.cn/pytorch/";
+/// CosyVoice3 的稳定模型 id，与运行时 `tts_models::SPECS` 保持一致。
+pub const TTS_COSYVOICE_MODEL_ID: &str = "cosyvoice3-0.5b-2512";
+/// 走 sherpa-onnx release（压缩包 + 平铺镜像）的 TTS 模型 id。
+pub const TTS_SHERPA_MODEL_IDS: [&str; 4] = [
+    "kokoro-int8",
+    "kokoro-fp32",
+    "zipvoice-int8",
+    "zipvoice-fp32",
+];
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -50,14 +76,25 @@ pub const DEFAULT_WALLPAPER_OPACITY: f32 = 0.35;
 pub const DEFAULT_WALLPAPER_BLUR: u32 = 0;
 /// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
 pub const DEFAULT_WALLPAPER_FIT: &str = "cover";
-/// 内置壁纸选项的合法 id；`custom` 需要搭配自定义文件路径才生效。
-pub const BUILTIN_WALLPAPER_IDS: [&str; 5] = [
-    "gradient-blue",
-    "gradient-green",
-    "gradient-red",
-    "builtin-1",
-    "builtin-2",
-];
+/// 渐变底色壁纸的合法 id；图片 / 视频壁纸由资源目录自动发现，
+/// id 形如 `builtin-<文件名>`，无需在此维护固定清单。
+pub const GRADIENT_WALLPAPER_IDS: [&str; 3] = ["gradient-blue", "gradient-green", "gradient-red"];
+/// 自动发现壁纸 id 中文件名部分的最大长度。
+const MAX_BUILTIN_ID_SUFFIX_LEN: usize = 64;
+
+/// 是否是可识别的内置壁纸 id；`custom` 需要搭配自定义文件路径才生效。
+fn is_builtin_wallpaper_id(id: &str) -> bool {
+    if GRADIENT_WALLPAPER_IDS.contains(&id) {
+        return true;
+    }
+    id.strip_prefix("builtin-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.chars().count() <= MAX_BUILTIN_ID_SUFFIX_LEN
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    })
+}
 
 /// 自定义壁纸路径是否带受支持的扩展名（不检查文件是否存在，由调用方决定）。
 pub fn is_wallpaper_path(path: &str) -> bool {
@@ -69,6 +106,18 @@ pub fn is_wallpaper_path(path: &str) -> bool {
                 .iter()
                 .any(|allowed| ext.eq_ignore_ascii_case(allowed))
         })
+}
+
+/// 壁纸类型：`video` 走动态壁纸，其余一律按静态图片处理。
+///
+/// 视频壁纸在 Linux 上需要额外的本地媒体服务，平台实现与调用方都以此判断，
+/// 因此判定规则放在这里，避免多处各写一份扩展名比较。
+pub fn wallpaper_kind(path: &Path) -> &'static str {
+    let is_video = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if is_video { "video" } else { "image" }
 }
 
 /// 模型下载地址是否是可用的 http(s) 链接；不合法时回退内置地址。
@@ -204,6 +253,12 @@ pub struct Prefs {
     pub models_dir: Option<String>,
     /// ASR 模型下载地址；空字符串表示使用 `DEFAULT_ASR_DOWNLOAD_URL`（0.6B-int8）。
     pub asr_download_url: String,
+    /// 按模型 id 覆盖的 TTS 下载源；缺失表示使用该模型内置默认源。
+    pub tts_download_urls: BTreeMap<String, String>,
+    /// 安装 CUDA 环境时使用的 PyPI 镜像源；空或非法时回退 `DEFAULT_CUDA_PYPI_MIRROR`。
+    pub cuda_pypi_mirror: String,
+    /// 安装 CUDA 环境时使用的 PyTorch 轮子镜像源；空或非法时回退 `DEFAULT_CUDA_PYTORCH_MIRROR`。
+    pub cuda_pytorch_mirror: String,
     /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
     /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
     pub last_asr_model: Option<String>,
@@ -256,6 +311,9 @@ impl Default for Prefs {
             close_action: CloseAction::Ask,
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
+            tts_download_urls: BTreeMap::new(),
+            cuda_pypi_mirror: DEFAULT_CUDA_PYPI_MIRROR.to_owned(),
+            cuda_pytorch_mirror: DEFAULT_CUDA_PYTORCH_MIRROR.to_owned(),
             last_asr_model: None,
             separation_model: None,
             desktop_lyrics_enabled: false,
@@ -361,9 +419,8 @@ impl Prefs {
             .filter(|path| is_wallpaper_path(path));
 
         let wallpaper = self.wallpaper.trim().to_ascii_lowercase();
-        let is_builtin = BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str());
         let is_custom = wallpaper == "custom" && self.custom_wallpaper.is_some();
-        self.wallpaper = if is_builtin || is_custom {
+        self.wallpaper = if is_custom || is_builtin_wallpaper_id(&wallpaper) {
             wallpaper
         } else {
             DEFAULT_WALLPAPER.to_owned()
@@ -409,6 +466,41 @@ impl Prefs {
             download_url.to_owned()
         } else {
             DEFAULT_ASR_DOWNLOAD_URL.to_owned()
+        };
+        self.tts_download_urls = self
+            .tts_download_urls
+            .into_iter()
+            .filter_map(|(id, url)| {
+                let id = id.trim();
+                if id.is_empty()
+                    || id.chars().count() > MAX_TTS_MODEL_ID_LEN
+                    || !id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                {
+                    return None;
+                }
+                let url = url.trim().trim_end_matches('/');
+                if url.is_empty() || !is_download_url(url) || url.contains(['?', '#']) {
+                    return None;
+                }
+                Some((id.to_owned(), url.to_owned()))
+            })
+            .take(MAX_TTS_DOWNLOAD_SOURCES)
+            .collect();
+
+        // CUDA 镜像源同样只允许 http(s) 地址，非法值回退内置默认，保证安装命令始终可用。
+        let pypi_mirror = self.cuda_pypi_mirror.trim();
+        self.cuda_pypi_mirror = if is_download_url(pypi_mirror) {
+            pypi_mirror.to_owned()
+        } else {
+            DEFAULT_CUDA_PYPI_MIRROR.to_owned()
+        };
+        let pytorch_mirror = self.cuda_pytorch_mirror.trim();
+        self.cuda_pytorch_mirror = if is_download_url(pytorch_mirror) {
+            pytorch_mirror.to_owned()
+        } else {
+            DEFAULT_CUDA_PYTORCH_MIRROR.to_owned()
         };
 
         // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，
@@ -745,6 +837,28 @@ mod tests {
     }
 
     #[test]
+    fn discovered_builtin_wallpaper_ids_are_kept() {
+        // 自动发现的壁纸 id 由文件名生成，归一化不能再按固定清单拦截。
+        for id in ["builtin-1", "builtin-3", "builtin-night_view"] {
+            let prefs = Prefs {
+                wallpaper: id.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(prefs.wallpaper, id);
+        }
+
+        for bad in ["builtin-", "builtin-../x", "builtin-夜"] {
+            let prefs = Prefs {
+                wallpaper: bad.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(prefs.wallpaper, DEFAULT_WALLPAPER, "{bad} 不应保留");
+        }
+    }
+
+    #[test]
     fn custom_wallpaper_requires_supported_file() {
         let missing = Prefs {
             wallpaper: "custom".into(),
@@ -880,6 +994,30 @@ mod tests {
         assert!(invalid.models_dir.is_none());
         // 非法地址回退到内置默认地址，而不是留下一个无法请求的链接。
         assert_eq!(invalid.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "kokoro-int8".into(),
+            " https://mirror.example.com/tts/ ".into(),
+        );
+        sources.insert("../bad".into(), "https://mirror.example.com/x".into());
+        sources.insert("zipvoice-int8".into(), "file:///tmp".into());
+        sources.insert(
+            TTS_COSYVOICE_MODEL_ID.into(),
+            "https://www.modelscope.cn/models/owner/repo/files?x=1".into(),
+        );
+        let normalized = Prefs {
+            tts_download_urls: sources,
+            ..Prefs::default()
+        }
+        .normalize();
+        assert_eq!(normalized.tts_download_urls.len(), 1);
+        assert_eq!(
+            normalized
+                .tts_download_urls
+                .get("kokoro-int8")
+                .map(String::as_str),
+            Some("https://mirror.example.com/tts")
+        );
 
         // Windows canonicalize 的 verbatim 前缀不能写进配置，否则与扫描路径不相等。
         let verbatim = Prefs {

@@ -31,7 +31,7 @@ pub struct TextField {
 impl TextField {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -146,11 +146,54 @@ impl TextField {
         cx: &mut Context<Self>,
     ) {
         self.is_selecting = true;
-        if event.modifiers.shift {
+        if event.click_count >= 3 {
+            self.selected_range = 0..self.content.len();
+            self.selection_reversed = false;
+            cx.notify();
+        } else if event.click_count == 2 {
+            let index = self.index_for_mouse_position(event.position);
+            self.select_word_at(index, cx);
+        } else if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx);
         }
+    }
+
+    fn select_word_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return;
+        }
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+        let clamped = index.min(self.content.len());
+        let mut start = clamped;
+        while start > 0 {
+            let prev = self.previous_boundary(start);
+            if let Some(c) = self.content[prev..start].chars().next()
+                && is_word_char(c)
+            {
+                start = prev;
+            } else {
+                break;
+            }
+        }
+        let mut end = clamped;
+        while end < self.content.len() {
+            let next = self.next_boundary(end);
+            if let Some(c) = self.content[end..next].chars().next()
+                && is_word_char(c)
+            {
+                end = next;
+            } else {
+                break;
+            }
+        }
+        if start == end && clamped < self.content.len() {
+            end = self.next_boundary(clamped);
+        }
+        self.selected_range = start..end;
+        self.selection_reversed = false;
+        cx.notify();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
@@ -598,8 +641,11 @@ impl gpui::Render for TextField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         gpui::div()
             .id("text-field")
+            .w_full()
+            .min_w(px(0.))
             .key_context("TextInput")
             .track_focus(&self.focus_handle)
+            .tab_index(0)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

@@ -57,6 +57,23 @@ impl PcmTrack {
     }
 }
 
+pub fn stretch_mono(samples: Vec<f32>, rate: u32, speed: f64) -> Vec<f32> {
+    let track = PcmTrack {
+        samples,
+        channels: rodio::ChannelCount::MIN,
+        sample_rate: rodio::SampleRate::new(rate).expect("有效采样率"),
+    };
+    let mut stretch = TimeStretch::new(rate as usize);
+    let len = (track.frames() as f64 / speed).floor() as usize;
+    (0..len)
+        .map(|index| {
+            stretch
+                .next(&track, (index as f64 * speed) as i64, speed, None)
+                .sample(&track, 0)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct Gain {
     current: f32,
@@ -258,26 +275,22 @@ struct OutputSink {
 }
 
 impl OutputSink {
-    fn open(device: cpal::Device) -> Result<Self, String> {
+    fn open(device: cpal::Device) -> Result<Self, rodio::DeviceSinkError> {
         let unavailable = Arc::new(AtomicBool::new(false));
         let signal = unavailable.clone();
-        let stream = DeviceSinkBuilder::from_device(device)
-            .and_then(|builder| {
-                builder
-                    .with_error_callback(move |error| {
-                        use cpal::ErrorKind::{
-                            DeviceNotAvailable, HostUnavailable, StreamInvalidated,
-                        };
-                        if matches!(
-                            error.kind(),
-                            DeviceNotAvailable | HostUnavailable | StreamInvalidated
-                        ) {
-                            signal.store(true, Ordering::Relaxed);
-                        }
-                    })
-                    .open_sink_or_fallback()
-            })
-            .map_err(|error| error.to_string())?;
+        let stream = DeviceSinkBuilder::from_device(device).and_then(|builder| {
+            builder
+                .with_error_callback(move |error| {
+                    use cpal::ErrorKind::{DeviceNotAvailable, HostUnavailable, StreamInvalidated};
+                    if matches!(
+                        error.kind(),
+                        DeviceNotAvailable | HostUnavailable | StreamInvalidated
+                    ) {
+                        signal.store(true, Ordering::Relaxed);
+                    }
+                })
+                .open_sink_or_fallback()
+        })?;
         Ok(Self {
             mixer: stream.mixer().clone(),
             unavailable,
@@ -287,6 +300,42 @@ impl OutputSink {
 
     fn is_available(&self) -> bool {
         !self.unavailable.load(Ordering::Relaxed)
+    }
+}
+
+pub struct AudioPreview {
+    player: Player,
+    sink: OutputSink,
+}
+
+impl AudioPreview {
+    pub fn prepare(path: &Path, volume: f32) -> Result<Self, String> {
+        let file = File::open(path).map_err(|error| format!("无法读取音频：{error}"))?;
+        let decoder = Decoder::try_from(file).map_err(|error| format!("无法解码音频：{error}"))?;
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or("未找到系统音频输出。请在系统设置的「声音 → 输出」选择设备。")?;
+        let label = device
+            .description()
+            .map(|description| description.name().to_owned())
+            .unwrap_or_else(|_| "系统默认输出".into());
+        let sink = OutputSink::open(device).map_err(|error| {
+            eprintln!("试听无法打开音频输出「{label}」：{error:?}");
+            format!("无法打开「{label}」。请在系统设置的「声音 → 输出」检查或更换设备后重试。")
+        })?;
+        let player = Player::connect_new(&sink.mixer);
+        player.pause();
+        player.set_volume(volume);
+        player.append(decoder);
+        Ok(Self { player, sink })
+    }
+
+    pub fn play(&self) {
+        self.player.play();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.player.empty() || !self.sink.is_available()
     }
 }
 
@@ -552,7 +601,7 @@ impl AudioEngine {
         }
         let mut warnings = self.apply_inventory(routes, &hardware, |id| {
             let device = native.get(id).ok_or("未能重新枚举该设备")?;
-            OutputSink::open(device.clone())
+            OutputSink::open(device.clone()).map_err(|error| error.to_string())
         });
         warnings.extend(enumeration_error);
         (devices, warnings)

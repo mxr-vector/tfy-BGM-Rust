@@ -82,6 +82,10 @@ pub(super) fn valid_download_url(value: &str) -> bool {
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
 }
 
+pub fn default_model_complete(root: &Path) -> bool {
+    DefaultModelFiles::inspect(root).missing.is_empty()
+}
+
 pub struct ModelEntry {
     pub id: String,
     pub files: Vec<String>,
@@ -94,19 +98,13 @@ pub struct ModelCatalog {
     pub models: Vec<ModelEntry>,
     pub warnings: Vec<String>,
     pub default_files: DefaultModelFiles,
-    pub runtime_error: Option<String>,
 }
 
 impl ModelCatalog {
     pub fn scan(preferences: &ModelPreferences) -> Self {
         let root = preferences.root();
-        let runtime_error = std::env::current_exe()
-            .map_err(|error| format!("无法读取应用路径：{error}"))
-            .and_then(|path| super::sherpa::runtime_library(&path))
-            .err();
         let mut catalog = Self {
             default_files: DefaultModelFiles::inspect(&root),
-            runtime_error,
             root,
             is_default_root: preferences.directory.is_none(),
             models: Vec::new(),
@@ -149,6 +147,7 @@ impl ModelCatalog {
                 if depth < MAX_SCAN_DEPTH
                     && !label.starts_with('.')
                     && !label.eq_ignore_ascii_case("separation")
+                    && !(depth == 0 && label.eq_ignore_ascii_case("tts"))
                 {
                     self.scan_directory(&relative.join(&name), depth + 1);
                 }
@@ -216,6 +215,7 @@ mod tests {
         for directory in [
             ".hidden/model",
             "separation/model",
+            "tts/kokoro-int8-multi-lang-v1_1",
             "first/second/third/model/fifth",
             "incomplete",
         ] {

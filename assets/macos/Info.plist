@@ -16,6 +16,8 @@
     <array><string>MacOSX</string></array>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>录制音频片段以在本机曲库查找相似音乐，或为语音合成提供参考音色。</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

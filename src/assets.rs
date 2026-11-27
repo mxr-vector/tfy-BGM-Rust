@@ -7,7 +7,7 @@ use gpui::{AssetSource, Result, SharedString};
 use crate::icons;
 
 pub const BRAND_MARK: &[u8] = include_bytes!("../assets/branding/brand-mark.png");
-pub const BUILTIN_WALLPAPER: &[u8] = include_bytes!("../assets/bg/2.jpg");
+pub const BUILTIN_WALLPAPER: &[u8] = include_bytes!("../assets/bg/雪山云海.jpg");
 
 #[cfg(target_os = "macos")]
 pub const MENU_BAR_TEMPLATE: &[u8] = include_bytes!("../assets/branding/menu-bar-template.pdf");

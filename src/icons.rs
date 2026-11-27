@@ -25,6 +25,7 @@ pub fn category_icon(name: &str) -> &'static str {
 
 pub fn source(name: &str) -> String {
     let body = match name {
+        "audio-lines" => r##"<path d="M3 10v4m4-7v10m5-14v18m5-14v10m4-7v4"/>"##,
         "search" => r##"<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>"##,
         "x" => r##"<path d="M18 6 6 18"/><path d="m6 6 12 12"/>"##,
         "sort" => {
@@ -89,6 +90,12 @@ pub fn source(name: &str) -> String {
             r##"<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>"##
         }
         "folder" => {
+            r##"<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>"##
+        }
+        "folder-plus" => {
+            r##"<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"##
+        }
+        "folder-open" => {
             r##"<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>"##
         }
         "external" => {

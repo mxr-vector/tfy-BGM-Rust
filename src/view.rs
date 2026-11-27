@@ -1,5 +1,11 @@
 //! 曲库窗口。曲库、节目单和歌曲页共用底部播放栏，交互走 GPUI 动作与系统文件框。
 
+mod audio_tools;
+mod controls;
+mod folders;
+mod playlist_tools;
+mod speech_tools;
+
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -31,6 +37,7 @@ use crate::desktop::{self, SystemFont, Tray, WakeLock};
 use crate::desktop_lyrics::{self, DesktopLyrics};
 use crate::diagnostics::{self, Analysis, Verdict};
 use crate::icons::{category_icon, icon};
+use crate::library::sherpa::{self, RuntimeDownload, RuntimeProgress, RuntimeStage, RuntimeStatus};
 use crate::library::{
     AsrSession, DEFAULT_ASR_DOWNLOAD_URL, DEFAULT_MODEL_NAME, DownloadMode, DownloadProgress,
     Exporter, Library, LibraryChange, LibraryFilter, MAX_SUBTITLE_SEGMENTS, ModelCatalog,
@@ -63,7 +70,6 @@ enum Dialog {
     EditTrack {
         key: String,
         category: String,
-        error: Option<String>,
     },
     NewCategory,
     EditCategory {
@@ -71,12 +77,16 @@ enum Dialog {
     },
     Move {
         key: String,
+        category: String,
     },
     MoveBatch {
         keys: Vec<String>,
+        category: String,
     },
     Import {
         files: Vec<PathBuf>,
+        folder_id: Option<String>,
+        category: String,
     },
     FileReport {
         summary: String,
@@ -93,14 +103,26 @@ enum AppView {
     Library,
     Schedule,
     Subtitles,
+    AudioTools,
+    PlaylistMigration,
+    Speech,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
     General,
+    Wallpaper,
     Playback,
+    Export,
     Models,
     Integrations,
+}
+
+#[derive(Clone)]
+struct Toast {
+    id: u64,
+    message: String,
+    is_error: bool,
 }
 
 struct TrackLyrics {
@@ -179,7 +201,7 @@ struct SegmentEditor {
 
 /// 节目单编辑草稿；节目名称与时间范围放在独立的 TextField 实体里，歌曲时间与列表平行。
 struct ScheduleDraft {
-    id: Option<String>,
+    original: ScheduleEntry,
     songs: Vec<ScheduleSong>,
     song_start_fields: Vec<Entity<TextField>>,
     song_end_fields: Vec<Entity<TextField>>,
@@ -292,6 +314,9 @@ impl Render for SongDragPreview {
 pub struct Workspace {
     library: Library,
     audio: AudioEngine,
+    audio_tools: audio_tools::AudioTools,
+    playlist_tools: playlist_tools::PlaylistTools,
+    speech_tools: speech_tools::SpeechTools,
     api: Option<api::Server>,
     api_config: api::Config,
     api_boot_enabled: bool,
@@ -304,7 +329,12 @@ pub struct Workspace {
     output_route_warnings: Vec<String>,
     last_output_refresh: Instant,
     settings_page: Option<SettingsPage>,
+    sherpa_runtime_status: sherpa::RuntimeStatus,
+    sherpa_download: Option<sherpa::RuntimeDownload>,
+    sherpa_download_progress: Option<sherpa::RuntimeProgress>,
     asr_url_field: Entity<TextField>,
+    _observe_asr_url: Subscription,
+    model_advanced_open: bool,
     asr_scan_generation: u64,
     asr_catalog: Option<ModelCatalog>,
     asr_download: Option<ModelDownload>,
@@ -320,12 +350,18 @@ pub struct Workspace {
     subtitle_feedback: Option<(String, String)>,
     api_token_field: Entity<TextField>,
     api_cors_field: Entity<TextField>,
+    api_reference_open: bool,
     fonts: Vec<SystemFont>,
     font_picker_open: bool,
     font_filter: Entity<TextField>,
     _observe_font_filter: Subscription,
     settings_feedback: Option<String>,
     settings_focus: FocusHandle,
+    dialog_focus: FocusHandle,
+    picker_focus: FocusHandle,
+    close_focus: FocusHandle,
+    folders_focus: FocusHandle,
+    track_menu_focus: FocusHandle,
     settings_slider_bounds: HashMap<SharedString, Bounds<Pixels>>,
     settings_slider_drag: Option<(SharedString, f32)>,
     mode_feedback: Option<gpui::Task<()>>,
@@ -357,23 +393,30 @@ pub struct Workspace {
     subtitle_catalog: SubtitleCatalog,
     segment_fields: [Entity<TextField>; 3],
     song_scroll: gpui::UniformListScrollHandle,
+    queue_scroll: gpui::UniformListScrollHandle,
     schedule_scroll: gpui::ScrollHandle,
     shelf_scroll: gpui::ScrollHandle,
     filter: LibraryFilter,
     query: String,
     dialog: Option<Dialog>,
+    dialog_feedback: Option<String>,
     action_menu: Option<TrackMenu>,
+    folders_modal_open: bool,
+    folder_menu: Option<(String, Point<Pixels>)>,
+    folders_warnings_open: bool,
+    keyboard_focus_visible: bool,
+    toast: Option<Toast>,
+    toast_seq: u64,
+    toast_task: Option<gpui::Task<()>>,
     picker: Option<SongPicker>,
-    export_popover: bool,
     ffmpeg_detected: Option<Option<PathBuf>>,
-    wallpaper_popover: bool,
     wallpaper_request: Option<wallpaper::Request>,
     wallpaper_loading: bool,
     wallpaper_image: Option<Arc<gpui::RenderImage>>,
     wallpaper_video: Option<wallpaper::Video>,
     wallpaper_video_frame: Option<wallpaper::VideoFrame>,
     main_window: Option<gpui::AnyWindowHandle>,
-    builtin_wallpaper_video: Option<PathBuf>,
+    builtin_wallpapers: Vec<wallpaper::BuiltinWallpaper>,
     diagnostics_open: bool,
     analysed_track: Option<Weak<PcmTrack>>,
     diagnostics_loading: bool,
@@ -384,6 +427,8 @@ pub struct Workspace {
     selecting: bool,
     selected_songs: HashSet<String>,
     schedule_draft: Option<ScheduleDraft>,
+    schedule_feedback: Option<String>,
+    schedule_discard_pending: bool,
     loop_enabled_pending: bool,
     expanded_schedule: HashSet<String>,
     queue: Vec<String>,
@@ -432,7 +477,6 @@ impl Workspace {
             .map(str::to_owned)
             .or(lyrics_style_error)
             .or_else(|| output_route_warnings.first().cloned())
-            .or_else(|| library.snapshot.warnings.first().cloned())
             .unwrap_or_else(|| format!("已载入 {} 首", library.snapshot.songs.len()));
         let api_config = api::Config::load(library.config_path());
         let api = if api_config.enabled {
@@ -470,8 +514,8 @@ impl Workspace {
             }
         });
 
-        let watcher = LibraryWatcher::start(library.root()).ok();
-        if watcher.is_none() {
+        let watcher = LibraryWatcher::start_many(&library.watch_roots()).ok();
+        if watcher.is_none() && !library.online_folders().is_empty() {
             notice = "文件监听不可用，将每 30 秒检查曲库".to_owned();
         }
 
@@ -505,11 +549,14 @@ impl Workspace {
                         }
                         this.poll_playback();
                         this.poll_watch(cx);
+                        this.poll_audio_tools(cx);
+                        this.poll_speech_tools(second_elapsed, cx);
                         let api_changed = this.poll_api(cx);
                         let diagnostics_changed = this.poll_diagnostics(cx);
                         let subtitles_changed = this.poll_track_lyrics(cx);
                         this.poll_desktop_lyrics(cx);
                         let model_download_changed = this.poll_model_download();
+                        let sherpa_download_changed = this.poll_sherpa_download();
                         if this.view == AppView::Subtitles && this.subtitle_catalog.refresh {
                             this.reload_subtitle_catalog(cx);
                         }
@@ -533,6 +580,7 @@ impl Workspace {
                             || diagnostics_changed
                             || subtitles_changed
                             || model_download_changed
+                            || sherpa_download_changed
                         {
                             cx.notify();
                         }
@@ -548,8 +596,15 @@ impl Workspace {
         let font_filter = cx.new(|cx| TextField::new(cx, "搜索系统字体"));
         let observe_font_filter = cx.observe(&font_filter, |_, _, cx| cx.notify());
         let observe_api_token = cx.observe(&api_token_field, |_, _, cx| cx.notify());
+        let observe_asr_url = cx.observe(&asr_url_field, |_, _, cx| cx.notify());
         let autoplay = library.prefs.autoplay_on_start;
         let mut workspace = Self {
+            audio_tools: audio_tools::AudioTools::new(
+                library.config_path(),
+                library.indexed_roots(),
+            ),
+            playlist_tools: playlist_tools::PlaylistTools::new(cx),
+            speech_tools: speech_tools::SpeechTools::new(&library, cx),
             library,
             audio,
             api,
@@ -564,7 +619,12 @@ impl Workspace {
             output_route_warnings,
             last_output_refresh: Instant::now(),
             settings_page: None,
+            sherpa_runtime_status: sherpa::current_runtime_status(),
+            sherpa_download: None,
+            sherpa_download_progress: None,
             asr_url_field,
+            _observe_asr_url: observe_asr_url,
+            model_advanced_open: false,
             asr_scan_generation: 0,
             asr_catalog: None,
             asr_download: None,
@@ -580,12 +640,18 @@ impl Workspace {
             subtitle_feedback: None,
             api_token_field,
             api_cors_field,
+            api_reference_open: false,
             fonts: Vec::new(),
             font_picker_open: false,
             font_filter,
             _observe_font_filter: observe_font_filter,
             settings_feedback: None,
             settings_focus: cx.focus_handle(),
+            dialog_focus: cx.focus_handle(),
+            picker_focus: cx.focus_handle(),
+            close_focus: cx.focus_handle(),
+            folders_focus: cx.focus_handle(),
+            track_menu_focus: cx.focus_handle(),
             settings_slider_bounds: HashMap::new(),
             settings_slider_drag: None,
             mode_feedback: None,
@@ -617,23 +683,30 @@ impl Workspace {
             subtitle_catalog: SubtitleCatalog::default(),
             segment_fields,
             song_scroll: Default::default(),
+            queue_scroll: Default::default(),
             schedule_scroll: Default::default(),
             shelf_scroll: Default::default(),
             filter: LibraryFilter::All,
             query: String::new(),
             dialog: None,
+            dialog_feedback: None,
             action_menu: None,
+            folders_modal_open: false,
+            folder_menu: None,
+            folders_warnings_open: false,
+            keyboard_focus_visible: false,
+            toast: None,
+            toast_seq: 0,
+            toast_task: None,
             picker: None,
-            export_popover: false,
             ffmpeg_detected: None,
-            wallpaper_popover: false,
             wallpaper_request: None,
             wallpaper_loading: false,
             wallpaper_image: None,
             wallpaper_video: None,
             wallpaper_video_frame: None,
             main_window: None,
-            builtin_wallpaper_video: wallpaper::builtin_video(),
+            builtin_wallpapers: wallpaper::discover_builtin(),
             diagnostics_open: false,
             analysed_track: None,
             diagnostics_loading: false,
@@ -644,6 +717,8 @@ impl Workspace {
             selecting: false,
             selected_songs: HashSet::new(),
             schedule_draft: None,
+            schedule_feedback: None,
+            schedule_discard_pending: false,
             loop_enabled_pending: true,
             expanded_schedule: HashSet::new(),
             queue: Vec::new(),
@@ -779,14 +854,23 @@ impl Workspace {
     }
 
     fn play_pause(&mut self, _: &PlayPause, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some() {
+        if self.modal_open() {
             return;
         }
         self.toggle_playback();
         cx.notify();
     }
 
+    fn microphone_active(&self) -> bool {
+        self.audio_tools.recording() || self.speech_tools.recording()
+    }
+
     fn toggle_playback(&mut self) {
+        self.speech_tools.stop_preview();
+        if self.microphone_active() {
+            self.notice = "麦克风录音期间已暂停播放".into();
+            return;
+        }
         if self.playing {
             self.audio.pause();
             self.playing = false;
@@ -847,24 +931,141 @@ impl Workspace {
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some()
-            || self.picker.is_some()
-            || self.settings_page.is_some()
-            || self.schedule_draft.is_some()
-            || self.close_prompt
-            || self.diagnostics_open
-            || self.queue_open
-            || self.wallpaper_popover
-            || self.export_popover
-            || self.action_menu.is_some()
-        {
+        if self.modal_open() {
             return;
         }
-        self.set_track_page(false);
-        self.view = AppView::Library;
-        window.focus(&self.search.focus_handle(cx));
+        if self.view != AppView::Library {
+            self.filter = LibraryFilter::All;
+        }
+        self.queue_open = false;
+        self.diagnostics_open = false;
+        self.navigate(AppView::Library, None, cx);
+        let search = self.search.clone();
+        cx.on_next_frame(window, move |_, window, cx| {
+            window.focus(&search.focus_handle(cx))
+        });
         self.search
             .update(cx, |field, cx| field.select_entire_text(cx));
+    }
+
+    fn active_surface_focus(&self) -> &FocusHandle {
+        if self.close_prompt {
+            &self.close_focus
+        } else if self.folders_modal_open {
+            &self.folders_focus
+        } else if self.settings_page.is_some() {
+            &self.settings_focus
+        } else if self.picker.is_some() {
+            &self.picker_focus
+        } else if self.dialog.is_some() {
+            &self.dialog_focus
+        } else if self.action_menu.is_some() {
+            &self.track_menu_focus
+        } else {
+            &self.focus
+        }
+    }
+
+    pub(super) fn after_button_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.keyboard_focus_visible && !self.any_text_field_focused(window, cx) {
+            window.focus(self.active_surface_focus());
+        }
+    }
+
+    fn show_toast(&mut self, message: impl Into<String>, is_error: bool, cx: &mut Context<Self>) {
+        let message = message.into();
+        self.notice = message.clone();
+        self.toast_seq = self.toast_seq.wrapping_add(1);
+        let id = self.toast_seq;
+        self.toast = Some(Toast {
+            id,
+            message,
+            is_error,
+        });
+        let delay = if is_error {
+            Duration::from_millis(4500)
+        } else {
+            Duration::from_secs(3)
+        };
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast.as_ref().is_some_and(|toast| toast.id == id) {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn action_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        label: impl Into<SharedString>,
+        icon_name: Option<&'static str>,
+        tone: controls::ButtonTone,
+        enabled: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> gpui::AnyElement {
+        controls::ui_button(
+            id,
+            label,
+            icon_name,
+            tone,
+            enabled,
+            compact,
+            self.keyboard_focus_visible,
+            cx,
+            on_click,
+        )
+        .into_any_element()
+    }
+
+    fn move_keyboard_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.keyboard_focus_visible = true;
+        let scope = if self.close_prompt {
+            Some(&self.close_focus)
+        } else if self.folders_modal_open {
+            Some(&self.folders_focus)
+        } else if self.settings_page.is_some() {
+            Some(&self.settings_focus)
+        } else if self.picker.is_some() {
+            Some(&self.picker_focus)
+        } else if self.dialog.is_some() {
+            Some(&self.dialog_focus)
+        } else if self.action_menu.is_some() {
+            Some(&self.track_menu_focus)
+        } else {
+            None
+        };
+        let before = window.focused(cx);
+        let step = |window: &mut Window| {
+            if forward {
+                window.focus_next();
+            } else {
+                window.focus_prev();
+            }
+        };
+        step(window);
+        let Some(scope) = scope else {
+            cx.notify();
+            return;
+        };
+        let first = window.focused(cx);
+        while !scope.contains_focused(window, cx) {
+            step(window);
+            if window.focused(cx) == first {
+                window.focus(
+                    before
+                        .as_ref()
+                        .filter(|focus| scope.contains(focus, window))
+                        .unwrap_or(scope),
+                );
+                break;
+            }
+        }
         cx.notify();
     }
 
@@ -879,7 +1080,18 @@ impl Workspace {
             } else {
                 self.settings_page = None;
                 self.settings_slider_drag = None;
+                self.model_advanced_open = false;
                 window.focus(&self.focus);
+            }
+            cx.notify();
+            return;
+        }
+        if self.folders_modal_open {
+            if self.folder_menu.is_some() {
+                self.folder_menu = None;
+                window.focus(&self.folders_focus);
+            } else {
+                self.close_folders_modal(window, cx);
             }
             cx.notify();
             return;
@@ -887,6 +1099,7 @@ impl Workspace {
         if self.diagnostics_open || self.queue_open {
             self.diagnostics_open = false;
             self.queue_open = false;
+            window.focus(&self.focus);
             cx.notify();
             return;
         }
@@ -896,24 +1109,15 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if self.export_popover || self.wallpaper_popover {
-            self.export_popover = false;
-            self.wallpaper_popover = false;
-            cx.notify();
-            return;
-        }
         if (self.now_playing_open || self.track_transition.is_some()) && self.dialog.is_none() {
             self.set_track_page(false);
             window.focus(&self.focus);
             cx.notify();
             return;
         }
-        if self.schedule_draft.is_some() && self.dialog.is_none() {
-            self.cancel_schedule_edit(window, cx);
-            return;
-        }
         if self.action_menu.is_some() {
             self.action_menu = None;
+            window.focus(&self.focus);
             cx.notify();
             return;
         }
@@ -921,6 +1125,13 @@ impl Workspace {
             self.dialog = None;
             window.focus(&self.focus);
             cx.notify();
+            return;
+        }
+        if self.view == AppView::Schedule && self.schedule_draft.is_some() {
+            self.cancel_schedule_edit(window, cx);
+            return;
+        }
+        if self.view == AppView::Speech && self.dismiss_speech_options(cx) {
             return;
         }
         if self.selecting {
@@ -933,15 +1144,23 @@ impl Workspace {
             if self.query.is_empty() {
                 window.focus(&self.focus);
             } else {
-                self.search.update(cx, |field, cx| field.set_text("", cx));
-                self.query.clear();
+                self.clear_search(cx);
             }
             cx.notify();
         }
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.picker {
+            if !picker.selected.is_empty() && !self.picker_search.read(cx).has_marked_text() {
+                self.confirm_song_picker(window, cx);
+            }
+            return;
+        }
         let Some(dialog) = self.dialog.clone() else {
+            if self.view == AppView::PlaylistMigration && self.confirm_playlist_link(window, cx) {
+                return;
+            }
             if self.search.focus_handle(cx).is_focused(window)
                 && !self.search.read(cx).has_marked_text()
             {
@@ -950,64 +1169,100 @@ impl Workspace {
             }
             return;
         };
-        match dialog {
-            Dialog::EditTrack { key, category, .. } => {
+        if [
+            &self.dialog_field,
+            &self.category_detail_field,
+            &self.loop_start_field,
+            &self.loop_end_field,
+        ]
+        .iter()
+        .any(|field| field.focus_handle(cx).is_focused(window) && field.read(cx).has_marked_text())
+        {
+            return;
+        }
+        let result = match dialog {
+            Dialog::EditTrack { key, category } => {
                 let title = self.dialog_field.read(cx).text().trim().to_owned();
-                match self.library.update_track(&key, &title, &category) {
-                    Ok(mutation) => self.apply_mutation(mutation),
-                    Err(error) => {
-                        self.dialog = Some(Dialog::EditTrack {
-                            key,
-                            category,
-                            error: Some(error),
-                        });
-                        cx.notify();
-                        return;
-                    }
-                }
+                self.library
+                    .update_track(&key, &title, &category)
+                    .map(|mutation| self.apply_mutation(mutation))
             }
             Dialog::NewCategory => {
                 let name = self.dialog_field.read(cx).text().trim().to_owned();
                 let id = self.category_detail_field.read(cx).text().trim().to_owned();
-                match self
-                    .library
+                self.library
                     .create_category(&name, (!id.is_empty()).then_some(id.as_str()))
-                {
-                    Ok(id) => {
+                    .map(|id| {
                         self.filter = LibraryFilter::Category(id);
                         self.api_library_dirty = true;
                         self.notice = format!("已新增分类 {name}");
-                    }
-                    Err(error) => self.notice = error,
-                }
+                    })
             }
             Dialog::EditCategory { id } => {
                 let name = self.dialog_field.read(cx).text().trim().to_owned();
                 let color = self.category_detail_field.read(cx).text().trim().to_owned();
-                self.notice = match self.library.update_category(
-                    &id,
-                    &name,
-                    (!color.is_empty()).then_some(color.as_str()),
-                ) {
-                    Ok(()) => {
+                self.library
+                    .update_category(&id, &name, (!color.is_empty()).then_some(color.as_str()))
+                    .map(|_| {
                         self.api_library_dirty = true;
-                        format!("已更新分类 {name}")
+                        self.notice = format!("已更新分类 {name}");
+                    })
+            }
+            Dialog::Loop { key } => self.save_loop_from_editor(&key, cx),
+            Dialog::FileReport { .. } => Ok(()),
+            Dialog::Move { key, category } => {
+                let res = self.library.move_song(&key, &category);
+                match res {
+                    Ok(mutation) => {
+                        self.apply_mutation(mutation);
+                        Ok(())
                     }
-                    Err(error) => error,
+                    Err(error) => Err(error),
+                }
+            }
+            Dialog::MoveBatch { keys, category } => {
+                match self.library.move_batch(&keys, &category) {
+                    Ok(mutation) => {
+                        for change in &mutation.changes {
+                            self.selected_songs.remove(&change.from);
+                        }
+                        self.apply_mutation(mutation);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Dialog::Import {
+                files,
+                folder_id,
+                category,
+            } => {
+                let Some(folder_id) = folder_id else {
+                    self.dialog_feedback = Some("请选择目标音乐文件夹".into());
+                    cx.notify();
+                    return;
                 };
+                let mutation = self.library.import_to_folder(&folder_id, &category, &files);
+                self.apply_mutation(mutation);
+                Ok(())
             }
-            Dialog::Loop { key } => {
-                self.save_loop_from_editor(&key, cx);
-                self.dialog = None;
-                window.focus(&self.focus);
-                cx.notify();
-                return;
+        };
+        if !matches!(self.dialog, Some(Dialog::FileReport { .. })) {
+            match result {
+                Ok(()) => {
+                    self.dialog = None;
+                    self.dialog_feedback = None;
+                    window.focus(&self.focus);
+                }
+                Err(error) => self.dialog_feedback = Some(error),
             }
-            Dialog::FileReport { .. } => {}
-            Dialog::Move { .. } | Dialog::MoveBatch { .. } | Dialog::Import { .. } => return,
         }
-        self.dialog = None;
-        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search.update(cx, |field, cx| field.set_text("", cx));
+        self.query.clear();
         cx.notify();
     }
 
@@ -1041,6 +1296,10 @@ impl Workspace {
     }
 
     fn load_key_with(&mut self, key: &str, autoplay: bool, intent: TrackStart) {
+        let autoplay = autoplay && !self.microphone_active();
+        if autoplay {
+            self.speech_tools.stop_preview();
+        }
         if self.audio.open_error().is_some() {
             self.refresh_audio_outputs();
         }
@@ -1147,6 +1406,10 @@ impl Workspace {
     }
 
     fn restart_current(&mut self, intent: TrackStart) {
+        self.speech_tools.stop_preview();
+        if self.microphone_active() {
+            return;
+        }
         if self.loading.is_some() {
             self.audio.play();
             self.playing = true;
@@ -1544,7 +1807,7 @@ impl Workspace {
         }
         let session = if captions {
             let Some(session) = self.asr_session.clone() else {
-                task.finish(Err("请先在「设置 → 模型」加载 ASR 模型".into()));
+                task.finish(Err("请先在「设置 → 语音识别」加载 ASR 模型".into()));
                 return;
             };
             Some(session)
@@ -1774,7 +2037,9 @@ impl Workspace {
         match action {
             "state" => {}
             "library.rescan" => {
-                self.rescan_library();
+                self.library.rescan();
+                self.reconcile_snapshot();
+                self.install_watcher();
                 return Ok(api::library_payload(&self.library.snapshot));
             }
             "play" => {
@@ -2136,11 +2401,18 @@ impl Workspace {
         self.schedule_name_field
             .update(cx, |field, cx| field.set_text("", cx));
         self.schedule_start_field
-            .update(cx, |field, cx| field.set_text(start, cx));
+            .update(cx, |field, cx| field.set_text(start.clone(), cx));
         self.schedule_end_field
-            .update(cx, |field, cx| field.set_text(end, cx));
+            .update(cx, |field, cx| field.set_text(end.clone(), cx));
+        self.schedule_feedback = None;
+        self.schedule_discard_pending = false;
         self.schedule_draft = Some(ScheduleDraft {
-            id: None,
+            original: ScheduleEntry {
+                start,
+                end,
+                enabled: true,
+                ..Default::default()
+            },
             songs: Vec::new(),
             song_start_fields: Vec::new(),
             song_end_fields: Vec::new(),
@@ -2180,8 +2452,10 @@ impl Workspace {
             .update(cx, |field, cx| field.set_text(entry.start.clone(), cx));
         self.schedule_end_field
             .update(cx, |field, cx| field.set_text(entry.end.clone(), cx));
+        self.schedule_feedback = None;
+        self.schedule_discard_pending = false;
         self.schedule_draft = Some(ScheduleDraft {
-            id: Some(entry.id.clone()),
+            original: entry.clone(),
             songs: entry.songs.clone(),
             song_start_fields,
             song_end_fields,
@@ -2196,97 +2470,106 @@ impl Workspace {
         cx.notify();
     }
 
+    fn schedule_form(&self, cx: &App) -> Option<ScheduleEntry> {
+        let draft = self.schedule_draft.as_ref()?;
+        let field_text = |field: &Entity<TextField>| field.read(cx).text().trim().to_owned();
+        Some(ScheduleEntry {
+            id: draft.original.id.clone(),
+            name: field_text(&self.schedule_name_field),
+            start: field_text(&self.schedule_start_field),
+            end: field_text(&self.schedule_end_field),
+            songs: draft
+                .songs
+                .iter()
+                .enumerate()
+                .map(|(index, song)| ScheduleSong {
+                    key: song.key.clone(),
+                    start: field_text(&draft.song_start_fields[index]),
+                    end: field_text(&draft.song_end_fields[index]),
+                })
+                .collect(),
+            volume: draft
+                .volume_enabled
+                .then_some((draft.volume * 100.0).round() / 100.0),
+            enabled: draft.enabled,
+        })
+    }
+
     fn cancel_schedule_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.schedule_discard_pending {
+            self.schedule_discard_pending = false;
+            cx.notify();
+            return;
+        }
+        let changed = self
+            .schedule_form(cx)
+            .zip(self.schedule_draft.as_ref())
+            .is_some_and(|(entry, draft)| entry != draft.original);
+        if changed {
+            self.schedule_discard_pending = true;
+            cx.notify();
+        } else {
+            self.close_schedule_draft(window, cx);
+        }
+    }
+
+    fn close_schedule_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.schedule_draft = None;
+        self.schedule_feedback = None;
+        self.schedule_discard_pending = false;
         window.focus(&self.focus);
         cx.notify();
     }
 
     fn save_schedule_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.schedule_draft.as_ref() else {
+        let Some(mut entry) = self.schedule_form(cx) else {
             return;
         };
-        let draft_id = draft.id.clone();
-        let draft_volume_enabled = draft.volume_enabled;
-        let draft_volume = draft.volume;
-        let draft_enabled = draft.enabled;
-        let songs: Vec<_> = draft
-            .songs
-            .iter()
-            .enumerate()
-            .map(|(index, song)| ScheduleSong {
-                key: song.key.clone(),
-                start: draft.song_start_fields[index].read(cx).text().to_owned(),
-                end: draft.song_end_fields[index].read(cx).text().to_owned(),
-            })
-            .collect();
-        let name = self.schedule_name_field.read(cx).text().trim().to_owned();
-        let start_text = self.schedule_start_field.read(cx).text().trim().to_owned();
-        let end_text = self.schedule_end_field.read(cx).text().trim().to_owned();
-
-        if name.is_empty() {
-            self.notice = "节目名称不能为空".into();
+        self.schedule_discard_pending = false;
+        if entry.name.is_empty() {
+            self.schedule_feedback = Some("请填写节目名称。".into());
             cx.notify();
             return;
         }
-        let (Some(start), Some(end)) = (minutes_of(&start_text), minutes_of(&end_text)) else {
-            self.notice = "开始/结束时间需要是 HH:MM 格式".into();
+        let (Some(start), Some(end)) = (minutes_of(&entry.start), minutes_of(&entry.end)) else {
+            self.schedule_feedback = Some("请用 HH:MM 输入节目时间，例如 09:30。".into());
             cx.notify();
             return;
         };
         if end <= start {
-            self.notice = "结束时间必须晚于开始时间，且不能跨天".into();
+            self.schedule_feedback = Some("请选择同一天内的时间，结束时间须晚于开始时间。".into());
             cx.notify();
             return;
         }
-        if songs.is_empty() {
-            self.notice = "还未添加歌曲：请先通过「添加歌曲」从歌单中选择歌曲".into();
+        if entry.songs.is_empty() {
+            self.schedule_feedback = Some("请先添加至少一首歌曲。".into());
             cx.notify();
             return;
         }
+        entry.start = format_minutes(start);
+        entry.end = format_minutes(end);
 
-        let entry = ScheduleEntry {
-            id: draft_id.clone().unwrap_or_else(|| {
-                format!(
-                    "slot-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|time| time.as_millis() as u64)
-                        .unwrap_or(0)
-                        .to_string()
-                )
-            }),
-            name,
-            start: format_minutes(start),
-            end: format_minutes(end),
-            songs,
-            volume: if draft_volume_enabled {
-                Some((draft_volume * 100.0).round() / 100.0)
-            } else {
-                None
-            },
-            enabled: draft_enabled,
-        };
-
-        let mut next_entries = self.library.schedule.entries.clone();
-        match &draft_id {
-            Some(id) => {
-                if let Some(slot) = next_entries.iter_mut().find(|item| item.id == *id) {
-                    *slot = entry;
-                }
-            }
-            None => next_entries.push(entry),
+        let mut next = self.library.schedule.clone();
+        if entry.id.is_empty() {
+            let millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |time| time.as_millis());
+            entry.id = format!("slot-{millis}");
+            next.entries.push(entry);
+        } else if let Some(slot) = next.entries.iter_mut().find(|item| item.id == entry.id) {
+            *slot = entry;
+        } else {
+            self.schedule_feedback = Some("这个节目已被删除，请重新创建。".into());
+            cx.notify();
+            return;
         }
-        let mut next = bgm_core::Schedule::default();
-        next.entries = next_entries;
         match self.library.save_schedule(next) {
             Ok(_) => {
                 self.notice = "节目单已保存".into();
-                self.schedule_draft = None;
-                window.focus(&self.focus);
+                self.close_schedule_draft(window, cx);
                 self.sync_to_current_program();
             }
-            Err(error) => self.notice = error,
+            Err(error) => self.schedule_feedback = Some(error),
         }
         cx.notify();
     }
@@ -2362,11 +2645,16 @@ impl Workspace {
         let start = self.schedule_start_field.read(cx).text().trim().to_owned();
         let end = self.schedule_end_field.read(cx).text().trim().to_owned();
         let (Some(start), Some(end)) = (minutes_of(&start), minutes_of(&end)) else {
+            self.schedule_feedback = Some("请先填写有效的节目起止时间。".into());
+            cx.notify();
             return;
         };
         if end <= start || draft.songs.is_empty() {
+            self.schedule_feedback = Some("请先设置时段并添加曲目。".into());
+            cx.notify();
             return;
         }
+        self.schedule_feedback = None;
         let count = draft.songs.len() as u32;
         let span = end - start;
         let assignments: Vec<(u32, u32)> = if span < count {
@@ -2511,6 +2799,13 @@ impl Workspace {
     }
 
     fn confirm_song_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .picker
+            .as_ref()
+            .is_none_or(|picker| picker.selected.is_empty())
+        {
+            return;
+        }
         let Some(picker) = self.picker.take() else {
             return;
         };
@@ -2611,6 +2906,7 @@ impl Workspace {
             )
         });
         self.loop_enabled_pending = existing.is_none_or(|point| point.enabled);
+        self.dialog_feedback = None;
         self.dialog = Some(Dialog::Loop {
             key: key.to_owned(),
         });
@@ -2621,79 +2917,55 @@ impl Workspace {
         cx.notify();
     }
 
-    fn save_loop_from_editor(&mut self, key: &str, cx: &mut Context<Self>) {
-        let start = self
-            .loop_start_field
-            .read(cx)
-            .text()
-            .trim()
-            .parse::<f64>()
-            .ok();
-        let end = self
-            .loop_end_field
-            .read(cx)
-            .text()
-            .trim()
-            .parse::<f64>()
-            .ok();
-        let enabled = self.loop_enabled_pending;
-        let title = self.song_title(key);
+    fn save_loop_from_editor(&mut self, key: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let seconds = |field: &Entity<TextField>| {
+            field
+                .read(cx)
+                .text()
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+        };
+        let (start, end) = seconds(&self.loop_start_field)
+            .zip(seconds(&self.loop_end_field))
+            .ok_or("请输入有效的秒数")?;
+        if start < 0.0 {
+            return Err("起点不能为负数".into());
+        }
+        if end - start < MIN_LOOP_SPAN {
+            return Err(format!("循环终点至少要比起点晚 {MIN_LOOP_SPAN} 秒"));
+        }
         let duration = self
             .library
             .song(key)
             .and_then(|song| song.duration_ms)
             .map(|ms| ms as f64 / 1000.0);
-        let Some((start, end)) = start.zip(end) else {
-            self.notice = "请输入有效的秒数".into();
-            cx.notify();
-            return;
-        };
-        if start < 0.0 {
-            self.notice = "起点不能为负数".into();
-            cx.notify();
-            return;
-        }
-        if end - start < MIN_LOOP_SPAN {
-            self.notice = format!("循环终点至少要比起点晚 {MIN_LOOP_SPAN} 秒");
-            cx.notify();
-            return;
-        }
-        if duration.is_some_and(|duration| end > duration + 0.5) {
-            self.notice = format!(
+        if let Some(duration) = duration.filter(|duration| end > duration + 0.5) {
+            return Err(format!(
                 "循环终点超出曲目时长 {}",
-                format_time(Duration::from_secs_f64(duration.unwrap()))
-            );
-            cx.notify();
-            return;
+                format_time(Duration::from_secs_f64(duration))
+            ));
         }
 
-        match self
-            .library
-            .save_loop_point(key, start.max(0.0), end, enabled)
-        {
-            Ok(_) => {
-                self.notice = if enabled {
-                    format!(
-                        "《{title}》已启用循环 {}–{}",
-                        format_time(Duration::from_secs_f64(start)),
-                        format_time(Duration::from_secs_f64(end))
-                    )
-                } else {
-                    format!("《{title}》循环已关闭")
-                };
-                self.refresh_loop_region();
-            }
-            Err(error) => self.notice = error,
-        }
-        cx.notify();
+        let enabled = self.loop_enabled_pending;
+        self.library.save_loop_point(key, start, end, enabled)?;
+        let title = self.song_title(key);
+        self.notice = if enabled {
+            format!("《{title}》已启用循环 {start:.2}–{end:.2} 秒")
+        } else {
+            format!("《{title}》循环已关闭")
+        };
+        self.refresh_loop_region();
+        Ok(())
     }
 
     // ---------- 文件监听 ----------
 
     fn install_watcher(&mut self) {
-        self.watcher = LibraryWatcher::start(self.library.root()).ok();
+        self.watcher = LibraryWatcher::start_many(&self.library.watch_roots()).ok();
         self.last_fallback = Instant::now();
-        if self.watcher.is_none() {
+        if self.watcher.is_none() && !self.library.online_folders().is_empty() {
             self.notice = "文件监听不可用，将每 30 秒检查曲库".into();
         }
     }
@@ -2710,36 +2982,23 @@ impl Workspace {
         if !scan_due {
             return;
         }
-        if self.watcher.is_none() && self.library.root().is_dir() {
+        if self.watcher.is_none() && !self.library.watch_roots().is_empty() {
             self.install_watcher();
         }
         self.last_fallback = now;
         self.watch_scanning = true;
         let scan = self.library.watch_scan();
-        let revision = scan.revision();
         let task = cx.background_executor().spawn(async move { scan.run() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
                 this.watch_scanning = false;
-                match result {
-                    Some((revision, snapshot)) => {
-                        if let Some(change) = this.library.apply_watch_scan(revision, snapshot) {
-                            this.apply_library_change(change);
-                            cx.notify();
-                        }
-                    }
-                    None if this.library.is_current_watch_scan(revision) => {
-                        this.watcher = None;
-                        if this.library.mark_root_offline() {
-                            if let Some(message) = this.library.snapshot.warnings.first() {
-                                this.notice = message.clone();
-                            }
-                            this.api_library_dirty = true;
-                            cx.notify();
-                        }
-                    }
-                    None => {}
+                if let Some((revision, snapshot)) = result
+                    && let Some(change) = this.library.apply_watch_scan(revision, snapshot)
+                {
+                    this.apply_library_change(change, cx);
+                    this.install_watcher();
+                    cx.notify();
                 }
             })
             .ok();
@@ -2747,7 +3006,7 @@ impl Workspace {
         .detach();
     }
 
-    fn apply_library_change(&mut self, change: LibraryChange) {
+    fn apply_library_change(&mut self, change: LibraryChange, cx: &mut Context<Self>) {
         let LibraryChange {
             added,
             removed,
@@ -2774,15 +3033,15 @@ impl Workspace {
         if moved_count > 0 {
             notes.push(format!("移动 {moved_count}"));
         }
-        self.notice = if notes.is_empty() {
-            "曲库已更新".into()
+        let mut message = if notes.is_empty() {
+            "曲库已更新".to_owned()
         } else {
             format!("曲库已更新：{}", notes.join("、"))
         };
         if !migration_warnings.is_empty() {
-            self.notice
-                .push_str(&format!("。{}", migration_warnings.join("。")));
+            message.push_str(&format!("。{}", migration_warnings.join("。")));
         }
+        self.show_toast(message, !migration_warnings.is_empty(), cx);
     }
 
     // ---------- 曲库写操作 ----------
@@ -2854,6 +3113,7 @@ impl Workspace {
     fn show_file_report(&mut self, summary: String, report: bgm_core::BatchReport) {
         self.notice = summary.clone();
         if report.total > 1 || report.skipped > 0 || report.failed > 0 {
+            self.dialog_feedback = None;
             self.dialog = Some(Dialog::FileReport { summary, report });
         }
     }
@@ -2915,77 +3175,82 @@ impl Workspace {
     }
 
     fn rescan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.rescan_library();
+        self.rescan_library(cx);
         window.set_window_title(&self.library.window_title());
         cx.notify();
     }
 
-    fn rescan_library(&mut self) {
-        let warnings = self.library.rescan();
+    fn rescan_library(&mut self, cx: &mut Context<Self>) {
+        self.library.rescan();
         self.api_config = api::Config::load(self.library.config_path());
         if let Some(server) = &self.api {
             server.update_config(self.api_config.clone());
         }
-        self.notice = warnings
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("已重新扫描 {} 首", self.library.snapshot.songs.len()));
         self.reconcile_snapshot();
         self.audio.set_speed(self.library.prefs.playback_rate);
         self.install_watcher();
+        self.poll_audio_tools(cx);
+        if !self.library.has_folders() {
+            self.show_toast("请先添加音乐文件夹", false, cx);
+        } else if self.library.online_folders().is_empty() {
+            self.show_toast("已添加的音乐文件夹当前均离线", true, cx);
+        } else {
+            self.show_toast(
+                format!("已重新扫描 {} 首曲目", self.library.snapshot.songs.len()),
+                false,
+                cx,
+            );
+        }
     }
 
-    fn choose_library(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("选择曲库".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = receiver.await
-                && let Some(dir) = paths.into_iter().next()
-            {
-                this.update(cx, |this, cx| {
-                    match this.library.choose_dir(dir) {
-                        Ok(()) => {
-                            this.notice = format!("曲库：{}", this.library.root().display());
-                            this.reconcile_snapshot();
-                            this.install_watcher();
-                        }
-                        Err(error) => this.notice = error,
-                    }
-                    cx.notify();
-                })
-                .ok();
+    fn default_import_target(&self) -> (Option<String>, String) {
+        let folder_id = self
+            .library
+            .online_folders()
+            .first()
+            .map(|folder| folder.id.clone());
+        let category = match &self.filter {
+            LibraryFilter::Category(id) if id != crate::library::UNCATEGORIZED_CATEGORY_ID => {
+                id.clone()
             }
-        })
-        .detach();
+            _ => self
+                .library
+                .snapshot
+                .categories
+                .first()
+                .map(|cat| cat.id.clone())
+                .unwrap_or_else(|| "epic".to_owned()),
+        };
+        (folder_id, category)
     }
 
-    fn import_files(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn import_files(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library.online_folders().is_empty() {
+            self.show_toast("请先添加并连接至少一个音乐文件夹", true, cx);
+            self.open_folders_modal(window, cx);
+            return;
+        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("导入音频".into()),
         });
-        let category = match &self.filter {
-            LibraryFilter::Category(id) => Some(id.clone()),
-            _ => None,
-        };
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(files))) = receiver.await else {
                 return;
             };
             this.update(cx, |this, cx| {
                 if files.is_empty() {
-                    this.notice = "没有选中支持的音频文件".into();
-                } else if let Some(category) = category {
-                    let mutation = this.library.import(&category, &files);
-                    this.apply_mutation(mutation);
+                    this.show_toast("没有选中支持的音频文件", false, cx);
                 } else {
-                    this.dialog = Some(Dialog::Import { files });
+                    let (folder_id, category) = this.default_import_target();
+                    this.dialog_feedback = None;
+                    this.dialog = Some(Dialog::Import {
+                        files,
+                        folder_id,
+                        category,
+                    });
                 }
                 cx.notify();
             })
@@ -3112,7 +3377,10 @@ impl Workspace {
             Some(&format!(
                 "把{summary}移到曲库的 .tfy-trash，之后可以在访达里恢复。"
             )),
-            &[PromptButton::ok("移到回收站"), PromptButton::cancel("取消")],
+            &[
+                PromptButton::ok("移到曲库回收站"),
+                PromptButton::cancel("取消"),
+            ],
             cx,
         );
         cx.spawn(async move |this, cx| {
@@ -3138,10 +3406,10 @@ impl Workspace {
         let category = song.category.clone();
         self.dialog_field
             .update(cx, |field, cx| field.set_text(title, cx));
+        self.dialog_feedback = None;
         self.dialog = Some(Dialog::EditTrack {
             key: key.to_owned(),
             category,
-            error: None,
         });
         let field = self.dialog_field.clone();
         cx.on_next_frame(window, move |_this, window, cx| {
@@ -3155,6 +3423,7 @@ impl Workspace {
             .update(cx, |field, cx| field.set_text("", cx));
         self.category_detail_field
             .update(cx, |field, cx| field.set_text("", cx));
+        self.dialog_feedback = None;
         self.dialog = Some(Dialog::NewCategory);
         let field = self.dialog_field.clone();
         cx.on_next_frame(window, move |_this, window, cx| {
@@ -3177,6 +3446,7 @@ impl Workspace {
             .update(cx, |field, cx| field.set_text(category.name_zh.clone(), cx));
         self.category_detail_field
             .update(cx, |field, cx| field.set_text(category.color.clone(), cx));
+        self.dialog_feedback = None;
         self.dialog = Some(Dialog::EditCategory { id: id.to_owned() });
         let field = self.dialog_field.clone();
         cx.on_next_frame(window, move |_, window, cx| {
@@ -3386,27 +3656,134 @@ impl Render for Workspace {
             .children(track);
         let player = self.player_bar(window, narrow, cx);
         let wallpaper = self.wallpaper_layer();
+        let folders = self.folders_modal_layer(window, cx);
         let action_menu = self.action_menu_layer(window, cx);
         let dialog = self.dialog_layer(window, cx);
         let picker = self.picker_layer(cx);
-        let export_popover = self.export_popover_layer(cx);
-        let wallpaper_popover = self.wallpaper_popover_layer(window, cx);
         let queue = self.queue_layer(cx);
         let diagnostics = self.diagnostics_layer(cx);
-        let settings = self.settings_layer(cx);
+        let settings = self.settings_layer(window, cx);
         let close_prompt = self.close_layer(cx);
+        let toast = self.toast_layer();
 
         div()
             .id("workspace")
             .key_context("Library")
             .track_focus(&self.focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.keyboard_focus_visible {
+                        this.keyboard_focus_visible = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::play_pause))
             .on_action(cx.listener(Self::seek_back))
             .on_action(cx.listener(Self::seek_forward))
             .on_action(cx.listener(Self::volume_up))
             .on_action(cx.listener(Self::volume_down))
             .on_action(cx.listener(Self::toggle_mute))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::FocusNext, window, cx| {
+                    this.move_keyboard_focus(true, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::FocusPrevious, window, cx| {
+                    this.move_keyboard_focus(false, window, cx);
+                }),
+            )
             .on_action(cx.listener(Self::focus_search))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenLibrary, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::Library, Some(LibraryFilter::All), cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenFavorites, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::Library, Some(LibraryFilter::Favorites), cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenSchedule, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::Schedule, None, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenSubtitles, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::Subtitles, None, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenAudioTools, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::AudioTools, None, cx);
+                    }
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &crate::actions::OpenPlaylistMigration, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::PlaylistMigration, None, cx);
+                    }
+                },
+            ))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenSpeech, window, cx| {
+                    if !this.modal_open() {
+                        window.focus(&this.focus);
+                        this.navigate(AppView::Speech, None, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ImportMusic, window, cx| {
+                    if !this.modal_open() {
+                        this.import_files(&ClickEvent::default(), window, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::RescanLibrary, window, cx| {
+                    if !this.modal_open() {
+                        this.rescan(window, cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenFolders, window, cx| {
+                    this.open_folders_modal(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::actions::ToggleQueue, _, cx| {
+                if !this.modal_open() {
+                    this.toggle_queue(cx);
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::PreviousTrack, _, cx| {
+                    this.skip_track(false, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::actions::NextTrack, _, cx| {
+                this.skip_track(true, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &crate::actions::OpenSettings, window, cx| {
                     this.open_settings(window, cx);
@@ -3414,12 +3791,16 @@ impl Render for Workspace {
             )
             .on_action(
                 cx.listener(|this, _: &crate::actions::TrackPage, window, cx| {
-                    this.toggle_track_page(window, cx)
+                    if !this.modal_open() {
+                        this.toggle_track_page(window, cx);
+                    }
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &crate::actions::ToggleDesktopLyrics, _, cx| {
-                    this.toggle_desktop_lyrics(cx);
+                    if !this.modal_open() {
+                        this.toggle_desktop_lyrics(cx);
+                    }
                 }),
             )
             .on_action(cx.listener(Self::dismiss))
@@ -3437,24 +3818,132 @@ impl Render for Workspace {
             .child(content)
             .child(player)
             .children(action_menu)
+            .children(folders)
             .children(dialog)
             .children(picker)
-            .children(export_popover)
-            .children(wallpaper_popover)
             .children(queue)
             .children(diagnostics)
             .children(settings)
             .children(close_prompt)
+            .children(toast)
     }
 }
 
 impl Workspace {
+    fn any_text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        let mut focused = [
+            &self.search,
+            &self.asr_url_field,
+            &self.api_token_field,
+            &self.api_cors_field,
+            &self.font_filter,
+            &self.dialog_field,
+            &self.category_detail_field,
+            &self.loop_start_field,
+            &self.loop_end_field,
+            &self.schedule_name_field,
+            &self.schedule_start_field,
+            &self.schedule_end_field,
+            &self.picker_search,
+            &self.segment_fields[0],
+            &self.segment_fields[1],
+            &self.segment_fields[2],
+        ]
+        .into_iter()
+        .any(|field| field.focus_handle(cx).is_focused(window));
+        if !focused && let Some(draft) = &self.schedule_draft {
+            focused = draft
+                .song_start_fields
+                .iter()
+                .chain(draft.song_end_fields.iter())
+                .any(|field| field.focus_handle(cx).is_focused(window));
+        }
+        focused
+            || self.playlist_tools.any_field_focused(window, cx)
+            || self.speech_tools.any_field_focused(window, cx)
+    }
+
+    fn toast_layer(&self) -> Option<gpui::AnyElement> {
+        let toast = self.toast.as_ref()?;
+        let accent = if toast.is_error { DANGER } else { ACCENT };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(PLAYER_HEIGHT + 16.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(520.))
+                        .px_4()
+                        .py_2()
+                        .rounded_full()
+                        .bg(theme_color(PANEL))
+                        .border_1()
+                        .border_color(fade(theme_color(accent), 0.4))
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icon(
+                            if toast.is_error { "alert" } else { "check" },
+                            14.,
+                            theme_color(accent),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme_color(TEXT))
+                                .truncate()
+                                .child(toast.message.clone()),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn interface_font(&self) -> SharedString {
         if self.library.prefs.ui_font == "system" {
             ".SystemUIFont".into()
         } else {
             self.library.prefs.ui_font.clone().into()
         }
+    }
+
+    fn modal_open(&self) -> bool {
+        self.dialog.is_some()
+            || self.picker.is_some()
+            || self.settings_page.is_some()
+            || self.folders_modal_open
+            || self.close_prompt
+    }
+
+    fn navigate(&mut self, page: AppView, filter: Option<LibraryFilter>, cx: &mut Context<Self>) {
+        if self.modal_open() {
+            return;
+        }
+        if let Some(filter) = filter {
+            if self.filter != filter {
+                self.selecting = false;
+                self.selected_songs.clear();
+            }
+            self.filter = filter;
+        }
+        self.set_track_page(false);
+        self.action_menu = None;
+        self.folder_menu = None;
+        self.view = page;
+        if page == AppView::Subtitles {
+            self.refresh_sherpa_status();
+            if self.asr_catalog.is_none() {
+                self.scan_asr_models(cx, false);
+            }
+            self.reload_subtitle_catalog(cx);
+        }
+        cx.notify();
     }
 
     fn browse_page(
@@ -3472,6 +3961,9 @@ impl Workspace {
             }
             AppView::Schedule => self.schedule_page(window, cx).into_any_element(),
             AppView::Subtitles => self.subtitle_page(cx),
+            AppView::AudioTools => self.audio_tools_page(cx),
+            AppView::PlaylistMigration => self.playlist_page(cx),
+            AppView::Speech => self.speech_page(cx),
         };
         div()
             .flex()
@@ -3492,7 +3984,6 @@ impl Workspace {
     // ---------- 渲染：侧栏 ----------
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let all_count = self.library.snapshot.songs.len();
         let favorite_count = self
             .library
             .prefs
@@ -3504,8 +3995,16 @@ impl Workspace {
         let all_active = self.filter != LibraryFilter::Favorites && self.view == AppView::Library;
         let fav_active = self.filter == LibraryFilter::Favorites && self.view == AppView::Library;
         let schedule_active = self.view == AppView::Schedule;
-        let root = self.library.root().display().to_string();
-        let source_label = self.library.source_label();
+        let folders = self.library.folders();
+        let folder_count = folders.len();
+        let offline_count = folders.iter().filter(|folder| !folder.online).count();
+        let folder_status = if folder_count == 0 {
+            "点击添加目录".to_owned()
+        } else if offline_count > 0 {
+            format!("{folder_count} 个目录（{offline_count} 离线）")
+        } else {
+            format!("{folder_count} 个目录")
+        };
         let panel = self.panel_alpha();
         let brand = &self.library.config.brand;
         div()
@@ -3555,31 +4054,34 @@ impl Workspace {
             .child(
                 div()
                     .px_5()
-                    .pt_4()
-                    .pb_2()
-                    .text_size(px(10.))
+                    .pt_2()
+                    .pb_1()
+                    .text_size(px(11.))
                     .text_color(theme_color(FAINT))
-                    .child("浏览"),
+                    .child("音乐"),
             )
             .child(
                 div()
+                    .id("primary-navigation")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
                     .px_3()
                     .pt_1()
+                    .pb_2()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap(px(3.))
                     .child(self.nav_button(
                         "nav-all",
                         "music",
                         "音乐库",
-                        all_count,
+                        0,
                         all_active,
                         false,
                         cx,
                         |this, cx| {
-                            this.view = AppView::Library;
-                            this.filter = LibraryFilter::All;
-                            cx.notify();
+                            this.navigate(AppView::Library, Some(LibraryFilter::All), cx);
                         },
                     ))
                     .child(self.nav_button(
@@ -3591,9 +4093,7 @@ impl Workspace {
                         true,
                         cx,
                         |this, cx| {
-                            this.view = AppView::Library;
-                            this.filter = LibraryFilter::Favorites;
-                            cx.notify();
+                            this.navigate(AppView::Library, Some(LibraryFilter::Favorites), cx);
                         },
                     ))
                     .child(self.nav_button(
@@ -3605,10 +4105,18 @@ impl Workspace {
                         false,
                         cx,
                         |this, cx| {
-                            this.view = AppView::Schedule;
-                            cx.notify();
+                            this.navigate(AppView::Schedule, None, cx);
                         },
                     ))
+                    .child(
+                        div()
+                            .px_2()
+                            .pt_3()
+                            .pb_1()
+                            .text_size(px(11.))
+                            .text_color(theme_color(MUTED))
+                            .child("制作工具"),
+                    )
                     .child(
                         self.nav_button(
                             "nav-subtitles",
@@ -3624,107 +4132,119 @@ impl Workspace {
                             false,
                             cx,
                             |this, cx| {
-                                this.view = AppView::Subtitles;
-                                this.reload_subtitle_catalog(cx);
+                                this.navigate(AppView::Subtitles, None, cx);
                             },
                         ),
-                    ),
-            )
-            .child(div().flex_1().min_h(px(12.)))
-            .child(
-                div()
-                    .px_3()
-                    .pb_3()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .px_3()
-                            .pb_2()
-                            .text_size(px(10.))
-                            .text_color(theme_color(FAINT))
-                            .child("曲库管理"),
                     )
-                    .child(self.command_button(
-                        "cmd-rescan",
-                        "refresh",
-                        "重新扫描",
+                    .child(self.nav_button(
+                        "nav-audio-tools",
+                        "search",
+                        "音频工具",
+                        0,
+                        self.view == AppView::AudioTools,
+                        false,
                         cx,
-                        |this, window, cx| this.rescan(window, cx),
+                        |this, cx| {
+                            this.navigate(AppView::AudioTools, None, cx);
+                        },
                     ))
-                    .child(self.command_button(
-                        "cmd-choose",
-                        "folder",
-                        "切换曲库目录",
+                    .child(self.nav_button(
+                        "nav-playlist-migration",
+                        "list-ordered",
+                        "歌单迁移",
+                        0,
+                        self.view == AppView::PlaylistMigration,
+                        false,
                         cx,
-                        |this, window, cx| this.choose_library(&ClickEvent::default(), window, cx),
+                        |this, cx| {
+                            this.navigate(AppView::PlaylistMigration, None, cx);
+                        },
                     ))
-                    .child(self.command_button(
-                        "cmd-open",
-                        "external",
-                        "在访达中打开",
+                    .child(self.nav_button(
+                        "nav-speech",
+                        "audio-lines",
+                        "文生语音",
+                        0,
+                        self.view == AppView::Speech,
+                        false,
                         cx,
-                        |this, _, cx| cx.reveal_path(this.library.root()),
-                    ))
-                    .when(self.library.using_custom_dir(), |this| {
-                        this.child(self.command_button(
-                            "cmd-reset",
-                            "rotate",
-                            "恢复默认曲库",
-                            cx,
-                            |this, _, cx| {
-                                if let Err(error) = this.library.reset_dir() {
-                                    this.notice = error;
-                                } else {
-                                    this.notice =
-                                        format!("曲库：{}", this.library.root().display());
-                                    this.reconcile_snapshot();
-                                    this.install_watcher();
-                                }
-                                cx.notify();
-                            },
-                        ))
-                    }),
+                        |this, cx| {
+                            this.navigate(AppView::Speech, None, cx);
+                        },
+                    )),
             )
             .child(
-                div()
-                    .mx_3()
-                    .mt_3()
-                    .mb(px(14.))
-                    .p_3()
-                    .rounded_md()
-                    .bg(fade(theme_color(CONTROL_TINT), 0.025 * panel))
-                    .border_1()
-                    .border_color(fade(theme_color(LINE), 0.65))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().size(px(5.)).rounded_full().bg(theme_color(ACCENT)))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme_color(ACCENT))
-                                    .child(source_label),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme_color(MUTED))
-                                    .child(format!("{all_count} 首")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
-                            .text_size(px(10.))
-                            .text_color(theme_color(FAINT))
-                            .text_ellipsis()
-                            .child(root),
-                    ),
+                div().mx_3().mt_2().mb(px(12.)).flex_none().child(
+                    controls::keyboard_control("cmd-music-folders", self.keyboard_focus_visible)
+                        .tooltip(|_, cx| cx.new(|_| Tip("管理收录的音乐文件夹".into())).into())
+                        .px_3()
+                        .py_2p5()
+                        .rounded_lg()
+                        .bg(fade(theme_color(CONTROL_TINT), 0.04 * panel))
+                        .border_1()
+                        .border_color(if offline_count > 0 {
+                            fade(theme_color(WARNING), 0.35)
+                        } else {
+                            fade(theme_color(LINE), 0.8)
+                        })
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .cursor_pointer()
+                        .hover(|style| {
+                            style
+                                .bg(fade(theme_color(CONTROL_TINT), 0.09))
+                                .border_color(fade(theme_color(ACCENT), 0.35))
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_folders_modal(window, cx);
+                        }))
+                        .child(
+                            div()
+                                .size(px(30.))
+                                .flex_none()
+                                .rounded_md()
+                                .bg(fade(
+                                    theme_color(if offline_count > 0 { WARNING } else { ACCENT }),
+                                    0.14,
+                                ))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(
+                                    "folder-open",
+                                    15.,
+                                    theme_color(if offline_count > 0 { WARNING } else { ACCENT }),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme_color(TEXT))
+                                        .child("音乐文件夹"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(if offline_count > 0 {
+                                            theme_color(WARNING)
+                                        } else {
+                                            theme_color(MUTED)
+                                        })
+                                        .truncate()
+                                        .child(folder_status),
+                                ),
+                        )
+                        .child(icon("chevron-right", 13., theme_color(FAINT))),
+                ),
             )
     }
 
@@ -3754,9 +4274,9 @@ impl Workspace {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
         let ink = if active { ACCENT_INK } else { MUTED };
-        div()
-            .id(id)
-            .h(px(39.))
+        controls::keyboard_control(id, self.keyboard_focus_visible)
+            .h(px(34.))
+            .flex_none()
             .px_3()
             .flex()
             .items_center()
@@ -3782,7 +4302,10 @@ impl Workspace {
                     theme_color(PANEL)
                 })
             })
-            .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(icon(
                 if favorite && active {
                     "heart-fill"
@@ -3809,34 +4332,8 @@ impl Workspace {
                     .text_right()
                     .text_size(px(11.))
                     .text_color(theme_color(ink))
-                    .child(count.to_string()),
+                    .when(count > 0, |count_view| count_view.child(count.to_string())),
             )
-            .into_any_element()
-    }
-
-    fn command_button(
-        &mut self,
-        id: &'static str,
-        icon_name: &'static str,
-        label: &'static str,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> gpui::AnyElement {
-        div()
-            .id(id)
-            .h(px(31.))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .rounded_md()
-            .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(theme_color(MUTED))
-            .hover(|style| style.bg(theme_color(PANEL)).text_color(theme_color(TEXT)))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(icon(icon_name, 14., theme_color(FAINT)))
-            .child(label)
             .into_any_element()
     }
 
@@ -3846,6 +4343,7 @@ impl Workspace {
         let search_focused = self.search.focus_handle(cx).is_focused(window);
         let panel = self.panel_alpha();
         let search = self.search.clone();
+        let library_page = self.view == AppView::Library;
         div()
             .h(px(66.))
             .flex_none()
@@ -3854,113 +4352,101 @@ impl Workspace {
             .items_center()
             .gap_3()
             .bg(fade(theme_color(BG), panel))
-            .child(
-                div()
-                    .flex_1()
-                    .max_w(px(410.))
-                    .h(px(36.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .bg(fade(theme_color(PANEL), panel))
-                    .border_1()
-                    .border_color(if search_focused {
-                        fade(theme_color(ACCENT), 0.55)
-                    } else {
-                        fade(theme_color(LINE), 0.8)
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        window.focus(&search.focus_handle(cx));
-                    })
-                    .child(icon(
-                        "search",
-                        15.,
-                        if search_focused {
-                            theme_color(ACCENT)
+            .when(library_page, |bar| {
+                bar.child(
+                    div()
+                        .flex_1()
+                        .max_w(px(410.))
+                        .h(px(36.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .bg(fade(theme_color(PANEL), panel))
+                        .border_1()
+                        .border_color(if search_focused {
+                            fade(theme_color(ACCENT), 0.55)
                         } else {
-                            theme_color(FAINT)
-                        },
-                    ))
-                    .child(div().flex_1().min_w(px(0.)).child(self.search.clone()))
-                    .when(!self.query.is_empty(), |this| {
-                        this.child(self.icon_button(
-                            "search-clear",
-                            "x",
-                            "清除搜索",
-                            false,
-                            cx,
-                            |this, _, cx| {
-                                this.search.update(cx, |field, cx| field.set_text("", cx));
-                                this.query.clear();
-                                cx.notify();
+                            fade(theme_color(LINE), 0.8)
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            window.focus(&search.focus_handle(cx));
+                        })
+                        .child(icon(
+                            "search",
+                            15.,
+                            if search_focused {
+                                theme_color(ACCENT)
+                            } else {
+                                theme_color(FAINT)
                             },
                         ))
-                    })
-                    .when(self.query.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .size(px(21.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.))
-                                .border_1()
-                                .border_color(theme_color(LINE))
-                                .text_size(px(11.))
-                                .text_color(theme_color(FAINT))
-                                .child("/"),
-                        )
-                    }),
-            )
+                        .child(div().flex_1().min_w(px(0.)).child(self.search.clone()))
+                        .when(!self.query.is_empty(), |this| {
+                            this.child(self.icon_button(
+                                "search-clear",
+                                "x",
+                                "清除搜索",
+                                false,
+                                cx,
+                                |this, _, cx| {
+                                    this.clear_search(cx);
+                                },
+                            ))
+                        })
+                        .when(self.query.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .px_1p5()
+                                    .h(px(21.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(5.))
+                                    .border_1()
+                                    .border_color(theme_color(LINE))
+                                    .text_size(px(11.))
+                                    .text_color(theme_color(FAINT))
+                                    .child("⌘F"),
+                            )
+                        }),
+                )
+            })
+            .when(!library_page, |bar| {
+                bar.child(self.tool_button(
+                    "open-library-search",
+                    "search",
+                    "搜索曲库",
+                    false,
+                    cx,
+                    |this, window, cx| this.focus_search(&FocusSearch, window, cx),
+                ))
+            })
             .child(
                 div()
                     .flex_1()
                     .h_full()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
             )
-            .child(self.tool_button(
+            .child(self.action_button(
                 "tool-import",
-                "upload",
                 "导入音乐",
+                Some("upload"),
+                controls::ButtonTone::Secondary,
+                true,
                 false,
                 cx,
                 |this, window, cx| {
                     this.import_files(&ClickEvent::default(), window, cx);
                 },
             ))
-            .child(self.icon_button(
-                "tool-export-settings",
-                "sliders",
-                "导出设置",
-                false,
-                cx,
-                |this, _, cx| {
-                    this.export_popover = !this.export_popover;
-                    this.wallpaper_popover = false;
-                    if this.export_popover {
-                        this.detect_ffmpeg(cx);
-                    }
-                    cx.notify();
-                },
-            ))
-            .child(self.icon_button(
-                "tool-wallpaper",
-                "image",
-                "界面壁纸",
-                false,
-                cx,
-                |this, _, cx| {
-                    this.wallpaper_popover = !this.wallpaper_popover;
-                    this.export_popover = false;
-                    cx.notify();
-                },
-            ))
-            .child(self.icon_button(
+            .child(self.action_button(
                 "tool-config",
-                "settings",
-                "设置（⌘,）",
+                "设置",
+                Some("settings"),
+                controls::ButtonTone::Ghost,
+                true,
                 false,
                 cx,
                 |this, window, cx| {
@@ -3985,13 +4471,17 @@ impl Workspace {
         } else {
             (card_width * 0.78).clamp(100., 156.)
         };
-        let show_shelf = self.filter != LibraryFilter::Favorites && self.query.is_empty();
+        let offline = self.library.online_folders().is_empty() && self.library.has_folders();
+        let recovery_only =
+            !self.library.has_folders() || (offline && self.library.snapshot.songs.is_empty());
+        let show_shelf =
+            !recovery_only && self.filter != LibraryFilter::Favorites && self.query.is_empty();
         let category_count = self.library.snapshot.categories.len();
-        let warning = self.library.snapshot.warnings.first().cloned();
-        let notice = self.notice.clone();
         let panel = self.panel_alpha();
         let edit_category = match &self.filter {
-            LibraryFilter::Category(id) => Some(id.clone()),
+            LibraryFilter::Category(id) if id != crate::library::UNCATEGORIZED_CATEGORY_ID => {
+                Some(id.clone())
+            }
             _ => None,
         };
 
@@ -4012,8 +4502,7 @@ impl Workspace {
                     .gap_4()
                     .child(
                         div()
-                            .w(px(viewport_width - SIDEBAR_WIDTH - 290.))
-                            .flex_grow()
+                            .flex_1()
                             .min_w(px(0.))
                             .flex()
                             .flex_col()
@@ -4026,49 +4515,56 @@ impl Workspace {
                                     .truncate()
                                     .child(title),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme_color(MUTED))
-                                    .w_full()
-                                    .truncate()
-                                    .child(description),
-                            ),
+                            .when(!recovery_only, |heading| {
+                                heading.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme_color(MUTED))
+                                        .w_full()
+                                        .truncate()
+                                        .child(description),
+                                )
+                            }),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(self.hero_button(
-                                "hero-play",
-                                "play-fill",
-                                &format!("全部播放 ({count})"),
-                                true,
-                                cx,
-                                |this, _, cx| {
-                                    if let Some(song) = this.visible.first() {
-                                        this.play_key(song.key.clone());
-                                    }
-                                    cx.notify();
-                                },
-                            ))
-                            .child(self.hero_button(
-                                "hero-shuffle",
-                                "shuffle",
-                                "随机试听",
-                                false,
-                                cx,
-                                |this, _, cx| {
-                                    if !this.visible.is_empty() && !this.guard_library_playback() {
-                                        if let Some(key) = this.smart_pick_start() {
-                                            this.play_key(key);
+                    .when(count > 0, |header| {
+                        header.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(self.hero_button(
+                                    "hero-play",
+                                    "play-fill",
+                                    "播放全部",
+                                    true,
+                                    cx,
+                                    |this, _, cx| {
+                                        if let Some(song) = this.visible.first() {
+                                            this.play_key(song.key.clone());
                                         }
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                    ),
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(self.hero_button(
+                                    "hero-shuffle",
+                                    "shuffle",
+                                    "随机试听",
+                                    false,
+                                    cx,
+                                    |this, _, cx| {
+                                        if !this.visible.is_empty()
+                                            && !this.guard_library_playback()
+                                        {
+                                            if let Some(key) = this.smart_pick_start() {
+                                                this.play_key(key);
+                                            }
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                        )
+                    }),
             )
             .when(show_shelf, |page| {
                 page.child(
@@ -4160,94 +4656,101 @@ impl Workspace {
                         .child(self.category_shelf(card_width, card_height, cx)),
                 )
             })
-            .child(
-                div()
-                    .px_6()
-                    .pb_3()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(results),
-                    )
-                    .child(
-                        div()
-                            .pb(px(1.))
-                            .text_size(px(11.))
-                            .text_color(theme_color(FAINT))
-                            .child(format!("{count} 首配乐")),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .max_w(px(330.))
-                            .text_size(px(11.))
-                            .text_color(theme_color(FAINT))
-                            .text_ellipsis()
-                            .child(if self.query.is_empty() {
-                                notice
-                            } else {
-                                format!("正在筛选“{}”", self.query)
-                            }),
-                    )
-                    .child(self.tool_button(
-                        "tool-sort",
-                        "sort",
-                        if self.library.prefs.sort_by == SortBy::Name {
-                            "按曲名 A–Z"
-                        } else {
-                            "默认推荐"
-                        },
-                        false,
-                        cx,
-                        |this, _, cx| {
-                            let next = if this.library.prefs.sort_by == SortBy::Name {
-                                SortBy::Default
-                            } else {
-                                SortBy::Name
-                            };
-                            if let Err(error) = this.library.set_sort(next) {
-                                this.notice = error;
-                            }
-                            cx.notify();
-                        },
-                    ))
-                    .child(self.tiny_button(
-                        if self.selecting {
-                            "退出多选"
-                        } else {
-                            "多选"
-                        },
-                        "select-songs",
-                        cx,
-                        |this, _, cx| {
-                            this.selecting = !this.selecting;
-                            this.selected_songs.clear();
-                            cx.notify();
-                        },
-                    )),
-            )
-            .children(warning.map(|warning| {
-                div()
-                    .mx_6()
-                    .mb_3()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .bg(fade(theme_color(WARNING), 0.08))
-                    .border_1()
-                    .border_color(fade(theme_color(WARNING), 0.2))
-                    .text_size(px(11.))
-                    .text_color(theme_color(WARNING))
-                    .child(icon("alert", 14., theme_color(WARNING)))
-                    .child(warning)
-            }))
+            .when(!recovery_only, |page| {
+                page.child(
+                    div()
+                        .px_6()
+                        .pb_3()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(results),
+                        )
+                        .child(
+                            div()
+                                .pb(px(1.))
+                                .text_size(px(11.))
+                                .text_color(theme_color(FAINT))
+                                .child(format!("{count} 首配乐")),
+                        )
+                        .child(div().flex_1())
+                        .when(!self.query.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .max_w(px(330.))
+                                    .text_size(px(11.))
+                                    .text_color(theme_color(FAINT))
+                                    .truncate()
+                                    .child(format!("正在筛选“{}”", self.query)),
+                            )
+                        })
+                        .when(count > 0, |bar| {
+                            bar.child(self.tool_button(
+                                "tool-sort",
+                                "sort",
+                                if self.library.prefs.sort_by == SortBy::Name {
+                                    "按曲名 A–Z"
+                                } else {
+                                    "默认推荐"
+                                },
+                                false,
+                                cx,
+                                |this, _, cx| {
+                                    let next = if this.library.prefs.sort_by == SortBy::Name {
+                                        SortBy::Default
+                                    } else {
+                                        SortBy::Name
+                                    };
+                                    if let Err(error) = this.library.set_sort(next) {
+                                        this.notice = error;
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        })
+                        .when(count > 0 || self.selecting, |bar| {
+                            bar.child(self.tiny_button(
+                                if self.selecting {
+                                    "退出多选"
+                                } else {
+                                    "多选"
+                                },
+                                "select-songs",
+                                cx,
+                                |this, _, cx| {
+                                    this.selecting = !this.selecting;
+                                    this.selected_songs.clear();
+                                    cx.notify();
+                                },
+                            ))
+                        }),
+                )
+            })
+            .when(offline && count > 0, |page| {
+                page.child(
+                    div()
+                        .mx_6()
+                        .mb_2()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(icon("alert", 13., theme_color(WARNING)))
+                        .child(
+                            div()
+                                .mr_2()
+                                .text_xs()
+                                .text_color(theme_color(MUTED))
+                                .child("目录暂时无法读取，正在显示最近的扫描结果"),
+                        )
+                        .child(self.library_recovery_actions(cx)),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -4261,81 +4764,51 @@ impl Workspace {
                     .bg(fade(theme_color(PANEL), panel))
                     .border_1()
                     .border_color(fade(theme_color(LINE), 0.75))
-                    .child(self.table_header())
-                    .when(self.selecting, |table| table.child(self.batch_bar(cx)))
+                    .when(count > 0, |table| table.child(self.table_header()))
+                    .when(self.selecting && !recovery_only, |table| {
+                        table.child(self.batch_bar(cx))
+                    })
                     .child(self.song_list(cx)),
             )
     }
 
     fn hero_button(
         &mut self,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         icon_name: &'static str,
         label: &str,
         primary: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        let label = label.to_owned();
-        div()
-            .id(id)
-            .h(px(33.))
-            .px_4()
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded_md()
-            .cursor_pointer()
-            .text_size(px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .bg(if primary {
-                fade(theme_color(ACCENT), 1.)
+        controls::ui_button(
+            id,
+            label.to_owned(),
+            Some(icon_name),
+            if primary {
+                controls::ButtonTone::Primary
             } else {
-                fade(theme_color(CONTROL_TINT), 0.07)
-            })
-            .text_color(if primary {
-                theme_color(ACCENT_INK)
-            } else {
-                theme_color(TEXT)
-            })
-            .border_1()
-            .border_color(if primary {
-                fade(theme_color(CONTROL_TINT), 0.)
-            } else {
-                fade(theme_color(CONTROL_TINT), 0.12)
-            })
-            .hover(move |style| {
-                if primary {
-                    style.bg(theme_color(ACCENT_HOVER))
-                } else {
-                    style.bg(fade(theme_color(CONTROL_TINT), 0.12))
-                }
-            })
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(icon(
-                icon_name,
-                14.,
-                if primary {
-                    theme_color(ACCENT_INK)
-                } else {
-                    theme_color(TEXT)
-                },
-            ))
-            .child(label)
-            .into_any_element()
+                controls::ButtonTone::Secondary
+            },
+            true,
+            false,
+            self.keyboard_focus_visible,
+            cx,
+            on_click,
+        )
+        .into_any_element()
     }
 
     fn icon_button(
         &mut self,
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         icon_name: &'static str,
         label: &'static str,
         solid: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(id)
+        controls::keyboard_control(id, self.keyboard_focus_visible)
             .tooltip(move |_, cx| cx.new(|_| Tip(label.into())).into())
             .size(px(32.))
             .flex()
@@ -4355,7 +4828,10 @@ impl Workspace {
                 fade(theme_color(CONTROL_TINT), 0.)
             })
             .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.11)))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, window, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(icon(icon_name, 15., theme_color(MUTED)))
             .into_any_element()
     }
@@ -4370,8 +4846,7 @@ impl Workspace {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
         let label = label.to_owned();
-        div()
-            .id(id)
+        controls::keyboard_control(id, self.keyboard_focus_visible)
             .h(px(33.))
             .px_3()
             .flex()
@@ -4406,7 +4881,10 @@ impl Workspace {
                         .text_color(theme_color(TEXT))
                 }
             })
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, window, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(icon(
                 icon_name,
                 14.,
@@ -4446,7 +4924,11 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.filter = LibraryFilter::Category(id.clone());
+                        this.filter = if this.filter == LibraryFilter::Category(id.clone()) {
+                            LibraryFilter::All
+                        } else {
+                            LibraryFilter::Category(id.clone())
+                        };
                         cx.notify();
                     }))
                     .child(
@@ -4534,19 +5016,29 @@ impl Workspace {
             ))
             .when(count > 0, |bar| {
                 bar.child(self.tiny_button("移动", "batch-move", cx, |this, _, cx| {
+                    let default_cat = this.default_import_target().1;
+                    this.dialog_feedback = None;
                     this.dialog = Some(Dialog::MoveBatch {
                         keys: this.selected_keys(),
+                        category: default_cat,
                     });
                     cx.notify();
                 }))
                 .child(self.tiny_button("导出", "batch-export", cx, |this, _, cx| {
                     this.export_selected(cx)
                 }))
-                .child(
-                    self.tiny_button("删除", "batch-trash", cx, |this, window, cx| {
+                .child(self.action_button(
+                    "batch-trash",
+                    "移到曲库回收站",
+                    None,
+                    controls::ButtonTone::Danger,
+                    true,
+                    true,
+                    cx,
+                    |this, window, cx| {
                         this.trash_keys(this.selected_keys(), window, cx);
-                    }),
-                )
+                    },
+                ))
                 .child(self.tiny_button(
                     "取消选择",
                     "batch-clear",
@@ -4580,29 +5072,168 @@ impl Workspace {
             .child(div().w(px(60.)).text_right().child("操作"))
     }
 
+    fn library_recovery_actions(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let has_folders = self.library.has_folders();
+        div()
+            .flex()
+            .gap_2()
+            .items_center()
+            .flex_wrap()
+            .child(self.action_button(
+                "library-recovery-folders",
+                if has_folders {
+                    "管理音乐文件夹…"
+                } else {
+                    "添加文件夹…"
+                },
+                Some(if has_folders {
+                    "folder-open"
+                } else {
+                    "folder-plus"
+                }),
+                controls::ButtonTone::Primary,
+                true,
+                false,
+                cx,
+                |this, window, cx| {
+                    if this.library.has_folders() {
+                        this.open_folders_modal(window, cx);
+                    } else {
+                        this.add_library_folders(window, cx);
+                    }
+                },
+            ))
+            .when(has_folders, |row| {
+                row.child(self.action_button(
+                    "library-retry",
+                    "重新扫描",
+                    Some("refresh"),
+                    controls::ButtonTone::Secondary,
+                    true,
+                    false,
+                    cx,
+                    |this, window, cx| this.rescan(window, cx),
+                ))
+            })
+    }
+
     fn song_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let count = self.visible.len();
         if count == 0 {
+            if !self.library.has_folders() {
+                return div()
+                    .size_full()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(icon("folder-open", 30., theme_color(MUTED)))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("还没有音乐文件夹"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme_color(MUTED))
+                            .child("添加一个或多个文件夹后，散落在不同位置的配乐都会汇聚到这里。"),
+                    )
+                    .child(self.library_recovery_actions(cx))
+                    .into_any_element();
+            }
+            if self.library.online_folders().is_empty() {
+                return div()
+                    .size_full()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(icon("alert", 30., theme_color(WARNING)))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("音乐文件夹暂时离线"),
+                    )
+                    .child(
+                        div().text_sm().text_color(theme_color(MUTED)).child(
+                            "请确认外置硬盘或对应目录已重新连接，原有收藏与节目单配置已保留。",
+                        ),
+                    )
+                    .child(self.library_recovery_actions(cx))
+                    .into_any_element();
+            }
+            let searching = !self.query.is_empty();
+            let favorites = self.filter == LibraryFilter::Favorites;
+            let category = matches!(self.filter, LibraryFilter::Category(_));
+            let (title, detail, label, glyph) = if searching {
+                (
+                    "没有匹配的曲目",
+                    "试试其他曲名、分类或关键词。",
+                    "清除搜索",
+                    "x",
+                )
+            } else if favorites {
+                (
+                    "还没有收藏",
+                    "在曲库里点心形图标，就能在这里找到那首曲目。",
+                    "浏览音乐库",
+                    "music",
+                )
+            } else if category {
+                (
+                    "这个场景还没有曲目",
+                    "可浏览全部曲目，或导入音频到这个分类。",
+                    "查看全部曲目",
+                    "music",
+                )
+            } else {
+                (
+                    "曲库还没有音乐",
+                    "导入本地音频，或从侧栏选择已有曲库目录。",
+                    "导入音乐…",
+                    "upload",
+                )
+            };
             return div()
                 .size_full()
+                .p_4()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(icon("music", 30., theme_color(FAINT)))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme_color(MUTED))
-                        .child("这个列表里还没有曲目"),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme_color(FAINT))
-                        .child("换个分类、清空搜索，或导入新的音频"),
-                )
+                .child(icon(
+                    if favorites { "heart" } else { "music" },
+                    28.,
+                    theme_color(MUTED),
+                ))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(div().text_xs().text_color(theme_color(MUTED)).child(detail))
+                .child(self.tool_button(
+                    "library-empty-action",
+                    glyph,
+                    label,
+                    false,
+                    cx,
+                    move |this, window, cx| {
+                        if searching {
+                            this.clear_search(cx);
+                            window.focus(&this.search.focus_handle(cx));
+                        } else if favorites || category {
+                            this.filter = LibraryFilter::All;
+                            cx.notify();
+                        } else {
+                            this.import_files(&ClickEvent::default(), window, cx);
+                        }
+                    },
+                ))
                 .into_any_element();
         }
         uniform_list(
@@ -4645,21 +5276,34 @@ impl Workspace {
             .categories
             .iter()
             .find(|category| category.id == song.category);
-        let category_name = category
-            .map(|category| category.name_zh.clone())
-            .unwrap_or_else(|| song.category.clone());
+        let category_name = if song.category == crate::library::UNCATEGORIZED_CATEGORY_ID {
+            "未分类".to_owned()
+        } else {
+            category
+                .map(|category| category.name_zh.clone())
+                .unwrap_or_else(|| song.category.clone())
+        };
         let category_color = category
             .map(|category| parse_color(&category.color))
-            .unwrap_or_else(|| theme_color(ACCENT));
+            .unwrap_or_else(|| theme_color(MUTED));
         let category_icon_name = category
             .map(|category| category_icon(&category.icon))
-            .unwrap_or("music");
-        let subtitle = song
+            .unwrap_or("folder");
+        let base_sub = song
             .artist
             .as_ref()
             .or(song.album.as_ref())
             .cloned()
             .unwrap_or_else(|| song.file_name.clone());
+        let subtitle = if self.library.folders().len() > 1 {
+            if let Some(folder) = self.library.folder_for_song(&song.key) {
+                format!("{} · {base_sub}", folder.display_name)
+            } else {
+                base_sub
+            }
+        } else {
+            base_sub
+        };
         let time = song
             .duration_ms
             .map(|ms| format_time(Duration::from_millis(u64::from(ms))))
@@ -4669,6 +5313,7 @@ impl Workspace {
         let play_key = song.key.clone();
         let fav_key = song.key.clone();
         let menu_key = song.key.clone();
+        let right_menu_key = song.key.clone();
         let loop_active = self.loop_region_for(Some(song.key.as_str())).is_some();
 
         let can_reorder = self.library.prefs.sort_by == SortBy::Default && !selecting;
@@ -4689,6 +5334,13 @@ impl Workspace {
                     cx.notify();
                 }))
             })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.show_track_menu(right_menu_key.clone(), event.position, cx);
+                    cx.notify();
+                }),
+            )
             .h(px(ROW_HEIGHT))
             .w_full()
             .px_4()
@@ -4709,7 +5361,29 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(if playing {
+                    .child(if selecting {
+                        div()
+                            .size(px(16.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(if selected {
+                                fade(theme_color(ACCENT), 1.0)
+                            } else {
+                                fade(theme_color(CONTROL_TINT), 0.28)
+                            })
+                            .bg(if selected {
+                                fade(theme_color(ACCENT), 1.0)
+                            } else {
+                                fade(theme_color(CONTROL_TINT), 0.04)
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(selected, |box_div| {
+                                box_div.child(icon("check", 11., theme_color(ACCENT_INK)))
+                            })
+                            .into_any_element()
+                    } else if playing {
                         icon("play-fill", 11., theme_color(ACCENT)).into_any_element()
                     } else {
                         div()
@@ -4719,11 +5393,7 @@ impl Workspace {
                             } else {
                                 theme_color(FAINT)
                             })
-                            .child(if selecting {
-                                if selected { "✓".into() } else { "□".into() }
-                            } else {
-                                format!("{:02}", index + 1)
-                            })
+                            .child(format!("{:02}", index + 1))
                             .into_any_element()
                     }),
             )
@@ -4841,34 +5511,43 @@ impl Workspace {
                         format!("fav-{}", song.key),
                         if favorite { "heart-fill" } else { "heart" },
                         if favorite {
+                            "取消收藏"
+                        } else {
+                            "收藏曲目"
+                        },
+                        if favorite {
                             theme_color(FAVORITE)
                         } else {
                             theme_color(FAINT)
                         },
                         cx,
                         move |this, _, cx| {
-                            this.notice = match this.library.toggle_favorite(&fav_key) {
-                                Ok(true) => "已收藏".into(),
-                                Ok(false) => "已取消收藏".into(),
-                                Err(error) => error,
-                            };
+                            match this.library.toggle_favorite(&fav_key) {
+                                Ok(true) => this.show_toast("已添加到我的收藏", false, cx),
+                                Ok(false) => this.show_toast("已取消收藏", false, cx),
+                                Err(error) => this.show_toast(error, true, cx),
+                            }
                             cx.notify();
                         },
                     ))
                     .child(
-                        div()
-                            .id(SharedString::from(format!("more-{}", song.key)))
-                            .size(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.09)))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                                this.show_track_menu(menu_key.clone(), event.position(), cx);
-                            }))
-                            .child(icon("more", 14., theme_color(FAINT))),
+                        controls::keyboard_control(
+                            SharedString::from(format!("more-{}", song.key)),
+                            self.keyboard_focus_visible,
+                        )
+                        .tooltip(|_, cx| cx.new(|_| Tip("曲目操作".into())).into())
+                        .size(px(26.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.09)))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            this.show_track_menu(menu_key.clone(), event.position(), cx);
+                            this.after_button_click(window, cx);
+                        }))
+                        .child(icon("more", 14., theme_color(FAINT))),
                     ),
             )
     }
@@ -4877,12 +5556,13 @@ impl Workspace {
         &mut self,
         id: String,
         icon_name: &'static str,
+        label: &'static str,
         color: Rgba,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(SharedString::from(id))
+        controls::keyboard_control(SharedString::from(id), self.keyboard_focus_visible)
+            .tooltip(move |_, cx| cx.new(|_| Tip(label.into())).into())
             .size(px(24.))
             .flex()
             .items_center()
@@ -4890,7 +5570,10 @@ impl Workspace {
             .rounded(px(6.))
             .cursor_pointer()
             .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.09)))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, window, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(icon(icon_name, 13., color))
             .into_any_element()
     }
@@ -4909,9 +5592,8 @@ impl Workspace {
         }
         self.set_track_page(!self.now_playing_open);
         self.queue_open = false;
-        self.export_popover = false;
-        self.wallpaper_popover = false;
         self.action_menu = None;
+        self.folder_menu = None;
         window.focus(&self.focus);
         cx.notify();
     }
@@ -5397,6 +6079,10 @@ impl Workspace {
         self.queue_open = false;
         self.diagnostics_open = false;
         window.focus(&self.focus);
+        self.refresh_sherpa_status();
+        if self.asr_catalog.is_none() {
+            self.scan_asr_models(cx, false);
+        }
         if self.subtitle_progress.is_none()
             && self.subtitle_catalog.editor.is_none()
             && !self.editing_subtitle
@@ -5928,6 +6614,18 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let sherpa_ready = sherpa::is_runtime_available();
+        self.sherpa_runtime_status = sherpa::current_runtime_status();
+        self.speech_tools.sherpa_runtime_ready = sherpa_ready;
+        if !sherpa_ready {
+            let reason = if captions {
+                "生成字幕与人声分离"
+            } else {
+                "人声与伴奏分离"
+            };
+            self.prompt_missing_sherpa_runtime(reason, window, cx);
+            return;
+        }
         let session = if captions {
             if self.asr_busy() {
                 self.notice = "正在处理 ASR 任务，请稍候".into();
@@ -5936,9 +6634,7 @@ impl Workspace {
                 return;
             }
             let Some(session) = self.asr_session.clone() else {
-                self.notice = "请先在「设置 → 模型」加载 ASR 模型".into();
-                self.subtitle_feedback = Some((key, self.notice.clone()));
-                cx.notify();
+                self.prompt_missing_asr_model(window, cx);
                 return;
             };
             Some(session)
@@ -6237,9 +6933,10 @@ impl Workspace {
                                 ),
                         )
                         .when(can_select, |row| {
+                            let pending_id = select_key.clone();
                             row.child(self.tiny_button(
                                 "选择",
-                                "select-pending-subtitle",
+                                SharedString::from(format!("select-pending-subtitle-{pending_id}")),
                                 cx,
                                 move |this, window, cx| {
                                     this.open_subtitle_generation(select_key.clone(), window, cx);
@@ -6247,7 +6944,7 @@ impl Workspace {
                             ))
                             .child(self.tiny_button(
                                 "移除",
-                                "remove-pending-subtitle",
+                                SharedString::from(format!("remove-pending-subtitle-{pending_id}")),
                                 cx,
                                 move |this, _, cx| {
                                     let catalog = &mut this.subtitle_catalog;
@@ -6306,7 +7003,7 @@ impl Workspace {
                         )
                         .child(self.tiny_button(
                             "预览",
-                            "preview-subtitle",
+                            SharedString::from(format!("preview-subtitle-{}", record.key)),
                             cx,
                             move |this, _, cx| {
                                 if this.subtitle_progress.is_none() {
@@ -6318,7 +7015,7 @@ impl Workspace {
                         ))
                         .child(self.tiny_button(
                             "分段编辑",
-                            "edit-subtitle-segments",
+                            SharedString::from(format!("edit-subtitle-segments-{}", record.key)),
                             cx,
                             move |this, _, cx| {
                                 this.open_segment_editor(
@@ -6330,15 +7027,19 @@ impl Workspace {
                         ))
                         .child(self.tiny_button(
                             "导出",
-                            "export-subtitle",
+                            SharedString::from(format!("export-subtitle-{}", record.key)),
                             cx,
                             move |this, _, cx| {
                                 this.export_subtitle_record(export_key.clone(), &export_title, cx)
                             },
                         ))
-                        .child(self.tiny_button(
+                        .child(self.action_button(
+                            SharedString::from(format!("delete-subtitle-{}", record.key)),
                             "删除",
-                            "delete-subtitle",
+                            None,
+                            controls::ButtonTone::Danger,
+                            true,
+                            true,
                             cx,
                             move |this, window, cx| {
                                 this.remove_subtitle_record(delete_key.clone(), window, cx)
@@ -6373,9 +7074,13 @@ impl Workspace {
                                             .map(
                                                 |(kind, label, id)| {
                                                     let key = record.key.clone();
+                                                    let unique_id = SharedString::from(format!(
+                                                        "{id}-{}",
+                                                        record.key
+                                                    ));
                                                     self.tiny_button(
                                                         label,
-                                                        id,
+                                                        unique_id,
                                                         cx,
                                                         move |this, _, cx| {
                                                             this.open_separated_audio(
@@ -6433,9 +7138,13 @@ impl Workspace {
                                             .map(
                                                 |(delivery, label, id)| {
                                                     let key = record.key.clone();
+                                                    let unique_id = SharedString::from(format!(
+                                                        "{id}-{}",
+                                                        record.key
+                                                    ));
                                                     self.tiny_button(
                                                         label,
-                                                        id,
+                                                        unique_id,
                                                         cx,
                                                         move |this, _, cx| {
                                                             this.reveal_subtitle_delivery(
@@ -6482,8 +7191,8 @@ impl Workspace {
                     .justify_between()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(PAGE_TITLE))
+                            .font_weight(FontWeight::BOLD)
                             .child("字幕生成"),
                     )
                     .child(
@@ -6492,7 +7201,7 @@ impl Workspace {
                             .gap_2()
                             .when(can_select, |row| {
                                 row.child(self.tiny_button(
-                                    "选择曲目",
+                                    "选择曲目…",
                                     "generate-selected-subtitle",
                                     cx,
                                     |this, window, cx| {
@@ -6541,38 +7250,106 @@ impl Workspace {
                                         ),
                                     )
                                     .child(div().text_xs().text_color(theme_color(MUTED)).child(
-                                        if self.asr_session.is_some() {
-                                            "ASR 模型已加载 · 仅识别人声轨"
+                                        if let Some((install_msg, _)) = self.sherpa_install_status() {
+                                            install_msg
+                                        } else if !self.sherpa_runtime_status.is_ready() {
+                                            format!(
+                                                "缺少通用推理库（sherpa-onnx 2.0.2，约 {:.1} MB），可一键安装或前往模型设置。",
+                                                sherpa::current_package()
+                                                    .map_or(9_000_000.0, |pkg| pkg.size_bytes as f64)
+                                                    / 1_000_000.0
+                                            )
+                                        } else if self.asr_session.is_some() {
+                                            "识别模型已就绪。生成时将分离人声并输出字幕。".into()
                                         } else if self.asr_loading.is_some() {
-                                            "正在加载 ASR 模型…"
+                                            "正在加载语音识别模型…".into()
+                                        } else if self.default_asr_model_complete() {
+                                            "本地语音识别模型已下载，启用后即可生成字幕。".into()
+                                        } else if self.asr_download.is_some() {
+                                            "正在下载语音识别模型…".into()
                                         } else {
-                                            "请先加载 ASR 模型"
+                                            "尚未下载语音识别模型（Qwen3-ASR 0.6B，约 941 MiB），可在「设置 → 语音模型」中一键下载。".into()
                                         },
                                     )),
                             )
                             .when_some(track.filter(|_| can_generate), |row, song| {
                                 let key = song.key.clone();
-                                row.child(self.tiny_button(
-                                    "选择模型并生成字幕",
+                                row.child(self.settings_button(
                                     "confirm-generate-subtitle",
+                                    "生成字幕…",
+                                    true,
+                                    true,
                                     cx,
                                     move |this, window, cx| {
                                         this.process_track_audio(key.clone(), true, window, cx);
                                     },
                                 ))
                             })
-                            .when(self.asr_session.is_none(), |row| {
+                            .when(self.sherpa_download.is_some(), |row| {
                                 row.child(self.tiny_button(
-                                    "打开模型设置",
-                                    "subtitle-model-settings",
+                                    "取消安装",
+                                    "subtitle-cancel-sherpa",
                                     cx,
-                                    |this, window, cx| {
-                                        this.open_settings(window, cx);
-                                        this.settings_page = Some(SettingsPage::Models);
-                                        this.scan_asr_models(cx, false);
-                                    },
+                                    |this, _, cx| this.cancel_sherpa_runtime_install(cx),
                                 ))
-                            }),
+                            })
+                            .when(
+                                self.sherpa_download.is_none()
+                                    && !self.sherpa_runtime_status.is_ready(),
+                                |row| {
+                                    row.child(self.settings_button(
+                                        "subtitle-install-sherpa",
+                                        "一键安装推理库",
+                                        true,
+                                        sherpa::current_package().is_some(),
+                                        cx,
+                                        |this, _, cx| this.start_sherpa_runtime_install(cx),
+                                    ))
+                                },
+                            )
+                            .when(
+                                self.sherpa_download.is_none()
+                                    && self.sherpa_runtime_status.is_ready()
+                                    && self.asr_session.is_none()
+                                    && self.asr_loading.is_none()
+                                    && self.default_asr_model_complete(),
+                                |row| {
+                                    row.child(controls::ui_button(
+                                        "subtitle-enable-asr",
+                                        "启用识别模型",
+                                        None,
+                                        controls::ButtonTone::Primary,
+                                        !self.asr_busy(),
+                                        true,
+                                        self.keyboard_focus_visible,
+                                        cx,
+                                        |this, _, cx| {
+                                            this.load_asr_model(DEFAULT_MODEL_NAME.into(), cx);
+                                        },
+                                    ))
+                                },
+                            )
+                            .when(
+                                self.asr_session.is_none() && self.sherpa_download.is_none(),
+                                |row| {
+                                    row.child(self.tiny_button(
+                                        if self.default_asr_model_complete() {
+                                            "模型设置"
+                                        } else {
+                                            "打开模型设置"
+                                        },
+                                        "subtitle-model-settings",
+                                        cx,
+                                        |this, window, cx| {
+                                            this.open_settings_page(
+                                                SettingsPage::Models,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                },
+                            ),
                     )
                     .when_some(status, |row, (_, message)| {
                         row.child(
@@ -6844,11 +7621,21 @@ impl Workspace {
             .find(|(track, _)| track == &key)
             .map(|(_, message)| message);
 
+        let source_folder = self
+            .library
+            .folder_for_song(&key)
+            .map(|folder| folder.display_name.clone());
+        let category_label = if song.category == crate::library::UNCATEGORIZED_CATEGORY_ID {
+            "未分类".to_owned()
+        } else {
+            name.to_owned()
+        };
         let mut metadata = div().flex().flex_col().gap_3();
         for (label, value) in [
             ("艺人", song.artist.clone()),
             ("专辑", song.album.clone()),
-            ("分类", Some(name.to_owned())),
+            ("分类", Some(category_label)),
+            ("来源", source_folder),
             ("时长", duration.map(format_time)),
             ("文件", Some(song.file_name.clone())),
         ] {
@@ -7290,57 +8077,53 @@ impl Workspace {
                             .child(self.player_icon_button(
                                 "player-prev",
                                 "skip-back",
+                                "上一首",
                                 false,
                                 cx,
-                                |this, _, cx| {
-                                    if !this.guard_library_playback() {
-                                        this.previous();
-                                    }
-                                    cx.notify();
-                                },
+                                |this, _, cx| this.skip_track(false, cx),
                             ))
                             .child(
-                                div()
-                                    .id("player-play")
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| {
-                                            Tip(if playing {
-                                                "暂停".into()
-                                            } else {
-                                                "播放".into()
-                                            })
+                                controls::keyboard_control(
+                                    "player-play",
+                                    self.keyboard_focus_visible,
+                                )
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| {
+                                        Tip(if playing {
+                                            "暂停".into()
+                                        } else {
+                                            "播放".into()
                                         })
-                                        .into()
                                     })
-                                    .size(px(38.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(theme_color(ACCENT))
-                                    .shadow_sm()
-                                    .hover(|style| style.opacity(0.9))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.play_pause(&PlayPause, window, cx);
-                                    }))
-                                    .child(icon(
-                                        if playing { "pause-fill" } else { "play-fill" },
-                                        15.,
-                                        theme_color(ACCENT_INK),
-                                    )),
+                                    .into()
+                                })
+                                .size(px(38.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .cursor_pointer()
+                                .bg(theme_color(ACCENT))
+                                .shadow_sm()
+                                .hover(|style| style.opacity(0.9))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.play_pause(&PlayPause, window, cx);
+                                    this.after_button_click(window, cx);
+                                }))
+                                .child(icon(
+                                    if playing { "pause-fill" } else { "play-fill" },
+                                    15.,
+                                    theme_color(ACCENT_INK),
+                                )),
                             )
                             .child(self.player_icon_button(
                                 "player-next",
                                 "skip-forward",
+                                "下一首",
                                 false,
                                 cx,
                                 |this, _, cx| {
-                                    if !this.guard_library_playback() {
-                                        this.failed_tracks.clear();
-                                        this.advance(TrackStart::Selected);
-                                    }
-                                    cx.notify();
+                                    this.skip_track(true, cx);
                                 },
                             ))
                             .child(self.player_rate_button(&rate, cx, |this, _, cx| {
@@ -7374,7 +8157,7 @@ impl Workspace {
                                             .ok();
                                     })
                                     .id("seek")
-                                    .h(px(14.))
+                                    .h(px(18.))
                                     .flex()
                                     .items_center()
                                     .cursor_pointer()
@@ -7385,7 +8168,7 @@ impl Workspace {
                                     .child(
                                         div()
                                             .relative()
-                                            .h(px(3.))
+                                            .h(px(4.))
                                             .w_full()
                                             .rounded_full()
                                             .bg(theme_color(LINE))
@@ -7416,7 +8199,20 @@ impl Workspace {
                                                     } else {
                                                         theme_color(FAINT)
                                                     }),
-                                            ),
+                                            )
+                                            .when(has_track, |track| {
+                                                track.child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(relative(ratio))
+                                                        .ml(px(-5.))
+                                                        .top(px(-3.))
+                                                        .size(px(10.))
+                                                        .rounded_full()
+                                                        .bg(theme_color(ACCENT))
+                                                        .shadow_sm(),
+                                                )
+                                            }),
                                     ),
                             )
                             .child(
@@ -7438,6 +8234,7 @@ impl Workspace {
                     .child(self.player_icon_button(
                         "volume-mute",
                         if muted { "volume-mute" } else { "volume" },
+                        if muted { "解除静音" } else { "静音" },
                         false,
                         cx,
                         |this, _, cx| {
@@ -7459,8 +8256,14 @@ impl Workspace {
                                     .ok();
                             })
                             .id("volume")
-                            .w(px(if narrow { 48. } else { 74. }))
-                            .h(px(14.))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| {
+                                    Tip(format!("音量 {}%", (volume * 100.0).round() as i32).into())
+                                })
+                                .into()
+                            })
+                            .w(px(if narrow { 52. } else { 78. }))
+                            .h(px(18.))
                             .flex()
                             .items_center()
                             .cursor_pointer()
@@ -7470,7 +8273,8 @@ impl Workspace {
                             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::volume_up_at))
                             .child(
                                 div()
-                                    .h(px(3.))
+                                    .relative()
+                                    .h(px(4.))
                                     .w_full()
                                     .rounded_full()
                                     .bg(theme_color(LINE))
@@ -7480,35 +8284,57 @@ impl Workspace {
                                             .w(relative(volume))
                                             .rounded_full()
                                             .bg(theme_color(MUTED)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(relative(volume))
+                                            .ml(px(-4.5))
+                                            .top(px(-2.5))
+                                            .size(px(9.))
+                                            .rounded_full()
+                                            .bg(theme_color(TEXT)),
                                     ),
                             ),
                     )
                     .child(self.player_icon_button(
                         "player-queue",
                         "list-music",
+                        if self.queue_open {
+                            "收起播放队列"
+                        } else {
+                            "显示播放队列"
+                        },
                         self.queue_open,
                         cx,
                         |this, _, cx| {
-                            this.queue_open = !this.queue_open;
-                            this.diagnostics_open = false;
-                            cx.notify();
+                            this.toggle_queue(cx);
                         },
                     ))
-                    .child(self.player_icon_button(
-                        "player-fav",
-                        if favorite { "heart-fill" } else { "heart" },
-                        favorite,
-                        cx,
-                        move |this, _, cx| {
-                            if let Some(key) = this.current_key() {
-                                this.notice = match this.library.toggle_favorite(&key) {
-                                    Ok(true) => "已收藏".into(),
-                                    Ok(false) => "已取消收藏".into(),
-                                    Err(error) => error,
-                                };
-                            }
-                            cx.notify();
-                        },
+                    .child(div().when(!has_track, |el| el.opacity(0.4)).child(
+                        self.player_icon_button(
+                            "player-fav",
+                            if favorite { "heart-fill" } else { "heart" },
+                            if !has_track {
+                                "当前未播放曲目"
+                            } else if favorite {
+                                "取消收藏"
+                            } else {
+                                "收藏当前曲目"
+                            },
+                            favorite,
+                            cx,
+                            move |this, _, cx| {
+                                if let Some(key) = this.current_key() {
+                                    match this.library.toggle_favorite(&key) {
+                                        Ok(true) => this.show_toast("已添加到我的收藏", false, cx),
+                                        Ok(false) => this.show_toast("已取消收藏", false, cx),
+                                        Err(error) => this.show_toast(error, true, cx),
+                                    }
+                                    cx.notify();
+                                }
+                            },
+                        ),
                     ))
                     .child(
                         div()
@@ -7687,111 +8513,153 @@ impl Workspace {
         if !self.close_prompt {
             return None;
         }
+        let show_focus = self.keyboard_focus_visible;
         Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .bg(fade(theme_color(SCRIM), 0.26))
-                .flex()
-                .justify_center()
-                .items_center()
-                .child(
-                    div()
-                        .w(px(390.))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme_color(LINE))
-                        .bg(theme_color(PANEL))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("关闭听风吟"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme_color(MUTED))
-                                .child("最小化到菜单栏可以继续播放。"),
-                        )
-                        .child(self.setting_toggle(
-                            "close-remember",
-                            self.remember_close,
-                            cx,
-                            |this, _, cx| {
-                                this.remember_close = !this.remember_close;
-                                cx.notify();
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(self.tiny_button(
-                                    "取消",
-                                    "close-cancel",
-                                    cx,
-                                    |this, _, cx| {
-                                        this.close_prompt = false;
-                                        cx.notify();
-                                    },
-                                ))
-                                .child(self.tiny_button(
-                                    "退出应用",
-                                    "close-quit",
-                                    cx,
-                                    |this, _, cx| {
-                                        if this.remember_close
-                                            && let Err(error) =
-                                                this.library.update_playback_settings(|settings| {
-                                                    settings.close_action = CloseAction::Quit;
-                                                })
-                                        {
-                                            this.notice = error;
-                                        }
-                                        cx.quit();
-                                    },
-                                ))
-                                .child(self.tiny_button(
-                                    "最小化到菜单栏",
-                                    "close-tray",
-                                    cx,
-                                    |this, window, cx| {
-                                        let close_action =
-                                            this.remember_close.then_some(CloseAction::Tray);
-                                        match this.set_tray_settings(true, close_action, window, cx)
-                                        {
-                                            Ok(()) => this.hide_to_tray(cx),
-                                            Err(error) => this.notice = error,
-                                        }
-                                        this.close_prompt = false;
-                                        cx.notify();
-                                    },
-                                )),
-                        ),
-                )
-                .into_any_element(),
+            controls::modal_backdrop(
+                "close-backdrop",
+                &self.close_focus,
+                cx,
+                |this, window, cx| {
+                    this.close_prompt = false;
+                    window.focus(&this.focus);
+                    cx.notify();
+                },
+            )
+            .child(
+                controls::modal_card(410.)
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme_color(TEXT))
+                                    .child("关闭听风吟"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme_color(MUTED))
+                                    .child("最小化到菜单栏后可继续在后台播放配乐。"),
+                            ),
+                    )
+                    .child(controls::checkbox_control(
+                        "close-remember",
+                        "记住这次选择，下次不再询问",
+                        self.remember_close,
+                        show_focus,
+                        cx,
+                        |this, _, cx| {
+                            this.remember_close = !this.remember_close;
+                            cx.notify();
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(controls::ui_button(
+                                "close-cancel",
+                                "取消",
+                                None,
+                                controls::ButtonTone::Ghost,
+                                true,
+                                false,
+                                show_focus,
+                                cx,
+                                |this, window, cx| {
+                                    this.close_prompt = false;
+                                    window.focus(&this.focus);
+                                    cx.notify();
+                                },
+                            ))
+                            .child(controls::ui_button(
+                                "close-quit",
+                                "退出应用",
+                                None,
+                                controls::ButtonTone::Secondary,
+                                true,
+                                false,
+                                show_focus,
+                                cx,
+                                |this, _, cx| {
+                                    if this.remember_close
+                                        && let Err(error) =
+                                            this.library.update_playback_settings(|settings| {
+                                                settings.close_action = CloseAction::Quit;
+                                            })
+                                    {
+                                        this.notice = error;
+                                    }
+                                    cx.quit();
+                                },
+                            ))
+                            .child(controls::ui_button(
+                                "close-tray",
+                                "最小化到菜单栏",
+                                None,
+                                controls::ButtonTone::Primary,
+                                true,
+                                false,
+                                show_focus,
+                                cx,
+                                |this, window, cx| {
+                                    let close_action =
+                                        this.remember_close.then_some(CloseAction::Tray);
+                                    match this.set_tray_settings(true, close_action, window, cx) {
+                                        Ok(()) => this.hide_to_tray(cx),
+                                        Err(error) => this.notice = error,
+                                    }
+                                    this.close_prompt = false;
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_page(SettingsPage::General, window, cx);
+    }
+
+    fn open_settings_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal_open() {
+            return;
+        }
+        self.action_menu = None;
+        self.folder_menu = None;
         cx.on_next_frame(window, |this, window, _| window.focus(&this.settings_focus));
         if self.fonts.is_empty() {
             self.fonts = desktop::system_fonts(cx);
         }
         self.settings_feedback = None;
-        self.settings_page = Some(SettingsPage::General);
-        self.wallpaper_popover = false;
-        self.export_popover = false;
+        self.model_advanced_open = false;
+        self.settings_page = Some(page);
         self.queue_open = false;
         self.diagnostics_open = false;
+        if page == SettingsPage::Export {
+            self.detect_ffmpeg(cx);
+        } else if page == SettingsPage::Models {
+            self.refresh_sherpa_status();
+            self.scan_asr_models(cx, false);
+        } else if page == SettingsPage::Playback {
+            self.refresh_audio_outputs();
+        }
         self.api_token_field
             .update(cx, |field, cx| field.set_text("", cx));
         let origins = self.api_config.cors_origins.join(", ");
@@ -7812,136 +8680,235 @@ impl Workspace {
         }
     }
 
-    fn settings_layer(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn settings_layer(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let page = self.settings_page?;
+        let show_focus = self.keyboard_focus_visible;
         self.settings_slider_bounds.clear();
         let body = match page {
             SettingsPage::General => self.general_settings(cx),
+            SettingsPage::Wallpaper => self.wallpaper_settings(window, cx),
             SettingsPage::Playback => self.playback_settings(cx),
+            SettingsPage::Export => self.export_settings(cx),
             SettingsPage::Models => self.model_settings(cx),
             SettingsPage::Integrations => self.integration_settings(cx),
         };
         let pages = [
-            (SettingsPage::General, "general", "常规"),
-            (SettingsPage::Playback, "playback", "播放"),
-            (SettingsPage::Models, "models", "模型"),
-            (SettingsPage::Integrations, "integrations", "第三方接入"),
+            (SettingsPage::General, "general", "settings", "常规"),
+            (SettingsPage::Wallpaper, "wallpaper", "image", "壁纸"),
+            (SettingsPage::Playback, "playback", "play-fill", "播放"),
+            (SettingsPage::Export, "export", "sliders", "导出"),
+            (SettingsPage::Models, "models", "audio-lines", "语音模型"),
+            (
+                SettingsPage::Integrations,
+                "integrations",
+                "external",
+                "本机接口",
+            ),
         ];
-        let tabs = pages
+        let (page_title, page_subtitle) = match page {
+            SettingsPage::General => ("常规设置", "外观主题、字体、音乐文件夹和关闭行为"),
+            SettingsPage::Wallpaper => ("界面壁纸", "预设配色、静态图片与动态 MP4 背景效果"),
+            SettingsPage::Playback => ("播放与输出", "自动播放、桌面歌词、淡入淡出和音频输出设备"),
+            SettingsPage::Export => ("导出与响度", "配置单首和批量导出时的响度归一化与预设目标"),
+            SettingsPage::Models => ("语音模型", "管理字幕生成、文生语音与人声分离所需的本地组件"),
+            SettingsPage::Integrations => ("本机接口", "HTTP 接口开关、访问令牌与跨域白名单"),
+        };
+        let nav_items = pages
             .into_iter()
-            .map(|(target, id, label)| {
-                div()
-                    .id(SharedString::from(format!("settings-tab-{id}")))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(if page == target {
-                        theme_color(PANEL_LIGHT)
+            .map(|(target, id, icon_name, label)| {
+                let active = page == target;
+                controls::keyboard_control(
+                    SharedString::from(format!("settings-tab-{id}")),
+                    show_focus,
+                )
+                .h(px(34.))
+                .px_3()
+                .rounded_md()
+                .flex()
+                .items_center()
+                .gap_2p5()
+                .cursor_pointer()
+                .text_xs()
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .bg(if active {
+                    fade(theme_color(ACCENT), 0.14)
+                } else {
+                    fade(theme_color(CONTROL_TINT), 0.0)
+                })
+                .text_color(if active {
+                    theme_color(ACCENT)
+                } else {
+                    theme_color(MUTED)
+                })
+                .hover(move |style| {
+                    if active {
+                        style
                     } else {
-                        theme_color(PANEL)
-                    })
-                    .text_color(if page == target {
-                        theme_color(ACCENT)
-                    } else {
-                        theme_color(MUTED)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if target == SettingsPage::Playback {
-                            this.refresh_audio_outputs();
-                        }
-                        window.focus(&this.settings_focus);
-                        this.settings_page = Some(target);
-                        this.font_picker_open = false;
-                        this.settings_feedback = None;
-                        this.settings_slider_drag = None;
-                        if target == SettingsPage::Models {
-                            this.scan_asr_models(cx, false);
-                        }
-                        cx.notify();
-                    }))
-                    .child(label)
+                        style
+                            .bg(fade(theme_color(CONTROL_TINT), 0.08))
+                            .text_color(theme_color(TEXT))
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if target == SettingsPage::Playback {
+                        this.refresh_audio_outputs();
+                    } else if target == SettingsPage::Export {
+                        this.detect_ffmpeg(cx);
+                    } else if target == SettingsPage::Models {
+                        this.refresh_sherpa_status();
+                        this.scan_asr_models(cx, false);
+                    }
+                    window.focus(&this.settings_focus);
+                    this.settings_page = Some(target);
+                    this.font_picker_open = false;
+                    this.model_advanced_open = false;
+                    this.settings_feedback = None;
+                    this.settings_slider_drag = None;
+                    cx.notify();
+                }))
+                .child(icon(
+                    icon_name,
+                    14.,
+                    theme_color(if active { ACCENT } else { MUTED }),
+                ))
+                .child(label)
             })
             .collect::<Vec<_>>();
         Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .key_context("Dialog")
-                .track_focus(&self.settings_focus)
-                .bg(fade(theme_color(SCRIM), 0.26))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w(px(690.))
-                        .h(px(515.))
-                        .max_w(relative(0.94))
-                        .max_h(relative(0.9))
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .rounded_lg()
-                        .bg(theme_color(PANEL))
-                        .border_1()
-                        .border_color(theme_color(LINE))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .px_5()
-                                .pt_4()
-                                .pb_3()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("设置"),
-                                )
-                                .child(self.tiny_button(
-                                    "关闭",
-                                    "settings-close",
-                                    cx,
-                                    |this, window, cx| {
-                                        this.settings_page = None;
-                                        this.settings_slider_drag = None;
-                                        this.font_picker_open = false;
-                                        window.focus(&this.focus);
-                                        cx.notify();
-                                    },
-                                )),
-                        )
-                        .child(div().px_5().pb_3().flex().gap_2().children(tabs))
-                        .child(
-                            div()
-                                .id(("settings-scroll", page as usize))
-                                .px_5()
-                                .pb_4()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .border_t_1()
-                                .border_color(theme_color(LINE))
-                                .overflow_y_scroll()
-                                .child(body),
-                        )
-                        .when_some(self.settings_feedback.clone(), |panel, feedback| {
-                            panel.child(
+            controls::modal_backdrop(
+                "settings-backdrop",
+                &self.settings_focus,
+                cx,
+                |this, window, cx| {
+                    this.settings_page = None;
+                    this.settings_slider_drag = None;
+                    this.font_picker_open = false;
+                    this.model_advanced_open = false;
+                    window.focus(&this.focus);
+                    cx.notify();
+                },
+            )
+            .child(
+                controls::modal_card(780.)
+                    .h(px(560.))
+                    .max_w(relative(0.92))
+                    .max_h(relative(0.88))
+                    .flex()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .w(px(168.))
+                            .flex_none()
+                            .h_full()
+                            .bg(fade(theme_color(CONTROL_TINT), 0.03))
+                            .border_r_1()
+                            .border_color(theme_color(LINE))
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
                                 div()
-                                    .px_5()
-                                    .py_2()
-                                    .border_t_1()
-                                    .border_color(theme_color(LINE))
-                                    .text_xs()
-                                    .child(feedback),
+                                    .px_3()
+                                    .pt_2()
+                                    .pb_3()
+                                    .text_base()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme_color(TEXT))
+                                    .child("设置"),
                             )
-                        }),
-                )
-                .into_any_element(),
+                            .children(nav_items),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .px_6()
+                                    .pt_5()
+                                    .pb_3p5()
+                                    .border_b_1()
+                                    .border_color(theme_color(LINE))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(theme_color(TEXT))
+                                                    .child(page_title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme_color(MUTED))
+                                                    .truncate()
+                                                    .child(page_subtitle),
+                                            ),
+                                    )
+                                    .child(controls::ui_icon_button(
+                                        "settings-close",
+                                        "x",
+                                        false,
+                                        true,
+                                        show_focus,
+                                        cx,
+                                        |this, _, window, cx| {
+                                            this.settings_page = None;
+                                            this.settings_slider_drag = None;
+                                            this.font_picker_open = false;
+                                            this.model_advanced_open = false;
+                                            window.focus(&this.focus);
+                                            cx.notify();
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(("settings-scroll", page as usize))
+                                    .px_6()
+                                    .py_3()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .overflow_y_scroll()
+                                    .child(body),
+                            )
+                            .when_some(self.settings_feedback.clone(), |panel, feedback| {
+                                panel.child(
+                                    div()
+                                        .px_6()
+                                        .py_2()
+                                        .border_t_1()
+                                        .border_color(theme_color(LINE))
+                                        .text_xs()
+                                        .text_color(theme_color(MUTED))
+                                        .child(feedback),
+                                )
+                            }),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 
@@ -7969,6 +8936,7 @@ impl Workspace {
                         });
                     }
                     this.asr_catalog = Some(catalog);
+                    this.refresh_sherpa_status();
                     cx.notify();
                 }
             })
@@ -8007,6 +8975,7 @@ impl Workspace {
                     self.release_asr_session(cx);
                     self.asr_load_error = None;
                 }
+                self.speech_tools.sync_root(&self.library);
                 self.settings_feedback = None;
                 self.scan_asr_models(cx, false);
             }
@@ -8102,7 +9071,16 @@ impl Workspace {
                     {
                         this.release_asr_session(cx);
                     }
-                    this.load_asr_model(DEFAULT_MODEL_NAME.into(), cx);
+                    if this.sherpa_runtime_status.is_ready() {
+                        this.load_asr_model(DEFAULT_MODEL_NAME.into(), cx);
+                    } else {
+                        let ready_msg = "Qwen3-ASR 0.6B 模型已下载完成，安装通用推理引擎后即可启用";
+                        if this.settings_page == Some(SettingsPage::Models) {
+                            this.settings_feedback = Some(ready_msg.into());
+                        } else {
+                            this.notice = ready_msg.into();
+                        }
+                    }
                 }
             });
         })
@@ -8111,13 +9089,408 @@ impl Workspace {
     }
 
     fn poll_model_download(&mut self) -> bool {
-        if self.settings_page != Some(SettingsPage::Models) {
+        let Some(download) = &self.asr_download else {
             return false;
-        }
-        let next = self.asr_download.as_ref().and_then(ModelDownload::progress);
+        };
+        let next = download.progress();
         let changed = self.asr_download_progress != next;
         self.asr_download_progress = next;
         changed
+    }
+
+    pub(super) fn refresh_sherpa_status(&mut self) {
+        self.sherpa_runtime_status = sherpa::current_runtime_status();
+        self.speech_tools.sherpa_runtime_ready = self.sherpa_runtime_status.is_ready();
+    }
+
+    pub(super) fn sherpa_install_status(&self) -> Option<(String, Option<f32>)> {
+        let download = self.sherpa_download.as_ref()?;
+        if download.cancelling() {
+            return Some(("正在取消推理库安装…".into(), None));
+        }
+        let progress = self.sherpa_download_progress.as_ref()?;
+        let mb = |bytes: u64| bytes as f64 / 1_000_000.0;
+        let result = match progress.stage {
+            RuntimeStage::Downloading => {
+                let ratio = (progress.total > 0)
+                    .then(|| (progress.received as f32 / progress.total as f32).clamp(0.0, 1.0));
+                let text = if progress.total > 0 {
+                    format!(
+                        "正在下载通用推理库（{:.1} / {:.1} MB）…",
+                        mb(progress.received),
+                        mb(progress.total)
+                    )
+                } else {
+                    "正在下载通用推理库…".into()
+                };
+                (text, ratio)
+            }
+            RuntimeStage::Verifying => ("正在校验推理库 SHA-256 摘要…".into(), Some(1.0)),
+            RuntimeStage::Extracting => ("正在解压并提取动态库…".into(), Some(1.0)),
+            RuntimeStage::Checking => ("正在验证 sherpa-onnx 2.0.2 接口…".into(), Some(1.0)),
+        };
+        Some(result)
+    }
+
+    pub(super) fn start_sherpa_runtime_install(&mut self, cx: &mut Context<Self>) {
+        if self.sherpa_download.is_some() {
+            return;
+        }
+        let download = RuntimeDownload::default();
+        let job = download.install_job();
+        self.run_sherpa_install_job(download, job, cx);
+    }
+
+    pub(super) fn cancel_sherpa_runtime_install(&mut self, cx: &mut Context<Self>) {
+        if let Some(download) = &self.sherpa_download {
+            download.cancel();
+            cx.notify();
+        }
+    }
+
+    fn import_sherpa_runtime_local(&mut self, cx: &mut Context<Self>) {
+        if self.sherpa_download.is_some() {
+            return;
+        }
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择 sherpa-onnx 2.0.2 压缩包或动态库目录".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = selection.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.sherpa_download.is_some() {
+                    return;
+                }
+                let download = RuntimeDownload::default();
+                let job = download.install_from_local_job(path);
+                this.run_sherpa_install_job(download, job, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn run_sherpa_install_job(
+        &mut self,
+        download: RuntimeDownload,
+        job: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.sherpa_download = Some(download);
+        self.sherpa_download_progress = Some(RuntimeProgress {
+            stage: RuntimeStage::Downloading,
+            received: 0,
+            total: sherpa::current_package().map_or(0, |pkg| pkg.size_bytes),
+        });
+        if self.settings_page == Some(SettingsPage::Models) {
+            self.settings_feedback = None;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { job() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_sherpa_runtime_install(result, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_sherpa_runtime_install(
+        &mut self,
+        result: Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sherpa_download = None;
+        self.sherpa_download_progress = None;
+        self.refresh_sherpa_status();
+        match result {
+            Ok(_) => {
+                if self
+                    .speech_tools
+                    .status
+                    .as_deref()
+                    .is_some_and(|text| text.contains("sherpa-onnx") || text.contains("推理库"))
+                {
+                    self.speech_tools.status = None;
+                }
+                if self.subtitle_feedback.as_ref().is_some_and(|(_, text)| {
+                    text.contains("sherpa-onnx") || text.contains("推理库")
+                }) {
+                    self.subtitle_feedback = None;
+                }
+                self.speech_tools.refresh_model();
+                self.scan_asr_models(cx, false);
+                if self.asr_session.is_none()
+                    && self.asr_loading.is_none()
+                    && let Some(last) = self.library.asr_model_preferences().last_model
+                {
+                    self.load_asr_model(last, cx);
+                }
+                let message =
+                    "sherpa-onnx 2.0.2 推理库已安装，现在可直接用于语音识别、文生语音和人声分离";
+                if self.settings_page == Some(SettingsPage::Models) {
+                    self.settings_feedback = Some(message.into());
+                }
+                self.show_toast(message, false, cx);
+            }
+            Err(error) => {
+                if self.settings_page == Some(SettingsPage::Models) {
+                    self.settings_feedback = Some(error.clone());
+                }
+                self.show_toast(error, true, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn poll_sherpa_download(&mut self) -> bool {
+        let Some(download) = &self.sherpa_download else {
+            return false;
+        };
+        let next = download.progress();
+        let changed = next.is_some() && self.sherpa_download_progress != next;
+        if changed {
+            self.sherpa_download_progress = next;
+        }
+        changed
+    }
+
+    fn prompt_missing_sherpa_runtime(
+        &mut self,
+        feature: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let size_mb =
+            sherpa::current_package().map_or(9.0, |pkg| pkg.size_bytes as f64 / 1_000_000.0);
+        let detail = format!(
+            "「{feature}」需要通用推理库 sherpa-onnx 2.0.2（约 {size_mb:.1} MB，与文字转语音、字幕生成共用）。可直接一键自动下载并校验安装，或前往设置页查看与导入本地包。"
+        );
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "缺少通用推理库",
+            Some(&detail),
+            &[
+                PromptButton::ok("一键安装推理库"),
+                PromptButton::new("前往模型设置"),
+                PromptButton::cancel("取消"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| match answer.await {
+            Ok(0) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.start_sherpa_runtime_install(cx);
+                });
+            }
+            Ok(1) => {
+                let _ = cx.update(|window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.open_settings_page(SettingsPage::Models, window, cx);
+                    });
+                });
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    fn default_asr_model_complete(&self) -> bool {
+        self.asr_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.default_files.missing.is_empty())
+    }
+
+    fn prompt_missing_asr_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_default_files = self.default_asr_model_complete()
+            || crate::library::default_asr_model_complete(
+                &self.library.asr_model_preferences().root(),
+            );
+        if has_default_files {
+            let answer = window.prompt(
+                PromptLevel::Info,
+                "语音识别模型尚未启用",
+                Some("本地 Qwen3-ASR 0.6B 模型已完整下载，启用后即可开始生成字幕。"),
+                &[
+                    PromptButton::ok("立即启用模型"),
+                    PromptButton::new("打开模型设置"),
+                    PromptButton::cancel("取消"),
+                ],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| match answer.await {
+                Ok(0) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.load_asr_model(DEFAULT_MODEL_NAME.into(), cx);
+                    });
+                }
+                Ok(1) => {
+                    let _ = cx.update(|window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.open_settings_page(SettingsPage::Models, window, cx);
+                        });
+                    });
+                }
+                _ => {}
+            })
+            .detach();
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "尚未加载语音识别模型",
+            Some("生成字幕需要先下载并启用本地语音识别模型，可在「设置 → 语音模型」中一键下载并启用。"),
+            &[
+                PromptButton::ok("前往模型设置"),
+                PromptButton::cancel("取消"),
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if matches!(answer.await, Ok(0)) {
+                let _ = cx.update(|window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.open_settings_page(SettingsPage::Models, window, cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn runtime_engine_card(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let show_focus = self.keyboard_focus_visible;
+        if let Some((detail, ratio)) = self.sherpa_install_status() {
+            let cancelling = self
+                .sherpa_download
+                .as_ref()
+                .is_some_and(RuntimeDownload::cancelling);
+            let cancel_btn = controls::ui_button(
+                "sherpa-runtime-cancel",
+                if cancelling { "正在取消" } else { "取消" },
+                None,
+                controls::ButtonTone::Secondary,
+                !cancelling,
+                true,
+                show_focus,
+                cx,
+                |this, _, cx| this.cancel_sherpa_runtime_install(cx),
+            );
+            return model_card_shell(true)
+                .child(model_card_header(
+                    "sliders",
+                    ModelStatusTone::Ready,
+                    "通用推理引擎",
+                    Some(("安装中", ModelStatusTone::Ready)),
+                    &detail,
+                    cancel_btn,
+                ))
+                .when_some(ratio, |card, percent| {
+                    card.child(model_progress_bar(percent))
+                });
+        }
+        match &self.sherpa_runtime_status {
+            RuntimeStatus::Ready { path, source } => {
+                let reveal_path = path.clone();
+                let detail = format!(
+                    "sherpa-onnx {} · {}",
+                    sherpa::RUNTIME_VERSION,
+                    source.label(),
+                );
+                let actions = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .child(controls::ui_button(
+                        "sherpa-runtime-reveal",
+                        "显示位置",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        true,
+                        true,
+                        show_focus,
+                        cx,
+                        move |_, _, cx| cx.reveal_path(&reveal_path),
+                    ))
+                    .when(*source == sherpa::RuntimeSource::Managed, |row| {
+                        row.child(controls::ui_button(
+                            "sherpa-runtime-reinstall",
+                            "重新安装",
+                            None,
+                            controls::ButtonTone::Secondary,
+                            sherpa::current_package().is_some(),
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| this.start_sherpa_runtime_install(cx),
+                        ))
+                    });
+                model_card_shell(false).child(model_card_header(
+                    "sliders",
+                    ModelStatusTone::Ready,
+                    "通用推理引擎",
+                    Some(("已就绪", ModelStatusTone::Ready)),
+                    &detail,
+                    actions,
+                ))
+            }
+            RuntimeStatus::Missing(_) => {
+                let package = sherpa::current_package();
+                let detail = match package {
+                    Some(pkg) => format!(
+                        "自动匹配 {}（约 {:.1} MB）",
+                        pkg.platform_label,
+                        pkg.size_bytes as f64 / 1_000_000.0
+                    ),
+                    None => "当前系统架构暂不支持自动安装，请导入本地动态库压缩包或目录".into(),
+                };
+                let actions = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .when(package.is_some(), |row| {
+                        row.child(controls::ui_button(
+                            "sherpa-runtime-install",
+                            "一键安装",
+                            Some("download"),
+                            controls::ButtonTone::Primary,
+                            true,
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| this.start_sherpa_runtime_install(cx),
+                        ))
+                    })
+                    .child(controls::ui_button(
+                        "sherpa-runtime-import",
+                        "导入本地包…",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        true,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| this.import_sherpa_runtime_local(cx),
+                    ));
+                model_card_shell(true).child(model_card_header(
+                    "sliders",
+                    ModelStatusTone::Warning,
+                    "通用推理引擎",
+                    Some(("未安装", ModelStatusTone::Warning)),
+                    &detail,
+                    actions,
+                ))
+            }
+        }
     }
 
     fn asr_busy(&self) -> bool {
@@ -8192,6 +9565,14 @@ impl Workspace {
                     });
                     this.asr_load_error = result.as_ref().err().cloned();
                     this.asr_message = this.asr_load_error.clone();
+                    if result.is_ok() {
+                        if this.settings_page == Some(SettingsPage::Models) {
+                            this.settings_feedback = Some("语音识别模型已启用".into());
+                        }
+                        this.show_toast("语音识别模型已启用", false, cx);
+                    } else if this.settings_page == Some(SettingsPage::Models) {
+                        this.settings_feedback = None;
+                    }
                     cx.notify();
                     result
                 })
@@ -8235,6 +9616,12 @@ impl Workspace {
                     self.close_desktop_lyrics(false, cx);
                     self.asr_message = None;
                     self.asr_load_error = None;
+                    let message = "已停用语音识别模型并释放内存";
+                    if self.settings_page == Some(SettingsPage::Models) {
+                        self.settings_feedback = Some(message.into());
+                    } else {
+                        self.show_toast(message, false, cx);
+                    }
                 }
                 Err(error) => self.asr_message = Some(error),
             }
@@ -8310,37 +9697,58 @@ impl Workspace {
         cx.notify();
     }
 
-    fn default_model_row(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn asr_model_card(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let show_focus = self.keyboard_focus_visible;
+        let sherpa_ready = self.sherpa_runtime_status.is_ready();
+        let primary_tone = if sherpa_ready {
+            controls::ButtonTone::Primary
+        } else {
+            controls::ButtonTone::Secondary
+        };
+        let loaded = self.asr_session.as_ref();
+        let loading = self.asr_loading.as_deref();
         let files = self
             .asr_catalog
             .as_ref()
             .map(|catalog| &catalog.default_files);
-        if let Some(download) = &self.asr_download {
+        let remembered = self.library.asr_model_preferences().last_model.is_some();
+        let idle = !self.asr_busy();
+        let has_files = files.is_some_and(|files| files.complete > 0);
+        let incomplete = files.is_some_and(|files| files.complete < files.count);
+
+        let (highlight, tone, pill, detail, accessory, progress_ratio) = if let Some(download) =
+            &self.asr_download
+        {
             let progress = self.asr_download_progress.as_ref();
-            let (detail, percent) = progress.map_or(("正在准备下载".into(), 0.), |progress| {
-                let mib = |bytes| bytes as f64 / 1_048_576.;
-                let detail = format!(
-                    "{}/{}  {}  ·  {:.1} / {:.1} MiB",
-                    progress.index,
-                    progress.count,
-                    progress.file,
-                    mib(progress.received),
-                    mib(progress.total)
-                );
-                (
-                    detail,
-                    (progress.received as f32 / progress.total.max(1) as f32).clamp(0., 1.),
-                )
-            });
-            let cancel = self.settings_button(
+            let (detail, percent) = progress.map_or_else(
+                || ("正在准备下载 Qwen3-ASR 0.6B 模型…".to_owned(), 0.0),
+                |progress| {
+                    let mib = |bytes| bytes as f64 / 1_048_576.;
+                    let detail = format!(
+                        "{}/{} · {} · {:.1} / {:.1} MiB",
+                        progress.index,
+                        progress.count,
+                        progress.file,
+                        mib(progress.received),
+                        mib(progress.total)
+                    );
+                    let ratio =
+                        (progress.received as f32 / progress.total.max(1) as f32).clamp(0.0, 1.0);
+                    (detail, ratio)
+                },
+            );
+            let cancel = controls::ui_button(
                 "asr-download-cancel",
                 if download.cancelling() {
                     "正在取消"
                 } else {
                     "取消下载"
                 },
-                false,
+                None,
+                controls::ButtonTone::Secondary,
                 !download.cancelling(),
+                true,
+                show_focus,
                 cx,
                 |this, _, cx| {
                     if let Some(download) = &this.asr_download {
@@ -8348,149 +9756,464 @@ impl Workspace {
                     }
                     cx.notify();
                 },
-            );
-            return div()
-                .flex()
-                .flex_col()
-                .child(settings_row("Qwen3-ASR 0.6B-int8", &detail, cancel))
-                .child(
-                    div()
-                        .h(px(3.))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .bg(theme_color(LINE))
-                        .child(div().h_full().w(relative(percent)).bg(theme_color(ACCENT))),
+            )
+            .into_any_element();
+            (
+                true,
+                ModelStatusTone::Ready,
+                "下载中",
+                detail,
+                cancel,
+                Some(percent),
+            )
+        } else if let Some(model) = loading {
+            let detail = format!("正在启动 {}，请稍候…", display_asr_model_name(model));
+            let button = controls::ui_button(
+                "asr-enabling",
+                "启用中…",
+                None,
+                controls::ButtonTone::Secondary,
+                false,
+                true,
+                show_focus,
+                cx,
+                |_, _, _| {},
+            )
+            .into_any_element();
+            (true, ModelStatusTone::Ready, "启用中", detail, button, None)
+        } else if let Some(session) = loaded {
+            let detail = if session.id == DEFAULT_MODEL_NAME {
+                "Qwen3-ASR 0.6B · 用于字幕与桌面歌词（重启恢复）".to_owned()
+            } else {
+                format!("当前使用「{}」· 用于字幕与桌面歌词", session.id)
+            };
+            let unload = controls::ui_button(
+                "asr-unload",
+                "停用",
+                None,
+                controls::ButtonTone::Secondary,
+                idle,
+                true,
+                show_focus,
+                cx,
+                |this, _, cx| this.unload_asr_model(cx),
+            )
+            .into_any_element();
+            (true, ModelStatusTone::Ready, "已启用", detail, unload, None)
+        } else if files.is_some() && !incomplete {
+            if sherpa_ready {
+                let enable = controls::ui_button(
+                    "asr-enable-default",
+                    "启用模型",
+                    None,
+                    controls::ButtonTone::Primary,
+                    idle,
+                    true,
+                    show_focus,
+                    cx,
+                    |this, _, cx| this.load_asr_model(DEFAULT_MODEL_NAME.into(), cx),
                 )
                 .into_any_element();
-        }
-        let status = files.map_or_else(
-            || "正在检查模型文件".into(),
-            |files| {
+                (
+                    false,
+                    ModelStatusTone::Neutral,
+                    "未启用",
+                    "Qwen3-ASR 0.6B · 文件完整（941 MiB），启用后可用于字幕与桌面歌词".to_owned(),
+                    enable,
+                    None,
+                )
+            } else {
+                (
+                    false,
+                    ModelStatusTone::Warning,
+                    "缺推理引擎",
+                    "Qwen3-ASR 0.6B · 文件完整（941 MiB），请先安装上方通用推理引擎".to_owned(),
+                    div().into_any_element(),
+                    None,
+                )
+            }
+        } else if let Some(files) = files {
+            let tone = if has_files {
+                ModelStatusTone::Warning
+            } else {
+                ModelStatusTone::Neutral
+            };
+            let pill = if has_files { "待补齐" } else { "未下载" };
+            let detail = if has_files {
                 format!(
-                    "{} / {} 个文件名称及大小符合清单 · {:.0} MiB",
+                    "Qwen3-ASR 0.6B · 已下载 {}/{} 个文件，继续补齐后即可使用",
+                    files.complete, files.count
+                )
+            } else {
+                "Qwen3-ASR 0.6B · 约 941 MiB，字幕生成与桌面歌词共用".to_owned()
+            };
+            let download_btn = controls::ui_button(
+                "asr-download",
+                if has_files {
+                    "补齐下载"
+                } else {
+                    "下载模型"
+                },
+                Some("download"),
+                primary_tone,
+                idle,
+                true,
+                show_focus,
+                cx,
+                |this, _, cx| this.start_model_download(DownloadMode::Resume, cx),
+            )
+            .into_any_element();
+            (false, tone, pill, detail, download_btn, None)
+        } else {
+            (
+                false,
+                ModelStatusTone::Neutral,
+                "检查中",
+                "正在检查本地语音识别模型文件…".to_owned(),
+                div().into_any_element(),
+                None,
+            )
+        };
+
+        let show_notice =
+            self.asr_message.is_some() || (loaded.is_none() && loading.is_none() && remembered);
+        let notice_text = self
+            .asr_message
+            .clone()
+            .unwrap_or_else(|| "上次记住的模型尚未启用，可重新启用或清除自动恢复".to_owned());
+        let can_clear_remembered = loaded.is_none() && remembered;
+
+        let maintenance_summary = files.map(|files| {
+            if !incomplete {
+                format!(
+                    "本地文件：{} / {} 完整 · {:.0} MiB",
                     files.complete,
                     files.count,
                     files.expected_bytes as f64 / 1_048_576.
                 )
-            },
-        );
-        let idle = files.is_some() && !self.asr_busy();
-        let has_files = files.is_some_and(|files| files.complete > 0);
-        let incomplete = files.is_some_and(|files| files.complete < files.count);
-        settings_row(
-            "Qwen3-ASR 0.6B-int8",
-            &status,
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .child(self.settings_button(
-                    "asr-check-files",
-                    "检查完整性",
-                    false,
-                    idle,
-                    cx,
-                    |this, _, cx| this.scan_asr_models(cx, true),
-                ))
-                .when(incomplete, |actions| {
-                    actions.child(self.settings_button(
-                        "asr-download",
-                        if has_files {
-                            "补齐下载"
-                        } else {
-                            "下载模型"
-                        },
-                        false,
-                        idle,
-                        cx,
-                        |this, _, cx| this.start_model_download(DownloadMode::Resume, cx),
-                    ))
-                })
-                .when(has_files, |actions| {
-                    actions.child(self.settings_button(
-                        "asr-redownload",
-                        "重新下载",
-                        false,
-                        idle,
-                        cx,
-                        |this, window, cx| this.confirm_model_redownload(window, cx),
-                    ))
-                }),
-        )
-    }
-
-    fn model_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let idle = !self.asr_busy();
-        let path = self.asr_catalog.as_ref().map(|catalog| {
-            let root = catalog.root.display();
-            if catalog.is_default_root {
-                format!("默认 · {root}")
+            } else if has_files {
+                format!(
+                    "本地文件：{} / {} 完整 · 缺失 {} 个",
+                    files.complete,
+                    files.count,
+                    files.missing.len()
+                )
             } else {
-                root.to_string()
+                format!(
+                    "共 {} 个文件 · 约 {:.0} MiB",
+                    files.count,
+                    files.expected_bytes as f64 / 1_048_576.
+                )
             }
         });
-        let controls = div()
+
+        model_card_shell(highlight)
+            .child(model_card_header(
+                "audio-lines",
+                tone,
+                "语音识别模型",
+                Some((pill, tone)),
+                &detail,
+                accessory,
+            ))
+            .when_some(progress_ratio, |card, percent| {
+                card.child(model_progress_bar(percent))
+            })
+            .when(show_notice, |card| {
+                card.child(
+                    div()
+                        .mx_3p5()
+                        .mb_2p5()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(fade(theme_color(WARNING), 0.10))
+                        .border_1()
+                        .border_color(fade(theme_color(WARNING), 0.28))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_xs()
+                                .text_color(theme_color(TEXT))
+                                .child(notice_text),
+                        )
+                        .when(can_clear_remembered, |bar| {
+                            bar.child(controls::ui_button(
+                                "asr-clear-remembered",
+                                "清除启动恢复",
+                                None,
+                                controls::ButtonTone::Ghost,
+                                idle,
+                                true,
+                                show_focus,
+                                cx,
+                                |this, _, cx| this.unload_asr_model(cx),
+                            ))
+                        }),
+                )
+            })
+            .when_some(
+                maintenance_summary.filter(|_| self.asr_download.is_none()),
+                |card, summary| {
+                    card.child(
+                        div()
+                            .border_t_1()
+                            .border_color(theme_color(LINE))
+                            .bg(fade(theme_color(CONTROL_TINT), 0.025))
+                            .px_3p5()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .text_xs()
+                                    .text_color(theme_color(FAINT))
+                                    .truncate()
+                                    .child(summary),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(controls::ui_button(
+                                        "asr-check-files",
+                                        "检查完整性",
+                                        None,
+                                        controls::ButtonTone::Ghost,
+                                        idle,
+                                        true,
+                                        show_focus,
+                                        cx,
+                                        |this, _, cx| this.scan_asr_models(cx, true),
+                                    ))
+                                    .when(has_files, |bar| {
+                                        bar.child(controls::ui_button(
+                                            "asr-redownload",
+                                            "重新下载",
+                                            None,
+                                            controls::ButtonTone::Ghost,
+                                            idle,
+                                            true,
+                                            show_focus,
+                                            cx,
+                                            |this, window, cx| {
+                                                this.confirm_model_redownload(window, cx)
+                                            },
+                                        ))
+                                    }),
+                            ),
+                    )
+                },
+            )
+    }
+
+    fn model_directory_card(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let idle = !self.asr_busy();
+        let show_focus = self.keyboard_focus_visible;
+        let prefs = self.library.asr_model_preferences();
+        let (is_custom, root_display) = match &self.asr_catalog {
+            Some(catalog) => (
+                !catalog.is_default_root,
+                controls::compact_display_path(&catalog.root),
+            ),
+            None => (
+                prefs.directory.is_some(),
+                controls::compact_display_path(&prefs.root()),
+            ),
+        };
+        let (pill, tone) = if is_custom {
+            ("自定义", ModelStatusTone::Ready)
+        } else {
+            ("默认", ModelStatusTone::Neutral)
+        };
+        let actions = div()
             .flex()
+            .flex_none()
+            .items_center()
             .gap_2()
-            .child(self.settings_button(
+            .child(controls::ui_button(
                 "asr-folder-choose",
-                "选择目录",
-                false,
+                "更改目录…",
+                None,
+                controls::ButtonTone::Secondary,
                 idle,
+                true,
+                show_focus,
                 cx,
                 |this, _, cx| this.choose_asr_directory(cx),
             ))
-            .child(self.settings_button(
-                "asr-folder-reset",
-                "恢复默认",
-                false,
-                idle,
-                cx,
-                |this, _, cx| this.apply_asr_directory(None, cx),
-            ))
-            .child(self.settings_button(
+            .child(controls::ui_button(
                 "asr-folder-open",
-                "在 Finder 中显示",
-                false,
+                "在访达中显示",
+                None,
+                controls::ButtonTone::Secondary,
                 true,
+                true,
+                show_focus,
                 cx,
                 |this, _, cx| this.open_asr_directory(cx),
+            ))
+            .when(is_custom, |row| {
+                row.child(controls::ui_button(
+                    "asr-folder-reset",
+                    "恢复默认",
+                    None,
+                    controls::ButtonTone::Secondary,
+                    idle,
+                    true,
+                    show_focus,
+                    cx,
+                    |this, _, cx| this.apply_asr_directory(None, cx),
+                ))
+            });
+        model_card_shell(false).child(model_card_header(
+            "folder-open",
+            ModelStatusTone::Neutral,
+            "模型目录",
+            Some((pill, tone)),
+            &root_display,
+            actions,
+        ))
+    }
+
+    fn model_advanced_card(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let idle = !self.asr_busy();
+        let show_focus = self.keyboard_focus_visible;
+        let sherpa_ready = self.sherpa_runtime_status.is_ready();
+        let loaded = self.asr_session.as_ref();
+        let has_warnings = self
+            .asr_catalog
+            .as_ref()
+            .is_some_and(|catalog| !catalog.warnings.is_empty());
+        let has_custom_models = self.asr_catalog.as_ref().is_some_and(|catalog| {
+            catalog
+                .models
+                .iter()
+                .any(|model| model.id != DEFAULT_MODEL_NAME)
+        });
+        let pill = if has_warnings {
+            Some(("有扫描提示", ModelStatusTone::Warning))
+        } else if has_custom_models {
+            Some(("含自定义模型", ModelStatusTone::Neutral))
+        } else {
+            None
+        };
+
+        let header = controls::keyboard_control("model-advanced-toggle", show_focus)
+            .cursor_pointer()
+            .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.05)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.model_advanced_open = !this.model_advanced_open;
+                cx.notify();
+            }))
+            .child(model_card_header(
+                "settings",
+                ModelStatusTone::Neutral,
+                "高级选项",
+                pill,
+                "镜像下载地址、本地模型列表与 WAV 试测",
+                icon(
+                    if self.model_advanced_open {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
+                    15.,
+                    theme_color(MUTED),
+                ),
             ));
-        let url_field = div()
+
+        if !self.model_advanced_open {
+            return model_card_shell(false).child(header);
+        }
+
+        let saved_url = self.library.asr_model_preferences().download_url;
+        let current_url = self.asr_url_field.read(cx).text().to_owned();
+        let url_dirty = current_url != saved_url;
+        let url_is_default =
+            saved_url == DEFAULT_ASR_DOWNLOAD_URL && current_url == DEFAULT_ASR_DOWNLOAD_URL;
+
+        let url_section = div()
+            .p_3p5()
+            .border_b_1()
+            .border_color(theme_color(LINE))
             .flex()
-            .items_center()
+            .flex_col()
             .gap_2()
             .child(
                 div()
-                    .w(px(245.))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme_color(BG))
-                    .border_1()
-                    .border_color(theme_color(LINE))
-                    .child(self.asr_url_field.clone()),
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme_color(TEXT))
+                            .child("自定义下载地址"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme_color(MUTED))
+                            .child("ModelScope 仓库或模型镜像目录"),
+                    ),
             )
-            .child(self.settings_button(
-                "asr-url-save",
-                "保存",
-                false,
-                idle,
-                cx,
-                |this, _, cx| {
-                    let url = this.asr_url_field.read(cx).text().to_owned();
-                    this.save_asr_url(&url, cx);
-                },
-            ))
-            .child(self.settings_button(
-                "asr-url-reset",
-                "恢复默认",
-                false,
-                idle,
-                cx,
-                |this, _, cx| this.save_asr_url(DEFAULT_ASR_DOWNLOAD_URL, cx),
-            ));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(controls::input_box(self.asr_url_field.clone())),
+                    )
+                    .child(controls::ui_button(
+                        "asr-url-save",
+                        "保存",
+                        None,
+                        if url_dirty {
+                            controls::ButtonTone::Primary
+                        } else {
+                            controls::ButtonTone::Secondary
+                        },
+                        idle && url_dirty,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| {
+                            let url = this.asr_url_field.read(cx).text().to_owned();
+                            this.save_asr_url(&url, cx);
+                        },
+                    ))
+                    .when(!url_is_default, |row| {
+                        row.child(controls::ui_button(
+                            "asr-url-reset",
+                            "恢复默认",
+                            None,
+                            controls::ButtonTone::Secondary,
+                            idle,
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| this.save_asr_url(DEFAULT_ASR_DOWNLOAD_URL, cx),
+                        ))
+                    }),
+            );
+
         let scan_status = match &self.asr_catalog {
             None => "正在扫描模型目录".into(),
             Some(catalog) if catalog.models.is_empty() && catalog.warnings.is_empty() => {
@@ -8498,178 +10221,273 @@ impl Workspace {
             }
             Some(catalog) => format!("发现 {} 组 ONNX 模型文件", catalog.models.len()),
         };
-        let rows = self
+
+        let model_rows = self
             .asr_catalog
             .iter()
             .flat_map(|catalog| catalog.models.iter())
             .map(|model| {
-                let active = self
-                    .asr_session
-                    .as_ref()
-                    .is_some_and(|session| session.id == model.id);
+                let active = loaded.is_some_and(|session| session.id == model.id);
                 let id = model.id.clone();
-                let status = match &model.missing_components {
-                    None => "根目录单文件，无法加载".into(),
-                    Some(_) if active => "已加载".into(),
-                    Some(missing) if missing.is_empty() => "组件齐全".into(),
-                    Some(missing) => format!("缺少 {}", missing.join("、")),
+                let load_id = id.clone();
+                let title = if model.id == DEFAULT_MODEL_NAME {
+                    format!("{}（默认）", display_asr_model_name(&model.id))
+                } else {
+                    model.id.clone()
                 };
+                let (status_label, status_tone) = match &model.missing_components {
+                    None => (
+                        "根目录单文件，无法加载".to_owned(),
+                        ModelStatusTone::Neutral,
+                    ),
+                    Some(_) if active => ("已启用".to_owned(), ModelStatusTone::Ready),
+                    Some(missing) if missing.is_empty() => {
+                        ("组件齐全".to_owned(), ModelStatusTone::Neutral)
+                    }
+                    Some(missing) => (
+                        format!("缺少 {}", missing.join("、")),
+                        ModelStatusTone::Warning,
+                    ),
+                };
+                let can_load = model.missing_components.as_ref().is_some_and(Vec::is_empty);
                 div()
                     .px_3()
                     .py_2()
-                    .border_t_1()
-                    .border_color(theme_color(LINE))
+                    .rounded_md()
+                    .bg(fade(theme_color(CONTROL_TINT), 0.03))
+                    .border_1()
+                    .border_color(if active {
+                        fade(theme_color(ACCENT), 0.35)
+                    } else {
+                        theme_color(LINE).into()
+                    })
                     .flex()
-                    .flex_col()
-                    .gap_1()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(model.id.clone()),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme_color(TEXT))
+                                            .truncate()
+                                            .child(title),
+                                    )
+                                    .child(model_status_pill(status_label, status_tone)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme_color(FAINT))
+                                    .truncate()
+                                    .child(model.files.join(" · ")),
+                            ),
                     )
-                    .child(div().text_xs().text_color(theme_color(MUTED)).child(status))
+                    .when(can_load && !active, |row| {
+                        row.child(controls::ui_button(
+                            SharedString::from(format!("asr-load-{id}")),
+                            if loaded.is_some() {
+                                "切换启用"
+                            } else {
+                                "启用"
+                            },
+                            None,
+                            controls::ButtonTone::Secondary,
+                            idle && sherpa_ready,
+                            true,
+                            show_focus,
+                            cx,
+                            move |this, _, cx| this.load_asr_model(load_id.clone(), cx),
+                        ))
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let warnings = self
+            .asr_catalog
+            .iter()
+            .flat_map(|catalog| catalog.warnings.iter())
+            .map(|warning| {
+                div()
+                    .text_xs()
+                    .text_color(theme_color(WARNING))
+                    .child(warning.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let local_models_section = div()
+            .p_3p5()
+            .border_b_1()
+            .border_color(theme_color(LINE))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme_color(MUTED))
-                            .child(model.files.join(" · ")),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme_color(TEXT))
+                                    .child("本地模型列表"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme_color(MUTED))
+                                    .truncate()
+                                    .child(scan_status),
+                            ),
                     )
-                    .when(
-                        model.missing_components.as_ref().is_some_and(Vec::is_empty) && !active,
-                        |row| {
-                            row.child(div().flex().child(self.settings_button(
-                                format!("asr-load-{id}"),
-                                "加载",
-                                false,
-                                idle,
-                                cx,
-                                move |this, _, cx| this.load_asr_model(id.clone(), cx),
-                            )))
-                        },
-                    )
-            });
-        let runtime = match &self.asr_catalog {
-            None => "正在查找 sherpa-onnx 2.0.2",
-            Some(catalog) if catalog.runtime_error.is_some() => {
-                "未找到 sherpa-onnx 2.0.2。应用包需要随附推理库才能加载模型。"
-            }
-            Some(_) => "已找到库文件，加载模型时校验版本与依赖",
-        };
-        let loaded = self.asr_session.as_ref();
-        let remembered = self.library.asr_model_preferences().last_model.is_some();
-        let engine_detail = if let Some(model) = &self.asr_loading {
-            format!("正在加载 {model}")
-        } else if self.asr_transcribing {
-            "正在识别 WAV".into()
-        } else if let Some(session) = loaded {
-            format!("已加载 {}", session.id)
+                    .child(controls::ui_button(
+                        "asr-scan",
+                        "重新扫描",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        true,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| this.scan_asr_models(cx, false),
+                    )),
+            )
+            .children(warnings)
+            .children(model_rows);
+
+        let wav_detail = if self.asr_transcribing {
+            "正在识别 WAV 音频…"
+        } else if loaded.is_some() {
+            "选择本地 WAV 文件测试当前识别效果"
         } else {
-            "尚未加载模型".into()
+            "启用上方语音识别模型后可用"
         };
+
+        let wav_section = div()
+            .p_3p5()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme_color(TEXT))
+                                    .child("WAV 识别测试"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme_color(MUTED))
+                                    .truncate()
+                                    .child(wav_detail),
+                            ),
+                    )
+                    .child(controls::ui_button(
+                        "asr-transcribe",
+                        "选择 WAV…",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        idle && loaded.is_some(),
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| this.choose_asr_wav(cx),
+                    )),
+            )
+            .when_some(self.asr_text.clone(), |section, text| {
+                section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .id("asr-result")
+                                .max_h(px(140.))
+                                .overflow_y_scroll()
+                                .p_3()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme_color(LINE))
+                                .bg(theme_color(BG))
+                                .text_xs()
+                                .child(text),
+                        )
+                        .child(div().flex().justify_end().child(controls::ui_button(
+                            "asr-clear-text",
+                            "清空结果",
+                            None,
+                            controls::ButtonTone::Ghost,
+                            true,
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| {
+                                this.asr_text = None;
+                                cx.notify();
+                            },
+                        ))),
+                )
+            });
+
+        model_card_shell(false).child(header).child(
+            div()
+                .border_t_1()
+                .border_color(theme_color(LINE))
+                .flex()
+                .flex_col()
+                .child(url_section)
+                .child(local_models_section)
+                .child(wav_section),
+        )
+    }
+
+    fn model_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex()
             .flex_col()
-            .px_5()
-            .pb_4()
-            .child(settings_row(
-                "模型目录",
-                path.as_deref().unwrap_or("正在读取目录"),
-                controls,
-            ))
-            .child(settings_row(
-                "下载地址",
-                "ModelScope 仓库或模型镜像目录",
-                url_field,
-            ))
-            .child(self.default_model_row(cx))
-            .child(settings_row(
-                "推理库",
-                runtime,
-                self.settings_button(
-                    "asr-runtime-release",
-                    "获取推理库",
-                    false,
-                    true,
-                    cx,
-                    |_, _, cx| {
-                        cx.open_url("https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.2")
-                    },
-                ),
-            ))
-            .child(settings_row(
-                "ASR 推理",
-                &engine_detail,
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(self.settings_button(
-                        "asr-transcribe",
-                        "选择 WAV 识别",
-                        false,
-                        idle && loaded.is_some(),
-                        cx,
-                        |this, _, cx| this.choose_asr_wav(cx),
-                    ))
-                    .child(self.settings_button(
-                        "asr-unload",
-                        if loaded.is_some() {
-                            "释放模型"
-                        } else {
-                            "清除启动恢复"
-                        },
-                        false,
-                        idle && (loaded.is_some() || remembered),
-                        cx,
-                        |this, _, cx| this.unload_asr_model(cx),
-                    )),
-            ))
-            .when_some(self.asr_message.clone(), |body, message| {
-                body.child(
-                    div()
-                        .py_2()
-                        .text_xs()
-                        .text_color(theme_color(MUTED))
-                        .child(message),
-                )
-            })
-            .when_some(self.asr_text.clone(), |body, text| {
-                body.child(
-                    div()
-                        .id("asr-result")
-                        .max_h(px(160.))
-                        .overflow_y_scroll()
-                        .p_3()
-                        .bg(theme_color(BG))
-                        .rounded_md()
-                        .child(text),
-                )
-            })
-            .child(settings_row(
-                "本地模型",
-                &scan_status,
-                self.settings_button(
-                    "asr-scan",
-                    "重新扫描",
-                    false,
-                    true,
-                    cx,
-                    |this, _, cx| this.scan_asr_models(cx, false),
-                ),
-            ))
-            .children(
-                self.asr_catalog
-                    .iter()
-                    .flat_map(|catalog| catalog.warnings.iter())
-                    .map(|warning| {
-                        div()
-                            .py_2()
-                            .text_xs()
-                            .text_color(theme_color(MUTED))
-                            .child(warning.clone())
-                    }),
-            )
-            .children(rows)
+            .gap_3()
+            .py_2()
+            .child(self.runtime_engine_card(cx))
+            .child(self.asr_model_card(cx))
+            .child(self.model_directory_card(cx))
+            .child(self.model_advanced_card(cx))
             .into_any_element()
     }
 
@@ -8677,6 +10495,21 @@ impl Workspace {
         use crate::settings::Appearance;
 
         let settings = self.library.prefs.clone();
+        let show_focus = self.keyboard_focus_visible;
+        let folder_count = self.library.folders().len();
+        let offline_count = self
+            .library
+            .folders()
+            .iter()
+            .filter(|folder| !folder.online)
+            .count();
+        let folder_summary = if folder_count == 0 {
+            "尚未添加任何音乐文件夹".to_owned()
+        } else if offline_count > 0 {
+            format!("已收录 {folder_count} 个文件夹（其中 {offline_count} 个离线）")
+        } else {
+            format!("已收录 {folder_count} 个音乐文件夹")
+        };
         let font_name = if settings.ui_font == "system" {
             "macOS 系统字体"
         } else {
@@ -8686,60 +10519,70 @@ impl Workspace {
                 .map_or(settings.ui_font.as_str(), |font| font.label.as_str())
         };
         let font_button = format!("{font_name}  ▾");
-        let appearance = [
-            (Appearance::System, "跟随系统", "appearance-system"),
-            (Appearance::Light, "浅色", "appearance-light"),
-            (Appearance::Dark, "深色", "appearance-dark"),
-        ]
-        .into_iter()
-        .map(|(value, label, id)| {
-            self.settings_button(
-                id,
-                label,
-                self.library.appearance == value,
-                true,
-                cx,
-                move |this, _, cx| {
-                    this.settings_feedback = this.library.set_appearance(value).err();
-                    cx.notify();
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-        let closing = [
-            (CloseAction::Ask, "每次询问", "closing-ask"),
-            (CloseAction::Quit, "退出应用", "closing-quit"),
-            (CloseAction::Tray, "隐藏到菜单栏", "closing-tray"),
-        ]
-        .into_iter()
-        .map(|(value, label, id)| {
-            self.settings_button(
-                id,
-                label,
-                settings.close_action == value,
-                true,
-                cx,
-                move |this, window, cx| this.set_close_action(value, window, cx),
-            )
-        })
-        .collect::<Vec<_>>();
+        let appearance = controls::segmented_control(
+            "appearance",
+            &[
+                (Appearance::System, "跟随系统"),
+                (Appearance::Light, "浅色"),
+                (Appearance::Dark, "深色"),
+            ],
+            self.library.appearance,
+            show_focus,
+            cx,
+            |this, value, _, cx| {
+                this.settings_feedback = this.library.set_appearance(value).err();
+                cx.notify();
+            },
+        );
+        let closing = controls::segmented_control(
+            "closing",
+            &[
+                (CloseAction::Ask, "每次询问"),
+                (CloseAction::Quit, "退出应用"),
+                (CloseAction::Tray, "隐藏到菜单栏"),
+            ],
+            settings.close_action,
+            show_focus,
+            cx,
+            |this, value, window, cx| this.set_close_action(value, window, cx),
+        );
 
         div()
             .flex()
             .flex_col()
+            .child(settings_section("音乐库"))
+            .child(settings_row(
+                "音乐文件夹",
+                &folder_summary,
+                controls::ui_button(
+                    "settings-open-folders",
+                    "管理文件夹…",
+                    Some("folder-open"),
+                    controls::ButtonTone::Secondary,
+                    true,
+                    true,
+                    show_focus,
+                    cx,
+                    |this, window, cx| this.open_folders_modal(window, cx),
+                ),
+            ))
+            .child(settings_section("界面"))
             .child(settings_row(
                 "外观",
                 "跟随 macOS 或固定使用一种外观",
-                div().flex().gap_1().children(appearance),
+                appearance,
             ))
             .child(settings_row(
                 "界面字体",
                 "应用到曲库、播放器和设置",
-                self.settings_button(
+                controls::ui_button(
                     "choose-font",
-                    &font_button,
-                    self.font_picker_open,
+                    font_button,
+                    None,
+                    controls::ButtonTone::Secondary,
                     true,
+                    true,
+                    show_focus,
                     cx,
                     |this, window, cx| {
                         this.font_picker_open = !this.font_picker_open;
@@ -8760,46 +10603,58 @@ impl Workspace {
             .when(self.font_picker_open, |body| {
                 body.child(self.font_picker(cx))
             })
+            .child(settings_section("启动与关闭"))
             .child(settings_row(
                 "登录时启动",
                 "登录 macOS 后打开听风吟",
-                self.setting_toggle("autostart", settings.autostart, cx, |this, _, cx| {
-                    let previous = this.library.prefs.autostart;
-                    let enabled = !previous;
-                    let result = desktop::set_autostart(enabled).and_then(|()| {
-                        this.library
-                            .update_playback_settings(|settings| settings.autostart = enabled)
-                            .map_err(|error| match desktop::set_autostart(previous) {
-                                Ok(()) => error,
-                                Err(rollback) => format!("{error}，恢复原启动项失败：{rollback}"),
-                            })
-                    });
-                    this.settings_feedback = result.err();
-                    cx.notify();
-                }),
+                controls::toggle_switch(
+                    "autostart",
+                    settings.autostart,
+                    show_focus,
+                    cx,
+                    |this, _, cx| {
+                        let previous = this.library.prefs.autostart;
+                        let enabled = !previous;
+                        let result = desktop::set_autostart(enabled).and_then(|()| {
+                            this.library
+                                .update_playback_settings(|settings| settings.autostart = enabled)
+                                .map_err(|error| match desktop::set_autostart(previous) {
+                                    Ok(()) => error,
+                                    Err(rollback) => {
+                                        format!("{error}，恢复原启动项失败：{rollback}")
+                                    }
+                                })
+                        });
+                        this.settings_feedback = result.err();
+                        cx.notify();
+                    },
+                ),
             ))
             .child(settings_row(
                 "在菜单栏显示图标",
                 "点击图标恢复窗口，右键可显示或退出",
-                self.setting_toggle("tray", settings.minimize_to_tray, cx, |this, window, cx| {
-                    let enable = !this.library.prefs.minimize_to_tray;
-                    this.settings_feedback = this.set_tray_settings(enable, None, window, cx).err();
-                    cx.notify();
-                }),
+                controls::toggle_switch(
+                    "tray",
+                    settings.minimize_to_tray,
+                    show_focus,
+                    cx,
+                    |this, window, cx| {
+                        let enable = !this.library.prefs.minimize_to_tray;
+                        this.settings_feedback =
+                            this.set_tray_settings(enable, None, window, cx).err();
+                        cx.notify();
+                    },
+                ),
             ))
             .child(settings_row(
                 "关闭窗口时",
                 "选择点击窗口关闭按钮后的行为",
-                div().flex().gap_1().children(closing),
+                closing,
             ))
+            .child(settings_section("配置文件"))
             .child(settings_row(
-                "图形渲染",
-                "macOS 由 GPUI 和系统管理 GPU 加速",
-                div(),
-            ))
-            .child(settings_row(
-                "配置文件",
-                "在访达定位应用和曲库分类配置",
+                "在访达中显示",
+                "查看应用配置或曲库分类配置",
                 div()
                     .flex()
                     .gap_2()
@@ -8945,47 +10800,19 @@ impl Workspace {
         label: &str,
         selected: bool,
         available: bool,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(id.into())
-            .h(px(30.))
-            .max_w(px(235.))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .text_xs()
-            .bg(if selected {
-                theme_color(PANEL_LIGHT)
-            } else {
-                theme_color(BG)
-            })
-            .text_color(if selected {
-                theme_color(ACCENT)
-            } else {
-                theme_color(MUTED)
-            })
-            .border_1()
-            .border_color(if selected {
-                fade(theme_color(ACCENT), 0.3)
-            } else {
-                theme_color(LINE).into()
-            })
-            .when(available, |button| {
-                button
-                    .cursor_pointer()
-                    .focusable()
-                    .tab_stop(true)
-                    .focus(|style| style.border_color(theme_color(ACCENT)))
-                    .hover(|style| style.bg(theme_color(PANEL_LIGHT)))
-                    .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
-            })
-            .when(!available, |button| button.opacity(0.5))
-            .child(div().min_w(px(0.)).truncate().child(label.to_owned()))
-            .into_any_element()
+        controls::option_chip(
+            id.into(),
+            label.to_owned(),
+            selected,
+            available,
+            self.keyboard_focus_visible,
+            cx,
+            action,
+        )
+        .into_any_element()
     }
 
     fn playback_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -9037,6 +10864,7 @@ impl Workspace {
         div()
             .flex()
             .flex_col()
+            .child(settings_section("播放行为"))
             .child(settings_row(
                 "启动时自动播放",
                 "打开听风吟后开始播放",
@@ -9050,28 +10878,38 @@ impl Workspace {
             .child(settings_row(
                 "播放时保持屏幕唤醒",
                 "播放且窗口可见时保持唤醒，隐藏后释放",
-                self.setting_toggle("wake-lock", settings.prevent_sleep, cx, |this, window, cx| {
-                    this.update_settings(|settings| {
-                        settings.prevent_sleep = !settings.prevent_sleep
-                    });
-                    this.update_wake_lock(|| desktop::window_visible(window));
-                    cx.notify();
-                }),
-            ))
-            .child(settings_row(
-                "平台专属播放功能",
-                "Windows 支持媒体控件、空间音效和音频增强，Linux 支持 MPRIS2。此 macOS 版本不提供这些功能。",
-                div(),
+                self.setting_toggle(
+                    "wake-lock",
+                    settings.prevent_sleep,
+                    cx,
+                    |this, window, cx| {
+                        this.update_settings(|settings| {
+                            settings.prevent_sleep = !settings.prevent_sleep
+                        });
+                        this.update_wake_lock(|| desktop::window_visible(window));
+                        cx.notify();
+                    },
+                ),
             ))
             .child(settings_row(
                 "桌面歌词",
-                "加载 ASR 模型后可启用独立歌词窗口",
-                div().flex().items_center().gap_2()
-                    .when(self.desktop_lyrics.overlay.is_some(), |row| row.child(
-                        self.tiny_button("样式", "desktop-lyrics-style", cx, |this, _, cx| this.toggle_lyrics_settings(cx)),
-                    ))
+                "在独立窗口显示当前曲目的歌词。实时识别需要语音识别模型。",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(self.desktop_lyrics.overlay.is_some(), |row| {
+                        row.child(self.tiny_button(
+                            "样式",
+                            "desktop-lyrics-style",
+                            cx,
+                            |this, _, cx| this.toggle_lyrics_settings(cx),
+                        ))
+                    })
                     .child(self.setting_toggle(
-                        "desktop-lyrics", self.desktop_lyrics.overlay.is_some(), cx,
+                        "desktop-lyrics",
+                        self.desktop_lyrics.overlay.is_some(),
+                        cx,
                         |this, _, cx| this.toggle_desktop_lyrics(cx),
                     )),
             ))
@@ -9156,7 +10994,7 @@ impl Workspace {
     fn output_row(
         &self,
         route: &crate::settings::OutputRoute,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let key = &route.device_id;
         let device = self
@@ -9176,63 +11014,134 @@ impl Workspace {
             (_, true, true, true) => "已启用 · 已静音",
             _ => "已启用",
         };
+        let show_focus = self.keyboard_focus_visible;
         let volume_id = key.clone();
         let mute_id = key.clone();
         let enable_id = key.clone();
         let remove_id = key.clone();
         let muted = route.muted;
         let enabled = route.enabled;
-        let controls = div()
+        div()
+            .my_1()
+            .p_3()
+            .rounded_lg()
+            .bg(fade(theme_color(CONTROL_TINT), 0.035))
+            .border_1()
+            .border_color(theme_color(LINE))
             .flex()
-            .items_center()
-            .gap_2()
-            .child(self.settings_slider(
-                &format!("output-volume-{key}"),
-                route.volume,
-                1.,
-                0.01,
-                connected && enabled && !muted,
-                cx,
-                |value| format!("{:.0}%", value * 100.),
-                move |this, value, cx| {
-                    this.change_output(json!({"deviceId":volume_id,"volume":value}), cx)
-                },
-            ))
-            .child(self.settings_button(
-                format!("output-mute-{key}"),
-                if muted { "取消静音" } else { "静音" },
-                muted,
-                connected && enabled,
-                cx,
-                move |this, _, cx| {
-                    this.change_output(json!({"deviceId":mute_id,"muted":!muted}), cx)
-                },
-            ))
-            .child(self.settings_button(
-                format!("output-enabled-{key}"),
-                if enabled { "停用" } else { "启用" },
-                false,
-                connected || enabled,
-                cx,
-                move |this, _, cx| {
-                    this.change_output(json!({"deviceId":enable_id,"enabled":!enabled}), cx)
-                },
-            ))
-            .when(!default_output, |controls| {
-                controls.child(self.settings_button(
-                    format!("output-remove-{key}"),
-                    "移除",
-                    false,
-                    true,
-                    cx,
-                    move |this, _, cx| {
-                        let mut routes = this.library.prefs.output_routes.clone();
-                        routes.retain(|route| route.device_id != remove_id);
-                        this.change_output(json!({"routes":routes}), cx);
-                    },
-                ))
-            });
-        settings_row(name, status, controls)
+            .flex_col()
+            .gap_2p5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .truncate()
+                                    .child(name.to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if connected {
+                                        theme_color(MUTED)
+                                    } else {
+                                        theme_color(WARNING)
+                                    })
+                                    .child(status),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(controls::option_chip(
+                                SharedString::from(format!("output-mute-{key}")),
+                                if muted { "取消静音" } else { "静音" },
+                                muted,
+                                connected && enabled,
+                                show_focus,
+                                cx,
+                                move |this, _, cx| {
+                                    this.change_output(
+                                        json!({"deviceId":mute_id,"muted":!muted}),
+                                        cx,
+                                    )
+                                },
+                            ))
+                            .child(controls::ui_button(
+                                SharedString::from(format!("output-enabled-{key}")),
+                                if enabled { "停用" } else { "启用" },
+                                None,
+                                controls::ButtonTone::Secondary,
+                                connected || enabled,
+                                true,
+                                show_focus,
+                                cx,
+                                move |this, _, cx| {
+                                    this.change_output(
+                                        json!({"deviceId":enable_id,"enabled":!enabled}),
+                                        cx,
+                                    )
+                                },
+                            ))
+                            .when(!default_output, |controls| {
+                                controls.child(controls::ui_button(
+                                    SharedString::from(format!("output-remove-{key}")),
+                                    "移除",
+                                    None,
+                                    controls::ButtonTone::Danger,
+                                    true,
+                                    true,
+                                    show_focus,
+                                    cx,
+                                    move |this, _, cx| {
+                                        let mut routes = this.library.prefs.output_routes.clone();
+                                        routes.retain(|route| route.device_id != remove_id);
+                                        this.change_output(json!({"routes":routes}), cx);
+                                    },
+                                ))
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme_color(FAINT))
+                            .child("独立输出音量"),
+                    )
+                    .child(self.settings_slider(
+                        &format!("output-volume-{key}"),
+                        route.volume,
+                        1.,
+                        0.01,
+                        connected && enabled && !muted,
+                        cx,
+                        |value| format!("{:.0}%", value * 100.),
+                        move |this, value, cx| {
+                            this.change_output(json!({"deviceId":volume_id,"volume":value}), cx)
+                        },
+                    )),
+            )
+            .into_any_element()
     }
 
     fn settings_slider(
@@ -9412,6 +11321,7 @@ impl Workspace {
 
     fn integration_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let config = self.api_config.clone();
+        let show_focus = self.keyboard_focus_visible;
         let endpoint = format!("http://127.0.0.1:{}", config.port);
         let state = if config.enabled != self.api_boot_enabled {
             "重启后生效"
@@ -9424,29 +11334,110 @@ impl Workspace {
         };
         let has_token = !config.token.is_empty();
         let can_save_token = !self.api_token_field.read(cx).text().trim().is_empty();
-        let cors_buttons = [
-            ("local", "仅本机"),
-            ("any", "任意来源"),
-            ("custom", "指定来源"),
-        ]
-        .into_iter()
-        .map(|(value, label)| {
-            self.settings_button(
-                format!("api-cors-{value}"),
-                label,
-                config.cors == value,
-                true,
-                cx,
-                move |this, _, cx| {
-                    let mut next = this.api_config.clone();
-                    next.cors = value.into();
-                    if this.apply_api_config(next, cx) {
-                        this.settings_feedback = Some("跨域来源已更新".into());
-                    }
-                },
-            )
-        })
-        .collect::<Vec<_>>();
+        let cors_mode = match config.cors.as_str() {
+            "any" => "any",
+            "custom" => "custom",
+            _ => "local",
+        };
+        let cors_control = controls::segmented_control(
+            "api-cors",
+            &[
+                ("local", "仅本机"),
+                ("any", "任意来源"),
+                ("custom", "指定来源"),
+            ],
+            cors_mode,
+            show_focus,
+            cx,
+            |this, value, _, cx| {
+                let mut next = this.api_config.clone();
+                next.cors = value.into();
+                if this.apply_api_config(next, cx) {
+                    this.settings_feedback = Some("跨域来源已更新".into());
+                }
+            },
+        );
+        let token_row =
+            div()
+                .py_3()
+                .border_b_1()
+                .border_color(theme_color(LINE))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(div().font_weight(FontWeight::MEDIUM).child("访问令牌"))
+                        .child(div().text_xs().text_color(theme_color(MUTED)).child(
+                            if has_token {
+                                "已设置 · 输入新令牌可替换"
+                            } else {
+                                "未设置 · 可添加令牌限制接口访问"
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(controls::input_box(self.api_token_field.clone())),
+                        )
+                        .child(controls::ui_button(
+                            "api-save-token",
+                            "保存令牌",
+                            None,
+                            controls::ButtonTone::Primary,
+                            can_save_token,
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| {
+                                let mut next = this.api_config.clone();
+                                next.token = this
+                                    .api_token_field
+                                    .read(cx)
+                                    .text()
+                                    .trim()
+                                    .chars()
+                                    .take(128)
+                                    .collect();
+                                if !next.token.is_empty() && this.apply_api_config(next, cx) {
+                                    this.api_token_field
+                                        .update(cx, |field, cx| field.set_text("", cx));
+                                    this.settings_feedback = Some("已保存令牌".into());
+                                }
+                            },
+                        ))
+                        .when(has_token, |row| {
+                            row.child(controls::ui_button(
+                                "api-clear-token",
+                                "清除令牌",
+                                None,
+                                controls::ButtonTone::Danger,
+                                true,
+                                true,
+                                show_focus,
+                                cx,
+                                |this, _, cx| {
+                                    let mut next = this.api_config.clone();
+                                    next.token.clear();
+                                    if this.apply_api_config(next, cx) {
+                                        this.api_token_field
+                                            .update(cx, |field, cx| field.set_text("", cx));
+                                        this.settings_feedback = Some("已清除令牌".into());
+                                    }
+                                },
+                            ))
+                        }),
+                );
         div()
             .flex()
             .flex_col()
@@ -9486,135 +11477,106 @@ impl Workspace {
                         },
                     )),
             ))
-            .child(settings_row(
-                "访问令牌",
-                if has_token {
-                    "已设置 · 输入新令牌可替换"
-                } else {
-                    "未设置 · 可添加令牌限制接口访问"
-                },
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(155.))
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(theme_color(BG))
-                            .border_1()
-                            .border_color(theme_color(LINE))
-                            .child(self.api_token_field.clone()),
-                    )
-                    .child(self.settings_button(
-                        "api-save-token",
-                        "保存令牌",
-                        false,
-                        can_save_token,
-                        cx,
-                        |this, _, cx| {
-                            let mut next = this.api_config.clone();
-                            next.token = this
-                                .api_token_field
-                                .read(cx)
-                                .text()
-                                .trim()
-                                .chars()
-                                .take(128)
-                                .collect();
-                            if !next.token.is_empty() && this.apply_api_config(next, cx) {
-                                this.api_token_field
-                                    .update(cx, |field, cx| field.set_text("", cx));
-                                this.settings_feedback = Some("已保存令牌".into());
-                            }
-                        },
-                    ))
-                    .when(has_token, |row| {
-                        row.child(self.settings_button(
-                            "api-clear-token",
-                            "清除令牌",
-                            false,
-                            true,
-                            cx,
-                            |this, _, cx| {
-                                let mut next = this.api_config.clone();
-                                next.token.clear();
-                                if this.apply_api_config(next, cx) {
-                                    this.api_token_field
-                                        .update(cx, |field, cx| field.set_text("", cx));
-                                    this.settings_feedback = Some("已清除令牌".into());
-                                }
-                            },
-                        ))
-                    }),
-            ))
+            .child(token_row)
             .child(settings_row(
                 "跨域来源",
                 "选择可从网页访问本机接口的来源",
-                div().flex().items_center().gap_1().children(cors_buttons),
+                cors_control,
             ))
             .when(config.cors == "custom", |body| {
-                body.child(settings_row(
-                    "允许的网站",
-                    "用逗号分隔，最多 16 个",
+                body.child(
                     div()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(theme_color(LINE))
                         .flex()
-                        .items_center()
+                        .flex_col()
                         .gap_2()
                         .child(
                             div()
-                                .w(px(245.))
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme_color(BG))
-                                .border_1()
-                                .border_color(theme_color(LINE))
-                                .child(self.api_cors_field.clone()),
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(div().font_weight(FontWeight::MEDIUM).child("允许的网站"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme_color(MUTED))
+                                        .child("用逗号分隔，最多 16 个来源地址"),
+                                ),
                         )
-                        .child(self.settings_button(
-                            "api-save-origins",
-                            "保存来源",
-                            false,
-                            true,
-                            cx,
-                            |this, _, cx| {
-                                let mut next = this.api_config.clone();
-                                next.cors_origins = this.read_cors_origins(cx);
-                                if this.apply_api_config(next, cx) {
-                                    this.settings_feedback = Some("已保存允许的网站".into());
-                                }
-                            },
-                        )),
-                ))
-            })
-            .child(div().py_3().flex().flex_col().gap_3().children(
-                api::catalog::GROUPS.iter().map(|group| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(group.title))
-                        .children(group.endpoints.iter().map(|(method, path, summary)| {
+                        .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_xs()
                                 .child(
                                     div()
-                                        .w(px(48.))
-                                        .flex_shrink_0()
-                                        .text_color(theme_color(MUTED))
-                                        .child(*method),
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .child(controls::input_box(self.api_cors_field.clone())),
                                 )
-                                .child(div().flex_1().child(*path))
-                                .child(div().text_color(theme_color(MUTED)).child(*summary))
-                        }))
-                }),
-            ))
+                                .child(controls::ui_button(
+                                    "api-save-origins",
+                                    "保存来源",
+                                    None,
+                                    controls::ButtonTone::Primary,
+                                    true,
+                                    true,
+                                    show_focus,
+                                    cx,
+                                    |this, _, cx| {
+                                        let mut next = this.api_config.clone();
+                                        next.cors_origins = this.read_cors_origins(cx);
+                                        if this.apply_api_config(next, cx) {
+                                            this.settings_feedback =
+                                                Some("已保存允许的网站".into());
+                                        }
+                                    },
+                                )),
+                        ),
+                )
+            })
+            .child(div().pt_3().flex().child(self.tiny_button(
+                if self.api_reference_open {
+                    "收起接口列表"
+                } else {
+                    "查看接口列表"
+                },
+                "api-reference",
+                cx,
+                |this, _, cx| {
+                    this.api_reference_open = !this.api_reference_open;
+                    cx.notify();
+                },
+            )))
+            .when(self.api_reference_open, |body| {
+                body.child(div().py_3().flex().flex_col().gap_3().children(
+                    api::catalog::GROUPS.iter().map(|group| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(group.title))
+                            .children(group.endpoints.iter().map(|(method, path, summary)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .w(px(48.))
+                                            .flex_shrink_0()
+                                            .text_color(theme_color(MUTED))
+                                            .child(*method),
+                                    )
+                                    .child(div().flex_1().child(*path))
+                                    .child(div().text_color(theme_color(MUTED)).child(*summary))
+                            }))
+                    }),
+                ))
+            })
             .into_any_element()
     }
 
@@ -9656,50 +11618,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         toggle: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        let label = if id == "close-remember" {
-            if enabled {
-                "已记住选择"
-            } else {
-                "记住这次选择"
-            }
-        } else if enabled {
-            "已开启"
-        } else {
-            "已关闭"
-        };
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(|style| style.bg(fade(theme_color(ACCENT), 0.09)))
-            .text_xs()
-            .text_color(if enabled {
-                theme_color(ACCENT)
-            } else {
-                theme_color(MUTED)
-            })
-            .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx)))
-            .child(
-                div()
-                    .w(px(33.))
-                    .h(px(19.))
-                    .px(px(3.))
-                    .flex()
-                    .items_center()
-                    .when(enabled, |track| track.justify_end())
-                    .rounded_full()
-                    .bg(if enabled {
-                        theme_color(ACCENT)
-                    } else {
-                        theme_color(LINE)
-                    })
-                    .child(div().size(px(13.)).rounded_full().bg(rgb(0xffffff))),
-            )
-            .child(label)
+        controls::toggle_switch(id, enabled, self.keyboard_focus_visible, cx, toggle)
             .into_any_element()
     }
 
@@ -9875,10 +11794,19 @@ impl Workspace {
         };
         Some(
             div()
+                .id("diagnostics-backdrop")
                 .absolute()
                 .inset_0()
                 .occlude()
-                .bg(fade(theme_color(CONTROL_TINT), 0.28))
+                .bg(fade(theme_color(SCRIM), 0.32))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.diagnostics_open = false;
+                        window.focus(&this.focus);
+                        cx.notify();
+                    }),
+                )
                 .flex()
                 .items_center()
                 .justify_center()
@@ -9890,11 +11818,12 @@ impl Workspace {
                         .gap_4()
                         .flex()
                         .flex_col()
-                        .rounded_lg()
+                        .rounded(px(14.))
                         .border_1()
-                        .border_color(theme_color(LINE))
+                        .border_color(fade(theme_color(CONTROL_TINT), 0.14))
                         .bg(theme_color(PANEL))
                         .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(header)
                         .child(
                             div()
@@ -9941,6 +11870,66 @@ impl Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    fn skip_track(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.modal_open() || self.guard_library_playback() {
+            cx.notify();
+            return;
+        }
+        if forward {
+            self.failed_tracks.clear();
+            self.advance(TrackStart::Selected);
+        } else {
+            self.previous();
+        }
+        cx.notify();
+    }
+
+    fn toggle_queue(&mut self, cx: &mut Context<Self>) {
+        self.queue_open = !self.queue_open;
+        self.diagnostics_open = false;
+        if self.queue_open && !self.queue.is_empty() {
+            self.queue_scroll
+                .scroll_to_item(self.queue_index, gpui::ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    fn enqueue_track(&mut self, key: &str, play_next: bool, cx: &mut Context<Self>) {
+        if self.guard_library_playback() || self.library.song(key).is_none() {
+            cx.notify();
+            return;
+        }
+        if self.queue.is_empty() {
+            self.queue.push(key.to_owned());
+            self.queue_index = 0;
+            self.failed_tracks.clear();
+            self.load_key(key, false);
+        } else {
+            let index = if play_next {
+                self.queue_index + 1
+            } else {
+                self.queue.len()
+            };
+            self.queue.insert(index, key.to_owned());
+        }
+        let title = self.song_title(key);
+        self.notice = if play_next {
+            format!("《{title}》已排在当前曲目后")
+        } else {
+            format!("《{title}》已添加到队列")
+        };
+        self.queue_open = true;
+        self.queue_scroll.scroll_to_item(
+            if play_next {
+                (self.queue_index + 1).min(self.queue.len() - 1)
+            } else {
+                self.queue.len() - 1
+            },
+            gpui::ScrollStrategy::Center,
+        );
+        cx.notify();
     }
 
     fn confirm_queue_removal(
@@ -10022,21 +12011,31 @@ impl Workspace {
                         let title = song.title.clone();
                         let current = this.queue_index == index;
                         let remove_key = key.clone();
-                        let remove = this.row_action(
-                            format!("queue-remove-{index}"),
+                        let remove = this.icon_button(
+                            ("queue-remove", index),
                             "x",
-                            theme_color(MUTED),
+                            "移出队列",
+                            false,
                             cx,
                             move |this, window, cx| {
-                                this.confirm_queue_removal(
-                                    Some((index, remove_key.clone())),
-                                    window,
-                                    cx,
-                                )
+                                if this.queue.get(index) != Some(&remove_key) {
+                                    return;
+                                }
+                                if this.queue_index == index {
+                                    this.confirm_queue_removal(
+                                        Some((index, remove_key.clone())),
+                                        window,
+                                        cx,
+                                    );
+                                } else if !this.guard_library_playback() {
+                                    this.remove_from_queue(Some(index));
+                                }
+                                cx.notify();
                             },
                         );
                         Some(
                             div()
+                                .w_full()
                                 .h(px(38.))
                                 .px_2()
                                 .flex()
@@ -10052,8 +12051,21 @@ impl Workspace {
                                     div()
                                         .w(px(28.))
                                         .text_xs()
-                                        .text_color(theme_color(FAINT))
-                                        .child((index + 1).to_string()),
+                                        .text_color(theme_color(MUTED))
+                                        .child(if current {
+                                            icon(
+                                                if this.playing {
+                                                    "audio-lines"
+                                                } else {
+                                                    "pause-fill"
+                                                },
+                                                14.,
+                                                theme_color(ACCENT),
+                                            )
+                                            .into_any_element()
+                                        } else {
+                                            div().child((index + 1).to_string()).into_any_element()
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -10079,66 +12091,106 @@ impl Workspace {
                                         }))
                                         .child(title),
                                 )
+                                .when(current, |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme_color(ACCENT))
+                                            .child(if this.playing {
+                                                "正在播放"
+                                            } else {
+                                                "当前曲目"
+                                            }),
+                                    )
+                                })
                                 .child(remove),
                         )
                     })
                     .collect::<Vec<_>>()
             }),
         )
+        .w_full()
+        .track_scroll(self.queue_scroll.clone())
         .h(px((count as f32 * 38.0).clamp(38.0, 342.0)));
         Some(
             div()
+                .id("queue-backdrop")
                 .absolute()
+                .inset_0()
                 .occlude()
-                .right(px(20.))
-                .bottom(px(112.))
-                .w(px(360.))
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .bg(theme_color(PANEL))
-                .rounded_lg()
-                .border_1()
-                .border_color(theme_color(LINE))
-                .shadow_lg()
+                .bg(fade(theme_color(SCRIM), 0.14))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.queue_open = false;
+                        window.focus(&this.focus);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
+                        .absolute()
+                        .right(px(20.))
+                        .bottom(px(112.))
+                        .w(px(360.))
+                        .p_3()
                         .flex()
-                        .items_center()
+                        .flex_col()
                         .gap_2()
-                        .px_1()
+                        .bg(theme_color(PANEL))
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(fade(theme_color(CONTROL_TINT), 0.14))
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
-                                .flex_1()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!("播放队列 · {count} 首")),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(format!("播放队列 · {count} 首")),
+                                )
+                                .when(count > 0, |header| {
+                                    header.child(self.tiny_button(
+                                        "清空队列",
+                                        "queue-clear",
+                                        cx,
+                                        |this, window, cx| {
+                                            this.confirm_queue_removal(None, window, cx);
+                                        },
+                                    ))
+                                })
+                                .child(controls::ui_icon_button(
+                                    "queue-close",
+                                    "x",
+                                    false,
+                                    true,
+                                    self.keyboard_focus_visible,
+                                    cx,
+                                    |this, _, window, cx| {
+                                        this.queue_open = false;
+                                        window.focus(&this.focus);
+                                        cx.notify();
+                                    },
+                                )),
                         )
-                        .when(count > 0, |header| {
-                            header.child(self.tiny_button(
-                                "清空",
-                                "queue-clear",
-                                cx,
-                                |this, window, cx| {
-                                    this.confirm_queue_removal(None, window, cx);
-                                },
-                            ))
-                        })
-                        .child(self.tiny_button("关闭", "queue-close", cx, |this, _, cx| {
-                            this.queue_open = false;
-                            cx.notify();
-                        })),
+                        .when(count > 0, |panel| panel.child(rows))
+                        .when(count == 0, |panel| {
+                            panel.child(
+                                div()
+                                    .p_2()
+                                    .text_xs()
+                                    .text_color(theme_color(MUTED))
+                                    .child("在曲库播放曲目，或从曲目菜单添加到队列。"),
+                            )
+                        }),
                 )
-                .when(count > 0, |panel| panel.child(rows))
-                .when(count == 0, |panel| {
-                    panel.child(
-                        div()
-                            .p_2()
-                            .text_xs()
-                            .text_color(theme_color(MUTED))
-                            .child("选择一首曲目开始播放"),
-                    )
-                })
                 .into_any_element(),
         )
     }
@@ -10150,8 +12202,8 @@ impl Workspace {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
         let rate = rate.to_owned();
-        div()
-            .id("player-rate")
+        controls::keyboard_control("player-rate", self.keyboard_focus_visible)
+            .tooltip(|_, cx| cx.new(|_| Tip("更改播放速度".into())).into())
             .h(px(26.))
             .px_2()
             .flex()
@@ -10168,7 +12220,10 @@ impl Workspace {
                     .bg(fade(theme_color(CONTROL_TINT), 0.08))
                     .text_color(theme_color(TEXT))
             })
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, window, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(rate)
             .into_any_element()
     }
@@ -10177,12 +12232,13 @@ impl Workspace {
         &mut self,
         id: &'static str,
         icon_name: &'static str,
+        label: &'static str,
         active: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(id)
+        controls::keyboard_control(id, self.keyboard_focus_visible)
+            .tooltip(move |_, cx| cx.new(|_| Tip(label.into())).into())
             .size(px(30.))
             .flex()
             .items_center()
@@ -10190,7 +12246,10 @@ impl Workspace {
             .rounded_md()
             .cursor_pointer()
             .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.08)))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click(this, window, cx);
+                this.after_button_click(window, cx);
+            }))
             .child(icon(
                 icon_name,
                 15.,
@@ -10262,6 +12321,11 @@ impl Workspace {
                     },
                 )
             }
+            LibraryFilter::Category(id) if id == crate::library::UNCATEGORIZED_CATEGORY_ID => (
+                "未分类音频".to_owned(),
+                "位于已添加文件夹中但不在具体场景目录下的本地音频。".to_owned(),
+                "未分类".to_owned(),
+            ),
             LibraryFilter::Category(id) => self
                 .library
                 .snapshot
@@ -10282,6 +12346,7 @@ impl Workspace {
     // ---------- 渲染：动作菜单与对话框 ----------
 
     fn show_track_menu(&mut self, key: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.queue_open = false;
         self.action_menu = Some(TrackMenu {
             key: key.clone(),
             position,
@@ -10353,7 +12418,7 @@ impl Workspace {
             .max(px(8.))
             .min(window.viewport_size().width - px(196.));
         let stem_count = stems.iter().flatten().count();
-        let menu_height = 264.
+        let menu_height = 371.
             + if stem_count > 0 {
                 32. * (stem_count + 1) as f32
             } else {
@@ -10362,6 +12427,10 @@ impl Workspace {
         let top = (position.y + px(5.))
             .min(window.viewport_size().height - px(menu_height))
             .max(px(8.));
+        let reveal_path = self
+            .library
+            .song(&key)
+            .map(|song| PathBuf::from(&song.path));
         let rename_key = key.clone();
         let move_key = key.clone();
         let export_key = key.clone();
@@ -10370,6 +12439,8 @@ impl Workspace {
         let separation_delete_key = key.clone();
         let subtitle_key = key.clone();
         let separating = self.separating.contains(&key);
+        let next_key = key.clone();
+        let append_key = key.clone();
         let trash_key = key;
 
         Some(
@@ -10377,6 +12448,7 @@ impl Workspace {
                 .absolute()
                 .inset_0()
                 .occlude()
+                .track_focus(&self.track_menu_focus)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
@@ -10400,6 +12472,23 @@ impl Workspace {
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(self.menu_action(
+                            "menu-play-next",
+                            "skip-forward",
+                            "排在当前曲目后",
+                            false,
+                            cx,
+                            move |this, _, cx| this.enqueue_track(&next_key, true, cx),
+                        ))
+                        .child(self.menu_action(
+                            "menu-add-queue",
+                            "list-music",
+                            "添加到播放队列",
+                            false,
+                            cx,
+                            move |this, _, cx| this.enqueue_track(&append_key, false, cx),
+                        ))
+                        .child(div().h(px(1.)).mx_2().my_1().bg(theme_color(LINE)))
+                        .child(self.menu_action(
                             "menu-rename",
                             "edit",
                             "编辑曲目",
@@ -10416,8 +12505,11 @@ impl Workspace {
                             false,
                             cx,
                             move |this, _, cx| {
+                                let default_cat = this.default_import_target().1;
+                                this.dialog_feedback = None;
                                 this.dialog = Some(Dialog::Move {
                                     key: move_key.clone(),
+                                    category: default_cat,
                                 });
                                 cx.notify();
                             },
@@ -10425,7 +12517,7 @@ impl Workspace {
                         .child(self.menu_action(
                             "menu-loop",
                             "repeat",
-                            "循环点",
+                            "编辑 A/B 循环点",
                             false,
                             cx,
                             move |this, window, cx| {
@@ -10442,6 +12534,20 @@ impl Workspace {
                                 this.export_key(export_key.clone(), cx);
                             },
                         ))
+                        .when_some(reveal_path, |menu, path| {
+                            menu.child(self.menu_action(
+                                "menu-reveal",
+                                "folder",
+                                "在 Finder 中显示",
+                                false,
+                                cx,
+                                move |this, _, cx| {
+                                    this.action_menu = None;
+                                    cx.reveal_path(&path);
+                                    cx.notify();
+                                },
+                            ))
+                        })
                         .child(self.menu_action(
                             "menu-separate",
                             "music",
@@ -10517,7 +12623,7 @@ impl Workspace {
                         .child(self.menu_action(
                             "menu-trash",
                             "trash",
-                            "移到回收站",
+                            "移到曲库回收站",
                             true,
                             cx,
                             move |this, window, cx| {
@@ -10537,8 +12643,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(id)
+        controls::keyboard_control(id, self.keyboard_focus_visible)
             .h(px(32.))
             .px_3()
             .flex()
@@ -10560,6 +12665,7 @@ impl Workspace {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.action_menu = None;
                 on_click(this, window, cx);
+                this.after_button_click(window, cx);
             }))
             .child(icon(
                 icon_name,
@@ -10576,43 +12682,29 @@ impl Workspace {
 
     fn tiny_button(
         &self,
-        label: &'static str,
-        id: &'static str,
+        label: impl Into<SharedString>,
+        id: impl Into<gpui::ElementId>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        let primary = label == "确定" || label == "保存节目";
-        div()
-            .id(id)
-            .h(px(32.))
-            .px_4()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_size(px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .bg(if primary {
-                fade(theme_color(ACCENT), 1.)
-            } else {
-                fade(theme_color(CONTROL_TINT), 0.05)
-            })
-            .text_color(if primary {
-                theme_color(ACCENT_INK)
-            } else {
-                theme_color(MUTED)
-            })
-            .border_1()
-            .border_color(if primary {
-                fade(theme_color(ACCENT), 0.)
-            } else {
-                fade(theme_color(LINE), 1.)
-            })
-            .hover(|style| style.opacity(0.86))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(label)
-            .into_any_element()
+        let label = label.into();
+        let tone = if label == "确定" || label == "保存节目" {
+            controls::ButtonTone::Primary
+        } else {
+            controls::ButtonTone::Secondary
+        };
+        controls::ui_button(
+            id,
+            label,
+            None,
+            tone,
+            true,
+            true,
+            self.keyboard_focus_visible,
+            cx,
+            on_click,
+        )
+        .into_any_element()
     }
 
     fn dialog_layer(
@@ -10621,31 +12713,35 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let dialog = self.dialog.clone()?;
+        let show_focus = self.keyboard_focus_visible;
         let (heading, body) = match &dialog {
             Dialog::EditTrack { .. } => ("编辑曲目".to_owned(), "修改曲名和所属分类。".to_owned()),
             Dialog::NewCategory => (
                 "新增分类".to_owned(),
-                "创建分类和对应的曲库目录。".to_owned(),
+                "创建分类，并按需在曲库目录中建立对应子文件夹。".to_owned(),
             ),
             Dialog::EditCategory { .. } => {
                 ("编辑分类".to_owned(), "修改显示名称和主题色。".to_owned())
             }
             Dialog::Move { .. } => (
                 "移动到分类".to_owned(),
-                "文件会移动到目标分类目录。".to_owned(),
+                "将文件移动到原音乐文件夹下的目标分类目录。".to_owned(),
             ),
-            Dialog::MoveBatch { keys } => (
+            Dialog::MoveBatch { keys, .. } => (
                 "批量移动".to_owned(),
-                format!("将 {} 首曲目移动到目标分类。", keys.len()),
+                format!("将已选的 {} 首曲目移动到目标分类目录。", keys.len()),
             ),
-            Dialog::Import { files } => (
-                "导入到分类".to_owned(),
-                format!("已选择 {} 个文件。", files.len()),
+            Dialog::Import { files, .. } => (
+                "导入音乐".to_owned(),
+                format!(
+                    "已选择 {} 个文件，请确认写入的目标文件夹与场景分类。",
+                    files.len()
+                ),
             ),
             Dialog::FileReport { summary, .. } => ("文件操作结果".to_owned(), summary.clone()),
             Dialog::Loop { key } => (
                 format!("循环点 · {}", self.song_title(key)),
-                "设置 A/B 循环区间（单位：秒）。启用后播放器会在区间内采样级无缝循环。".to_owned(),
+                "输入开始和结束时间（秒），播放到终点时会回到起点。".to_owned(),
             ),
         };
         let show_field = matches!(
@@ -10654,9 +12750,10 @@ impl Workspace {
         );
         let category_detail = match dialog {
             Dialog::NewCategory => Some("目录名（可选）"),
-            Dialog::EditCategory { .. } => Some("主题颜色（#RRGGBB）"),
+            Dialog::EditCategory { .. } => Some("主题颜色"),
             _ => None,
         };
+        let edit_category_color = matches!(dialog, Dialog::EditCategory { .. });
         let loop_dialog = matches!(dialog, Dialog::Loop { .. });
         let loop_key = match &dialog {
             Dialog::Loop { key } => Some(key.clone()),
@@ -10669,305 +12766,524 @@ impl Workspace {
         let loop_key_for_clear = loop_key.clone();
         let loop_enabled = self.loop_enabled_pending;
         let categories = self.library.snapshot.categories.clone();
-        let edit_category = match &dialog {
-            Dialog::EditTrack { category, .. } => Some(category.as_str()),
+        let online_folders = self
+            .library
+            .online_folders()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_category = match &dialog {
+            Dialog::EditTrack { category, .. }
+            | Dialog::Move { category, .. }
+            | Dialog::MoveBatch { category, .. }
+            | Dialog::Import { category, .. } => Some(category.as_str()),
             _ => None,
         };
-        let edit_error = match &dialog {
-            Dialog::EditTrack { error, .. } => error.clone(),
+        let selected_folder_id = match &dialog {
+            Dialog::Import { folder_id, .. } => folder_id.clone(),
             _ => None,
         };
-        let report = match &dialog {
-            Dialog::FileReport { report, .. } => Some(report),
+        let is_import = matches!(dialog, Dialog::Import { .. });
+        let is_move = matches!(dialog, Dialog::Move { .. } | Dialog::MoveBatch { .. });
+        let primary_label = if is_import {
+            "确认导入"
+        } else if is_move {
+            "确认移动"
+        } else {
+            "保存"
+        };
+        let edit_error = self.dialog_feedback.clone();
+        let lines: Option<Vec<String>> = match &dialog {
+            Dialog::FileReport { report, .. } => Some(
+                report
+                    .notice
+                    .iter()
+                    .chain(&report.messages)
+                    .chain(
+                        report
+                            .failures
+                            .iter()
+                            .filter(|line| !report.messages.contains(line)),
+                    )
+                    .cloned()
+                    .collect(),
+            ),
             _ => None,
         };
-        let mut choices = Vec::new();
-        if edit_category.is_some()
-            || matches!(
-                dialog,
-                Dialog::Move { .. } | Dialog::MoveBatch { .. } | Dialog::Import { .. }
-            )
-        {
-            for category in categories {
-                let id = category.id.clone();
-                let name = category.name_zh.clone();
-                let selected = edit_category == Some(id.as_str());
-                choices.push(
+        let details_only = lines.is_some();
+
+        let folder_cards = if is_import {
+            let paths = controls::distinguishing_folder_paths(&online_folders);
+            online_folders
+                .iter()
+                .map(|folder| {
+                    let fid = folder.id.clone();
+                    let active = selected_folder_id.as_deref() == Some(fid.as_str());
+                    let path_hint = paths
+                        .get(&fid)
+                        .cloned()
+                        .unwrap_or_else(|| controls::compact_display_path(&folder.path));
                     div()
-                        .id(SharedString::from(format!("pick-{id}")))
-                        .h(px(34.))
-                        .flex_shrink_0()
+                        .id(SharedString::from(format!("import-folder-{fid}")))
                         .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(if active {
+                            fade(theme_color(ACCENT), 0.55)
+                        } else {
+                            theme_color(LINE).into()
+                        })
+                        .bg(if active {
+                            fade(theme_color(ACCENT), 0.12)
+                        } else {
+                            fade(theme_color(CONTROL_TINT), 0.04)
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.09)))
                         .flex()
                         .items_center()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .bg(if selected {
-                            fade(theme_color(ACCENT), 0.14)
-                        } else {
-                            theme_color(BG).into()
-                        })
-                        .when(selected, |row| row.text_color(theme_color(ACCENT)))
-                        .hover(|style| style.bg(theme_color(LINE)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.commit_category_choice(id.clone(), window, cx);
+                        .gap_2p5()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(Dialog::Import {
+                                files, category, ..
+                            }) = this.dialog.clone()
+                            {
+                                this.dialog_feedback = None;
+                                this.dialog = Some(Dialog::Import {
+                                    files,
+                                    folder_id: Some(fid.clone()),
+                                    category,
+                                });
+                                cx.notify();
+                            }
                         }))
-                        .child(name)
-                        .into_any_element(),
+                        .child(icon(
+                            "folder-open",
+                            15.,
+                            theme_color(if active { ACCENT } else { MUTED }),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme_color(TEXT))
+                                        .truncate()
+                                        .child(folder.display_name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme_color(FAINT))
+                                        .truncate()
+                                        .child(path_hint),
+                                ),
+                        )
+                        .when(active, |row| {
+                            row.child(icon("check", 14., theme_color(ACCENT)))
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let mut choices = Vec::new();
+        if selected_category.is_some() {
+            for category in &categories {
+                let id = category.id.clone();
+                let name = category.name_zh.clone();
+                let selected = selected_category == Some(id.as_str());
+                choices.push(
+                    controls::option_chip(
+                        SharedString::from(format!("pick-{id}")),
+                        name,
+                        selected,
+                        true,
+                        show_focus,
+                        cx,
+                        move |this, _, cx| {
+                            this.select_dialog_category(id.clone(), cx);
+                        },
+                    )
+                    .into_any_element(),
                 );
             }
         }
 
+        let import_preview = match &dialog {
+            Dialog::Import {
+                files,
+                folder_id,
+                category,
+            } => {
+                let folder_name = folder_id
+                    .as_deref()
+                    .and_then(|id| online_folders.iter().find(|f| f.id == id))
+                    .map(|f| f.display_name.as_str())
+                    .unwrap_or("未选择文件夹");
+                let cat_name = categories
+                    .iter()
+                    .find(|c| &c.id == category)
+                    .map(|c| c.name_zh.as_str())
+                    .unwrap_or(category.as_str());
+                Some(format!(
+                    "将复制 {} 个音频到「{folder_name}」下的「{cat_name}（{category}/）」目录",
+                    files.len()
+                ))
+            }
+            _ => None,
+        };
+
+        let swatches = [
+            "#D97757", "#4E9F8B", "#7C83FD", "#E06C75", "#E5C07B", "#56B6C2", "#C678DD", "#34D399",
+        ];
+        let current_hex = self.category_detail_field.read(cx).text().trim().to_owned();
+
         Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(fade(theme_color(CONTROL_TINT), 0.28))
-                .key_context("Dialog")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
+            controls::modal_backdrop(
+                "dialog-backdrop",
+                &self.dialog_focus,
+                cx,
+                move |this, window, cx| {
+                    if !show_field && !loop_dialog {
                         this.dialog = None;
                         window.focus(&this.focus);
                         cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .w(px(420.))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_md()
-                        .bg(theme_color(PANEL))
-                        .border_1()
-                        .border_color(theme_color(LINE))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(div().text_lg().child(heading))
-                        .child(div().text_xs().text_color(theme_color(MUTED)).child(body))
-                        .when_some(report, |body, report| {
-                            body.child(
-                                div()
-                                    .id("file-report-lines")
-                                    .max_h(px(280.))
-                                    .overflow_y_scroll()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .children(
-                                        report
-                                            .notice
-                                            .iter()
-                                            .chain(&report.messages)
-                                            .chain(
-                                                report
-                                                    .failures
-                                                    .iter()
-                                                    .filter(|line| !report.messages.contains(line)),
-                                            )
-                                            .map(|line| {
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(theme_color(MUTED))
-                                                    .child(line.clone())
-                                            }),
-                                    ),
-                            )
-                        })
-                        .when(show_field, |this| this.child(self.dialog_field.clone()))
-                        .when_some(category_detail, |dialog, label| {
-                            dialog.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div().text_xs().text_color(theme_color(MUTED)).child(label),
-                                    )
-                                    .child(
-                                        div()
-                                            .px_3()
-                                            .py_2()
-                                            .rounded_md()
-                                            .bg(theme_color(BG))
-                                            .border_1()
-                                            .border_color(theme_color(LINE))
-                                            .child(self.category_detail_field.clone()),
-                                    ),
-                            )
-                        })
-                        .when(loop_dialog, |this| {
-                            this.child(
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .child(self.loop_start_field.clone())
-                                    .child(self.loop_end_field.clone()),
-                            )
+                    }
+                },
+            )
+            .child(
+                controls::modal_card(if is_import { 480. } else { 440. })
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3p5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
                             .child(
-                                div().flex().child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme_color(TEXT))
+                                    .child(heading),
+                            )
+                            .child(div().text_xs().text_color(theme_color(MUTED)).child(body)),
+                    )
+                    .when_some(lines, |body, lines| {
+                        body.child(
+                            div()
+                                .id("details-lines")
+                                .max_h(px(280.))
+                                .overflow_y_scroll()
+                                .p_3()
+                                .rounded_md()
+                                .bg(fade(theme_color(CONTROL_TINT), 0.04))
+                                .border_1()
+                                .border_color(theme_color(LINE))
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .children(lines.into_iter().map(|line| {
+                                    div().text_xs().text_color(theme_color(MUTED)).child(line)
+                                })),
+                        )
+                    })
+                    .when(show_field, |panel| {
+                        panel.child(controls::input_box(self.dialog_field.clone()))
+                    })
+                    .when_some(category_detail, |dialog_el, label| {
+                        dialog_el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
                                     div()
-                                        .id("loop-enabled")
-                                        .h(px(30.))
-                                        .px_3()
                                         .flex()
                                         .items_center()
-                                        .gap_2()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_size(px(11.))
-                                        .bg(if loop_enabled {
-                                            fade(theme_color(ACCENT), 0.14)
-                                        } else {
-                                            fade(theme_color(CONTROL_TINT), 0.04)
-                                        })
-                                        .border_1()
-                                        .border_color(if loop_enabled {
-                                            fade(theme_color(ACCENT), 0.35)
-                                        } else {
-                                            fade(theme_color(LINE), 1.)
-                                        })
-                                        .text_color(if loop_enabled {
-                                            theme_color(ACCENT)
-                                        } else {
-                                            theme_color(MUTED)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.loop_enabled_pending = !this.loop_enabled_pending;
-                                            cx.notify();
-                                        }))
-                                        .child(icon(
-                                            "repeat",
-                                            13.,
-                                            if loop_enabled {
-                                                theme_color(ACCENT)
-                                            } else {
-                                                theme_color(MUTED)
-                                            },
-                                        ))
-                                        .child(if loop_enabled {
-                                            "启用循环"
-                                        } else {
-                                            "关闭循环（保留标记）"
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme_color(MUTED))
+                                                .child(label),
+                                        )
+                                        .when(edit_category_color, |row| {
+                                            row.child(
+                                                div()
+                                                    .size(px(14.))
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(fade(
+                                                        theme_color(CONTROL_TINT),
+                                                        0.2,
+                                                    ))
+                                                    .bg(parse_color(&current_hex)),
+                                            )
                                         }),
-                                ),
-                            )
-                            .when(has_existing_loop, |this| {
-                                this.child(div().flex().child(self.menu_action(
-                                    "loop-clear",
-                                    "x",
-                                    "清除循环点标记",
-                                    false,
-                                    cx,
-                                    move |this, _, cx| {
-                                        if let Some(key) = loop_key_for_clear.clone() {
-                                            match this.library.remove_loop_point(&key) {
-                                                Ok(_) => {
-                                                    this.notice = "已清除循环点".into();
-                                                    this.refresh_loop_region();
-                                                }
-                                                Err(error) => this.notice = error,
-                                            }
-                                        }
-                                        this.dialog = None;
-                                        cx.notify();
-                                    },
-                                )))
-                            })
-                        })
-                        .when(!choices.is_empty(), |dialog| {
-                            dialog.child(
-                                div()
-                                    .id("dialog-category-choices")
-                                    .max_h(px(178.))
-                                    .overflow_y_scroll()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .children(choices),
-                            )
-                        })
-                        .when_some(edit_error, |dialog, error| {
-                            dialog
-                                .child(div().text_xs().text_color(theme_color(DANGER)).child(error))
-                        })
+                                )
+                                .when(edit_category_color, |col| {
+                                    col.child(div().flex().flex_wrap().gap_2().children(
+                                        swatches.into_iter().enumerate().map(|(i, hex)| {
+                                            let picked = current_hex.eq_ignore_ascii_case(hex);
+                                            let swatch_hex = hex.to_owned();
+                                            div()
+                                                .id(("cat-swatch", i))
+                                                .size(px(24.))
+                                                .rounded_full()
+                                                .bg(parse_color(hex))
+                                                .border_2()
+                                                .border_color(if picked {
+                                                    fade(theme_color(TEXT), 1.0)
+                                                } else {
+                                                    fade(theme_color(CONTROL_TINT), 0.12)
+                                                })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.category_detail_field.update(
+                                                        cx,
+                                                        |field, cx| {
+                                                            field.set_text(swatch_hex.clone(), cx);
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                }))
+                                        }),
+                                    ))
+                                })
+                                .child(controls::input_box(self.category_detail_field.clone())),
+                        )
+                    })
+                    .when(loop_dialog, |this| {
+                        this.child(
+                            div().flex().gap_2().children(
+                                [
+                                    ("开始时间（秒）", self.loop_start_field.clone()),
+                                    ("结束时间（秒）", self.loop_end_field.clone()),
+                                ]
+                                .map(|(label, field)| {
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme_color(MUTED))
+                                                .child(label),
+                                        )
+                                        .child(controls::input_box(field))
+                                }),
+                            ),
+                        )
                         .child(
                             div()
                                 .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(self.tiny_button(
-                                    if report.is_some() { "关闭" } else { "取消" },
-                                    "dialog-cancel",
+                                .items_center()
+                                .justify_between()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme_color(TEXT))
+                                                .child("启用区间循环"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(theme_color(FAINT))
+                                                .child("关闭时仍会保留循环点标记"),
+                                        ),
+                                )
+                                .child(controls::toggle_switch(
+                                    "loop-enabled",
+                                    loop_enabled,
+                                    show_focus,
                                     cx,
-                                    |this, window, cx| {
-                                        this.dialog = None;
-                                        window.focus(&this.focus);
+                                    |this, _, cx| {
+                                        this.loop_enabled_pending = !this.loop_enabled_pending;
                                         cx.notify();
                                     },
+                                )),
+                        )
+                        .when(has_existing_loop, |this| {
+                            this.child(div().flex().child(controls::ui_button(
+                                "loop-clear",
+                                "清除循环点标记",
+                                Some("trash"),
+                                controls::ButtonTone::Danger,
+                                true,
+                                true,
+                                show_focus,
+                                cx,
+                                move |this, window, cx| {
+                                    if let Some(key) = loop_key_for_clear.clone() {
+                                        match this.library.remove_loop_point(&key) {
+                                            Ok(_) => {
+                                                this.show_toast("已清除循环点", false, cx);
+                                                this.refresh_loop_region();
+                                            }
+                                            Err(error) => this.show_toast(error, true, cx),
+                                        }
+                                    }
+                                    this.dialog = None;
+                                    window.focus(&this.focus);
+                                    cx.notify();
+                                },
+                            )))
+                        })
+                    })
+                    .when(!folder_cards.is_empty(), |dialog_el| {
+                        dialog_el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme_color(MUTED))
+                                        .child("1. 目标音乐文件夹"),
+                                )
+                                .child(
+                                    div()
+                                        .id("import-folders-scroll")
+                                        .max_h(px(156.))
+                                        .overflow_y_scroll()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .children(folder_cards),
+                                ),
+                        )
+                    })
+                    .when(!choices.is_empty(), |dialog_el| {
+                        dialog_el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .when(is_import, |col| {
+                                    col.child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme_color(MUTED))
+                                            .child("2. 目标场景分类"),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id("dialog-category-choices")
+                                        .max_h(px(150.))
+                                        .overflow_y_scroll()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_1p5()
+                                        .children(choices),
+                                ),
+                        )
+                    })
+                    .when_some(import_preview, |dialog_el, preview| {
+                        dialog_el.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(fade(theme_color(ACCENT), 0.09))
+                                .border_1()
+                                .border_color(fade(theme_color(ACCENT), 0.25))
+                                .text_xs()
+                                .text_color(theme_color(TEXT))
+                                .child(preview),
+                        )
+                    })
+                    .when_some(edit_error, |dialog_el, error| {
+                        dialog_el
+                            .child(div().text_xs().text_color(theme_color(DANGER)).child(error))
+                    })
+                    .child(
+                        div()
+                            .pt_1()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(controls::ui_button(
+                                "dialog-cancel",
+                                if details_only { "关闭" } else { "取消" },
+                                None,
+                                controls::ButtonTone::Secondary,
+                                true,
+                                false,
+                                show_focus,
+                                cx,
+                                |this, window, cx| {
+                                    this.dialog = None;
+                                    this.dialog_feedback = None;
+                                    window.focus(&this.focus);
+                                    cx.notify();
+                                },
+                            ))
+                            .when(show_field || loop_dialog || is_import || is_move, |this| {
+                                let enabled = !is_import || selected_folder_id.is_some();
+                                this.child(controls::ui_button(
+                                    "dialog-ok",
+                                    primary_label,
+                                    Some("check"),
+                                    controls::ButtonTone::Primary,
+                                    enabled,
+                                    false,
+                                    show_focus,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.confirm(&Confirm, window, cx);
+                                    },
                                 ))
-                                .when(show_field || loop_dialog, |this| {
-                                    this.child(self.tiny_button(
-                                        "确定",
-                                        "dialog-ok",
-                                        cx,
-                                        |this, window, cx| {
-                                            this.confirm(&Confirm, window, cx);
-                                        },
-                                    ))
-                                }),
-                        ),
-                ),
+                            }),
+                    ),
+            ),
         )
     }
 
-    fn commit_category_choice(
-        &mut self,
-        category: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_dialog_category(&mut self, category: String, cx: &mut Context<Self>) {
         let Some(dialog) = self.dialog.clone() else {
             return;
         };
-        match dialog {
-            Dialog::EditTrack { key, .. } => {
-                self.dialog = Some(Dialog::EditTrack {
-                    key,
-                    category,
-                    error: None,
-                });
-                cx.notify();
-                return;
-            }
-            Dialog::Move { key } => match self.library.move_song(&key, &category) {
-                Ok(mutation) => self.apply_mutation(mutation),
-                Err(error) => self.notice = error,
+        self.dialog_feedback = None;
+        self.dialog = Some(match dialog {
+            Dialog::EditTrack { key, .. } => Dialog::EditTrack { key, category },
+            Dialog::Move { key, .. } => Dialog::Move { key, category },
+            Dialog::MoveBatch { keys, .. } => Dialog::MoveBatch { keys, category },
+            Dialog::Import {
+                files, folder_id, ..
+            } => Dialog::Import {
+                files,
+                folder_id,
+                category,
             },
-            Dialog::MoveBatch { keys } => match self.library.move_batch(&keys, &category) {
-                Ok(mutation) => {
-                    for change in &mutation.changes {
-                        self.selected_songs.remove(&change.from);
-                    }
-                    self.apply_mutation(mutation);
-                }
-                Err(error) => self.notice = error,
-            },
-            Dialog::Import { files } => {
-                let mutation = self.library.import(&category, &files);
-                self.apply_mutation(mutation);
-            }
-            _ => return,
-        }
-        if !matches!(self.dialog, Some(Dialog::FileReport { .. })) {
-            self.dialog = None;
-            window.focus(&self.focus);
-        }
+            other => other,
+        });
         cx.notify();
     }
 
@@ -11013,6 +13329,7 @@ impl Workspace {
                 .justify_center()
                 .bg(fade(theme_color(CONTROL_TINT), 0.28))
                 .key_context("Dialog")
+                .track_focus(&self.picker_focus)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -11050,7 +13367,7 @@ impl Workspace {
                                 },
                             ))
                         })
-                        .child(self.picker_search.clone())
+                        .child(audio_tools::tool_text_input(self.picker_search.clone()))
                         .child(
                             div()
                                 .flex_1()
@@ -11154,13 +13471,17 @@ impl Workspace {
                                         cx.notify();
                                     },
                                 ))
-                                .child(self.tiny_button(
-                                    if captions {
-                                        "加入待生成"
-                                    } else {
-                                        "确定"
-                                    },
+                                .child(self.settings_button(
                                     "picker-ok",
+                                    if captions {
+                                        "选定曲目"
+                                    } else if multi {
+                                        "添加所选曲目"
+                                    } else {
+                                        "替换曲目"
+                                    },
+                                    true,
+                                    selected_count > 0,
                                     cx,
                                     |this, window, cx| {
                                         this.confirm_song_picker(window, cx);
@@ -11187,83 +13508,86 @@ impl Workspace {
             .find(|category| category.id == song.category)
             .map(|category| category.name_zh.clone())
             .unwrap_or_else(|| song.category.clone());
-        div()
-            .id(SharedString::from(format!("picker-row-{}", song.key)))
-            .h(px(44.))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .border_b_1()
-            .border_color(fade(theme_color(LINE), 0.45))
-            .cursor_pointer()
-            .bg(if selected {
-                fade(theme_color(ACCENT), 0.09)
-            } else {
-                fade(theme_color(BG), 0.)
-            })
-            .hover(|style| style.bg(fade(theme_color(ACCENT), 0.05)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let clicked = key.clone();
-                let Some(picker) = this.picker.as_mut() else {
-                    return;
-                };
-                if matches!(picker.purpose, PickerPurpose::AddToSchedule) {
-                    if picker.selected.contains(&clicked) {
-                        picker.selected.remove(&clicked);
-                    } else {
-                        picker.selected.insert(clicked);
-                    }
+        controls::keyboard_control(
+            SharedString::from(format!("picker-row-{}", song.key)),
+            self.keyboard_focus_visible,
+        )
+        .w_full()
+        .h(px(44.))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .border_b_1()
+        .border_color(fade(theme_color(LINE), 0.45))
+        .cursor_pointer()
+        .bg(if selected {
+            fade(theme_color(ACCENT), 0.09)
+        } else {
+            fade(theme_color(BG), 0.)
+        })
+        .hover(|style| style.bg(fade(theme_color(ACCENT), 0.05)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let clicked = key.clone();
+            let Some(picker) = this.picker.as_mut() else {
+                return;
+            };
+            if matches!(picker.purpose, PickerPurpose::AddToSchedule) {
+                if picker.selected.contains(&clicked) {
+                    picker.selected.remove(&clicked);
                 } else {
-                    picker.selected = HashSet::from([clicked]);
+                    picker.selected.insert(clicked);
                 }
-                cx.notify();
-            }))
-            .child(if selected {
-                icon("check", 14., theme_color(ACCENT)).into_any_element()
             } else {
-                div()
-                    .size(px(14.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(fade(theme_color(LINE), 1.))
-                    .into_any_element()
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
+                picker.selected = HashSet::from([clicked]);
+            }
+            cx.notify();
+        }))
+        .child(if selected {
+            icon("check", 14., theme_color(ACCENT)).into_any_element()
+        } else {
+            div()
+                .size(px(14.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(fade(theme_color(LINE), 1.))
+                .into_any_element()
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme_color(TEXT))
+                        .min_w(px(0.))
+                        .truncate()
+                        .child(song.title.clone()),
+                )
+                .when(already_in_draft, |this| {
+                    this.child(
                         div()
-                            .text_size(px(12.5))
-                            .text_color(theme_color(TEXT))
-                            .min_w(px(0.))
-                            .truncate()
-                            .child(song.title.clone()),
+                            .flex_none()
+                            .text_size(px(9.))
+                            .text_color(theme_color(FAINT))
+                            .child("已在节目"),
                     )
-                    .when(already_in_draft, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(9.))
-                                .text_color(theme_color(FAINT))
-                                .child("已在节目"),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .w(px(96.))
-                    .flex_none()
-                    .truncate()
-                    .text_size(px(10.5))
-                    .text_color(theme_color(FAINT))
-                    .child(category),
-            )
-            .into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .w(px(96.))
+                .flex_none()
+                .truncate()
+                .text_size(px(10.5))
+                .text_color(theme_color(FAINT))
+                .child(category),
+        )
+        .into_any_element()
     }
 
     // ---------- 渲染：导出设置弹层 ----------
@@ -11284,10 +13608,8 @@ impl Workspace {
         .detach();
     }
 
-    fn export_popover_layer(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if !self.export_popover {
-            return None;
-        }
+    fn export_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let show_focus = self.keyboard_focus_visible;
         let ffmpeg = self
             .ffmpeg_detected
             .as_ref()
@@ -11301,246 +13623,207 @@ impl Workspace {
             .or_else(|| presets.first())
             .cloned();
         let hint = match (&enabled, selected.as_ref()) {
-            (false, _) => "已关闭 · 仅复制原文件".to_owned(),
+            (false, _) => "当前已关闭 · 单首和批量导出时均直接复制原始文件".to_owned(),
             (true, Some(preset)) => {
                 format!(
-                    "已开启 · 目标 {} LUFS · {}",
+                    "已开启 · {} LUFS · 适用于「{}」",
                     preset.target_lufs, preset.label
                 )
             }
-            (true, None) => "已开启 · 人耳响度归一化".to_owned(),
+            (true, None) => "已开启 · 导出时进行人耳响度归一化".to_owned(),
         };
 
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.export_popover = false;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(14.))
-                        .top(px(62.))
-                        .w(px(320.))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_lg()
-                        .bg(theme_color(PANEL))
-                        .border_1()
-                        .border_color(theme_color(LINE))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("导出设置"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(theme_color(FAINT))
-                                        .child("单首导出通用"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id("export-toggle")
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .p_3()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(if enabled {
-                                    fade(theme_color(ACCENT), 0.1)
-                                } else {
-                                    fade(theme_color(CONTROL_TINT), 0.03)
-                                })
-                                .border_1()
-                                .border_color(if enabled {
-                                    fade(theme_color(ACCENT), 0.3)
-                                } else {
-                                    fade(theme_color(LINE), 1.)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let enabled = this.library.prefs.loudness_normalization;
-                                    let scene = this.library.prefs.export_scene.clone();
-                                    if let Err(error) =
-                                        this.library.set_export_settings(!enabled, &scene)
-                                    {
-                                        this.notice = error;
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .child(div().text_size(px(12.5)).child("响度归一化"))
-                                        .child(
-                                            div()
-                                                .text_size(px(10.5))
-                                                .text_color(theme_color(FAINT))
-                                                .child(hint),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(36.))
-                                        .h(px(20.))
-                                        .rounded_full()
-                                        .bg(if enabled {
-                                            theme_color(ACCENT)
-                                        } else {
-                                            theme_color(LINE)
-                                        })
-                                        .p(px(2.))
-                                        .child(
-                                            div()
-                                                .size(px(16.))
-                                                .rounded_full()
-                                                .bg(theme_color(TEXT))
-                                                .when(enabled, |this| this.ml(relative(1.0))),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(px(10.))
-                                .text_color(theme_color(FAINT))
-                                .child("归一化目标")
-                                .child("选择导出用途，决定目标响度"),
-                        )
-                        .children(presets.into_iter().map(|preset| {
-                            let active = enabled && preset.id == scene;
-                            let is_default = preset.id == bgm_core::loudness::DEFAULT_PRESET_ID;
-                            div()
-                                .id(SharedString::from(format!("export-preset-{}", preset.id)))
-                                .h(px(38.))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(if active {
-                                    fade(theme_color(ACCENT), 0.14)
-                                } else {
-                                    fade(theme_color(CONTROL_TINT), 0.03)
-                                })
-                                .border_1()
-                                .border_color(if active {
-                                    fade(theme_color(ACCENT), 0.35)
-                                } else {
-                                    fade(theme_color(LINE), 0.8)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Err(error) =
-                                        this.library.set_export_settings(true, &preset.id)
-                                    {
-                                        this.notice = error;
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.))
-                                        .text_color(if active {
-                                            theme_color(TEXT)
-                                        } else {
-                                            theme_color(MUTED)
-                                        })
-                                        .child(preset.label),
-                                )
-                                .when(is_default, |this| {
-                                    this.child(
-                                        div()
-                                            .px_1()
-                                            .rounded(px(4.))
-                                            .bg(fade(theme_color(ACCENT), 0.14))
-                                            .text_size(px(9.))
-                                            .text_color(theme_color(ACCENT))
-                                            .child("默认"),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(theme_color(FAINT))
-                                        .child(format!("{} LUFS", preset.target_lufs)),
-                                )
-                                .when(active, |this| {
-                                    this.child(icon("check", 13., theme_color(ACCENT)))
-                                })
-                        }))
-                        .when_some(selected, |this, preset| {
-                            this.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .pt_2()
+            .child(
+                div()
+                    .p_3p5()
+                    .rounded_lg()
+                    .bg(if enabled {
+                        fade(theme_color(ACCENT), 0.1)
+                    } else {
+                        fade(theme_color(CONTROL_TINT), 0.03)
+                    })
+                    .border_1()
+                    .border_color(if enabled {
+                        fade(theme_color(ACCENT), 0.35)
+                    } else {
+                        theme_color(LINE).into()
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
                                 div()
-                                    .text_size(px(10.5))
-                                    .text_color(theme_color(FAINT))
-                                    .child(preset.description),
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("响度归一化"),
                             )
+                            .child(div().text_xs().text_color(theme_color(MUTED)).child(hint)),
+                    )
+                    .child(controls::toggle_switch(
+                        "export-toggle",
+                        enabled,
+                        show_focus,
+                        cx,
+                        |this, _, cx| {
+                            let enabled = this.library.prefs.loudness_normalization;
+                            let scene = this.library.prefs.export_scene.clone();
+                            if let Err(error) = this.library.set_export_settings(!enabled, &scene) {
+                                this.settings_feedback = Some(error);
+                            } else {
+                                this.settings_feedback = None;
+                            }
+                            cx.notify();
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme_color(MUTED))
+                    .child("导出用途预设（点击即可启用）"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .children(presets.into_iter().map(|preset| {
+                        let active = enabled
+                            && selected
+                                .as_ref()
+                                .is_some_and(|current| current.id == preset.id);
+                        let is_default = preset.id == bgm_core::loudness::DEFAULT_PRESET_ID;
+                        controls::keyboard_control(
+                            SharedString::from(format!("export-preset-{}", preset.id)),
+                            show_focus,
+                        )
+                        .p_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(if active {
+                            fade(theme_color(ACCENT), 0.45)
+                        } else {
+                            theme_color(LINE).into()
                         })
+                        .bg(if active {
+                            fade(theme_color(ACCENT), 0.12)
+                        } else {
+                            fade(theme_color(CONTROL_TINT), 0.03)
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.08)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(error) = this.library.set_export_settings(true, &preset.id) {
+                                this.settings_feedback = Some(error);
+                            } else {
+                                this.settings_feedback = None;
+                            }
+                            cx.notify();
+                        }))
+                        .flex()
+                        .items_center()
+                        .gap_3()
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(fade(theme_color(CONTROL_TINT), 0.03))
-                                .text_size(px(10.5))
-                                .text_color(if ffmpeg.is_some() {
-                                    theme_color(MUTED)
-                                } else {
-                                    theme_color(WARNING)
-                                })
-                                .child(if ffmpeg.is_some() {
-                                    icon("check", 12., theme_color(ACCENT)).into_any_element()
-                                } else {
-                                    icon("alert", 12., theme_color(WARNING)).into_any_element()
-                                })
-                                .child(match ffmpeg {
-                                    Some(path) => format!("ffmpeg 已就绪：{}", path.display()),
-                                    None if self.ffmpeg_detected.is_none() => {
-                                        "正在检测 ffmpeg…".to_owned()
-                                    }
-                                    None => "未检测到 ffmpeg，导出将回退为复制原文件".to_owned(),
-                                }),
-                        ),
-                ),
-        )
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme_color(TEXT))
+                                                .child(preset.label),
+                                        )
+                                        .when(is_default, |row| {
+                                            row.child(
+                                                div()
+                                                    .px_1p5()
+                                                    .rounded(px(4.))
+                                                    .bg(fade(theme_color(ACCENT), 0.14))
+                                                    .text_size(px(10.))
+                                                    .text_color(theme_color(ACCENT))
+                                                    .child("推荐默认"),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme_color(FAINT))
+                                        .child(preset.description),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme_color(MUTED))
+                                .child(format!("{} LUFS", preset.target_lufs)),
+                        )
+                        .when(active, |row| {
+                            row.child(icon("check", 14., theme_color(ACCENT)))
+                        })
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(fade(theme_color(CONTROL_TINT), 0.04))
+                    .text_xs()
+                    .text_color(if ffmpeg.is_some() {
+                        theme_color(MUTED)
+                    } else {
+                        theme_color(WARNING)
+                    })
+                    .child(if ffmpeg.is_some() {
+                        icon("check", 13., theme_color(ACCENT)).into_any_element()
+                    } else {
+                        icon("alert", 13., theme_color(WARNING)).into_any_element()
+                    })
+                    .child(match ffmpeg {
+                        Some(path) => format!("ffmpeg 已就绪：{}", path.display()),
+                        None if self.ffmpeg_detected.is_none() => "正在检测 ffmpeg…".to_owned(),
+                        None => "未检测到 ffmpeg，导出时将回退为复制原文件".to_owned(),
+                    }),
+            )
+            .into_any_element()
     }
 
     // ---------- 渲染：壁纸 ----------
 
     fn poll_wallpaper(&mut self, cx: &mut Context<Self>) {
-        if self.library.prefs.wallpaper == "builtin-1" && self.builtin_wallpaper_video.is_none() {
-            self.restore_default_wallpaper("找不到内置视频壁纸".into(), cx);
+        let id = self.library.prefs.wallpaper.as_str();
+        let source = self.wallpaper_view().source;
+        if id != "default" && matches!(source, WallpaperSource::None) {
+            self.restore_default_wallpaper("找不到选定的壁纸文件".into(), cx);
             return;
         }
-        let source = self.wallpaper_view().source;
         let request = source.image_request(self.library.prefs.wallpaper_blur);
         if self
             .wallpaper_request
@@ -11735,18 +14018,6 @@ impl Workspace {
             "gradient-blue" | "gradient-green" | "gradient-red" => {
                 WallpaperSource::Gradient(id.clone())
             }
-            "builtin-1" => {
-                self.builtin_wallpaper_video
-                    .clone()
-                    .map_or(WallpaperSource::None, |path| WallpaperSource::Video {
-                        path,
-                        contain,
-                    })
-            }
-            "builtin-2" => WallpaperSource::Image {
-                asset: wallpaper::Asset::Embedded,
-                contain,
-            },
             "custom" => match prefs.custom_wallpaper.as_deref() {
                 Some(path) if wallpaper::is_video(Path::new(path)) => WallpaperSource::Video {
                     path: PathBuf::from(path),
@@ -11758,6 +14029,41 @@ impl Workspace {
                 },
                 None => WallpaperSource::None,
             },
+            id if id.starts_with("builtin-") => {
+                let matched = self
+                    .builtin_wallpapers
+                    .iter()
+                    .find(|item| item.id == id)
+                    .or_else(|| {
+                        (id == "builtin-1")
+                            .then(|| self.builtin_wallpapers.iter().find(|item| item.video))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        (id == "builtin-2")
+                            .then(|| {
+                                self.builtin_wallpapers
+                                    .iter()
+                                    .find(|item| item.label == "雪山云海")
+                            })
+                            .flatten()
+                    });
+                match matched {
+                    Some(item) if item.video => WallpaperSource::Video {
+                        path: item.path.clone(),
+                        contain,
+                    },
+                    Some(item) => WallpaperSource::Image {
+                        asset: wallpaper::Asset::Local(item.path.clone()),
+                        contain,
+                    },
+                    None if id == "builtin-2" => WallpaperSource::Image {
+                        asset: wallpaper::Asset::Embedded,
+                        contain,
+                    },
+                    None => WallpaperSource::None,
+                }
+            }
             _ => WallpaperSource::None,
         };
         WallpaperView {
@@ -11767,21 +14073,8 @@ impl Workspace {
         }
     }
 
-    fn wallpaper_popover_layer(
-        &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        if !self.wallpaper_popover {
-            return None;
-        }
-        const PANEL_WIDTH: f32 = 300.;
-        const PANEL_PADDING: f32 = 16.;
-        const ROW_PADDING: f32 = 12.;
-        const ROW_GAP: f32 = 8.;
-        const ICON_SIZE: f32 = 13.;
-        const BORDER: f32 = 1.;
-        const NAME_SIZE: f32 = 12.;
+    fn wallpaper_settings(&mut self, _window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let show_focus = self.keyboard_focus_visible;
         let prefs = &self.library.prefs;
         let current = prefs.wallpaper.clone();
         let custom_name = prefs
@@ -11793,344 +14086,266 @@ impl Workspace {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.to_owned())
             })
-            .unwrap_or_else(|| "自定义壁纸".into());
-        let full_name: SharedString = custom_name.into();
-        let selected = current == "custom";
-        let name = if selected {
-            let width = PANEL_WIDTH
-                - 2. * (PANEL_PADDING + ROW_PADDING + ROW_GAP + ICON_SIZE + 2. * BORDER);
-            cx.text_system()
-                .line_wrapper(gpui::font(self.interface_font()), px(NAME_SIZE))
-                .truncate_line(full_name.clone(), px(width), "…", &mut Vec::new())
-        } else {
-            "自定义壁纸…".into()
-        };
+            .unwrap_or_else(|| "选择图片或 MP4 视频…".into());
+        let selected_custom = current == "custom";
         let opacity = self.library.prefs.wallpaper_opacity.clamp(0.0, 1.0);
         let fit = self.library.prefs.wallpaper_fit.clone();
+        let fit_mode = if fit == "contain" { "contain" } else { "cover" };
         let opacity_view = cx.entity().downgrade();
-        let options = [
-            ("default", "默认样式", "当前配色"),
-            ("gradient-blue", "渐变蓝", "深邃静谧"),
-            ("gradient-green", "渐变绿", "翡翠流光"),
-            ("gradient-red", "渐变红", "暖色余晖"),
-            ("builtin-1", "内置壁纸一", "MP4 动态"),
-            ("builtin-2", "雪山云海", "JPG 静态"),
-        ]
-        .into_iter()
-        .filter(|(id, _, _)| *id != "builtin-1" || self.builtin_wallpaper_video.is_some());
 
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.wallpaper_popover = false;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .id("wallpaper-options")
-                        .absolute()
-                        .right(px(52.))
-                        .top(px(62.))
-                        .w(px(PANEL_WIDTH))
-                        .max_h(window.viewport_size().height - px(74.))
-                        .overflow_y_scroll()
-                        .p(px(PANEL_PADDING))
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_lg()
-                        .bg(theme_color(PANEL))
-                        .border_1()
-                        .border_color(theme_color(LINE))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("界面壁纸"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(theme_color(FAINT))
-                                        .child("每日心情换一张"),
-                                ),
+        let mut options: Vec<(String, String, &'static str)> = vec![
+            ("default".into(), "默认样式".into(), "当前配色"),
+            ("gradient-blue".into(), "渐变蓝".into(), "深邃静谧"),
+            ("gradient-green".into(), "渐变绿".into(), "翡翠流光"),
+            ("gradient-red".into(), "渐变红".into(), "暖色余晖"),
+        ];
+        options.extend(self.builtin_wallpapers.iter().map(|item| {
+            (
+                item.id.clone(),
+                item.label.clone(),
+                if item.video {
+                    "MP4 动态"
+                } else {
+                    "静态图片"
+                },
+            )
+        }));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .pt_2()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme_color(MUTED))
+                    .child("预设背景"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(options.into_iter().map(|(id, label, hint)| {
+                        let active = current == id;
+                        controls::keyboard_control(
+                            SharedString::from(format!("wall-{id}")),
+                            show_focus,
                         )
-                        .children(options.into_iter().map(|(id, label, hint)| {
-                            let active = current == id;
-                            div()
-                                .id(SharedString::from(format!("wall-{id}")))
-                                .h(px(34.))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(if active {
-                                    fade(theme_color(ACCENT), 0.14)
-                                } else {
-                                    fade(theme_color(CONTROL_TINT), 0.03)
-                                })
-                                .border_1()
-                                .border_color(if active {
-                                    fade(theme_color(ACCENT), 0.35)
-                                } else {
-                                    fade(theme_color(LINE), 0.8)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Err(error) = this.library.set_wallpaper(id, None) {
-                                        this.notice = error;
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.))
-                                        .text_color(if active {
-                                            theme_color(TEXT)
-                                        } else {
-                                            theme_color(MUTED)
-                                        })
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(theme_color(FAINT))
-                                        .child(hint),
-                                )
-                                .when(active, |this| {
-                                    this.child(icon("check", 13., theme_color(ACCENT)).flex_none())
-                                })
+                        .min_w(px(165.))
+                        .h(px(40.))
+                        .px_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(if active {
+                            fade(theme_color(ACCENT), 0.45)
+                        } else {
+                            theme_color(LINE).into()
+                        })
+                        .bg(if active {
+                            fade(theme_color(ACCENT), 0.14)
+                        } else {
+                            fade(theme_color(CONTROL_TINT), 0.03)
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(fade(theme_color(CONTROL_TINT), 0.08)))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(error) = this.library.set_wallpaper(&id, None) {
+                                this.settings_feedback = Some(error);
+                            } else {
+                                this.settings_feedback = None;
+                            }
+                            cx.notify();
                         }))
                         .child(
                             div()
-                                .id("wall-custom")
-                                .when(selected, |row| {
-                                    row.tooltip(move |_, cx| {
-                                        cx.new(|_| Tip(full_name.clone())).into()
-                                    })
-                                })
-                                .h(px(34.))
-                                .px(px(ROW_PADDING))
-                                .flex()
-                                .items_center()
-                                .gap(px(ROW_GAP))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(if selected {
-                                    fade(theme_color(ACCENT), 0.14)
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if active {
+                                    theme_color(TEXT)
                                 } else {
-                                    fade(theme_color(CONTROL_TINT), 0.03)
+                                    theme_color(MUTED)
                                 })
-                                .border_1()
-                                .border_color(if selected {
-                                    fade(theme_color(ACCENT), 0.35)
-                                } else {
-                                    fade(theme_color(LINE), 0.8)
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.choose_custom_wallpaper(cx);
-                                }))
-                                .child(icon("image", ICON_SIZE, theme_color(MUTED)).flex_none())
-                                .child(
-                                    div().flex_1().min_w(px(0.)).child(
-                                        div()
-                                            .w_full()
-                                            .truncate()
-                                            .text_size(px(NAME_SIZE))
-                                            .text_color(if selected {
-                                                theme_color(TEXT)
-                                            } else {
-                                                theme_color(MUTED)
-                                            })
-                                            .child(name),
-                                    ),
-                                )
-                                .when(selected, |this| {
-                                    this.child(
-                                        icon("check", ICON_SIZE, theme_color(ACCENT)).flex_none(),
-                                    )
-                                }),
+                                .child(label),
                         )
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
                                 .text_size(px(10.))
                                 .text_color(theme_color(FAINT))
-                                .child("透明度")
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .on_children_prepainted(move |bounds, _, cx| {
-                                            opacity_view
-                                                .update(cx, |this, _| {
-                                                    this.wallpaper_opacity_bounds =
-                                                        bounds.first().copied();
-                                                })
-                                                .ok();
-                                        })
-                                        .id("wallpaper-opacity")
-                                        .h(px(14.))
-                                        .flex()
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(Self::wallpaper_opacity_down_at),
-                                        )
-                                        .on_mouse_move(cx.listener(Self::wallpaper_opacity_move))
-                                        .on_mouse_up(
-                                            MouseButton::Left,
-                                            cx.listener(Self::wallpaper_opacity_up_at),
-                                        )
-                                        .on_mouse_up_out(
-                                            MouseButton::Left,
-                                            cx.listener(Self::wallpaper_opacity_up_at),
-                                        )
-                                        .child(
-                                            div()
-                                                .h(px(3.))
-                                                .w_full()
-                                                .rounded_full()
-                                                .bg(theme_color(LINE))
-                                                .child(
-                                                    div()
-                                                        .h_full()
-                                                        .w(relative(opacity))
-                                                        .rounded_full()
-                                                        .bg(theme_color(ACCENT)),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(34.))
-                                        .text_right()
-                                        .text_size(px(10.))
-                                        .text_color(theme_color(MUTED))
-                                        .child(format!("{}%", (opacity * 100.0).round() as i32)),
-                                ),
+                                .child(hint),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(px(10.))
-                                .text_color(theme_color(FAINT))
-                                .child("填充")
-                                .child(
-                                    div()
-                                        .id("wall-fit-cover")
-                                        .px_2()
-                                        .h(px(22.))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.))
-                                        .cursor_pointer()
-                                        .text_size(px(10.5))
-                                        .bg(if fit == "cover" {
-                                            fade(theme_color(ACCENT), 0.16)
-                                        } else {
-                                            fade(theme_color(CONTROL_TINT), 0.04)
-                                        })
-                                        .text_color(if fit == "cover" {
-                                            theme_color(ACCENT)
-                                        } else {
-                                            theme_color(MUTED)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Err(error) =
-                                                this.library.set_wallpaper_fit("cover")
-                                            {
-                                                this.notice = error;
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child("铺满裁剪"),
-                                )
-                                .child(
-                                    div()
-                                        .id("wall-fit-contain")
-                                        .px_2()
-                                        .h(px(22.))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.))
-                                        .cursor_pointer()
-                                        .text_size(px(10.5))
-                                        .bg(if fit == "contain" {
-                                            fade(theme_color(ACCENT), 0.16)
-                                        } else {
-                                            fade(theme_color(CONTROL_TINT), 0.04)
-                                        })
-                                        .text_color(if fit == "contain" {
-                                            theme_color(ACCENT)
-                                        } else {
-                                            theme_color(MUTED)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Err(error) =
-                                                this.library.set_wallpaper_fit("contain")
-                                            {
-                                                this.notice = error;
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child("完整展示"),
-                                ),
-                        )
-                        .child(settings_row(
-                            "图像模糊",
-                            "适用于图片和动态视频",
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(self.tiny_button(
-                                    "−",
-                                    "wall-blur-less",
-                                    cx,
-                                    |this, _, cx| this.adjust_wallpaper_blur(-2, cx),
-                                ))
-                                .child(
-                                    div()
-                                        .w(px(34.))
-                                        .text_center()
-                                        .child(format!("{} px", self.library.prefs.wallpaper_blur)),
-                                )
-                                .child(self.tiny_button(
-                                    "+",
-                                    "wall-blur-more",
-                                    cx,
-                                    |this, _, cx| this.adjust_wallpaper_blur(2, cx),
-                                )),
+                    })),
+            )
+            .child(settings_row(
+                "自定义壁纸",
+                "支持 JPG、PNG、WebP 图片和静音循环 MP4 视频",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(controls::option_chip(
+                        "wall-custom",
+                        custom_name,
+                        selected_custom,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| {
+                            this.choose_custom_wallpaper(cx);
+                        },
+                    ))
+                    .when(current != "default", |row| {
+                        row.child(controls::ui_button(
+                            "wall-reset-default",
+                            "恢复默认",
+                            None,
+                            controls::ButtonTone::Ghost,
+                            true,
+                            true,
+                            show_focus,
+                            cx,
+                            |this, _, cx| {
+                                if let Err(error) = this.library.set_wallpaper("default", None) {
+                                    this.settings_feedback = Some(error);
+                                }
+                                cx.notify();
+                            },
                         ))
-                        .child(
-                            div()
-                                .text_size(px(9.5))
-                                .text_color(theme_color(FAINT))
-                                .child("支持 JPG、PNG、WebP 和 MP4。视频静音循环。"),
-                        ),
+                    }),
+            ))
+            .child(settings_row(
+                "显示强度",
+                "调整壁纸在主界面背景中的显露程度",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(136.))
+                            .on_children_prepainted(move |bounds, _, cx| {
+                                opacity_view
+                                    .update(cx, |this, _| {
+                                        this.wallpaper_opacity_bounds = bounds.first().copied();
+                                    })
+                                    .ok();
+                            })
+                            .id("wallpaper-opacity")
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::wallpaper_opacity_down_at),
+                            )
+                            .on_mouse_move(cx.listener(Self::wallpaper_opacity_move))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(Self::wallpaper_opacity_up_at),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(Self::wallpaper_opacity_up_at),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .h(px(4.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(theme_color(LINE))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(opacity))
+                                            .rounded_full()
+                                            .bg(theme_color(ACCENT)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(relative(opacity))
+                                            .ml(px(-5.))
+                                            .top(px(-3.))
+                                            .size(px(10.))
+                                            .rounded_full()
+                                            .bg(theme_color(ACCENT)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(38.))
+                            .text_right()
+                            .text_xs()
+                            .text_color(theme_color(MUTED))
+                            .child(format!("{}%", (opacity * 100.0).round() as i32)),
+                    ),
+            ))
+            .child(settings_row(
+                "缩放填充",
+                "选择壁纸适应窗口尺寸的方式",
+                controls::segmented_control(
+                    "wall-fit",
+                    &[("cover", "铺满裁剪"), ("contain", "完整展示")],
+                    fit_mode,
+                    show_focus,
+                    cx,
+                    |this, mode, _, cx| {
+                        if let Err(error) = this.library.set_wallpaper_fit(mode) {
+                            this.settings_feedback = Some(error);
+                        }
+                        cx.notify();
+                    },
                 ),
-        )
+            ))
+            .child(settings_row(
+                "图像模糊",
+                "用于图片和视频壁纸（0–20 px）",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(controls::ui_button(
+                        "wall-blur-less",
+                        "−",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        self.library.prefs.wallpaper_blur > 0,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| this.adjust_wallpaper_blur(-2, cx),
+                    ))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .text_center()
+                            .text_xs()
+                            .child(format!("{} px", self.library.prefs.wallpaper_blur)),
+                    )
+                    .child(controls::ui_button(
+                        "wall-blur-more",
+                        "+",
+                        None,
+                        controls::ButtonTone::Secondary,
+                        self.library.prefs.wallpaper_blur < 20,
+                        true,
+                        show_focus,
+                        cx,
+                        |this, _, cx| this.adjust_wallpaper_blur(2, cx),
+                    )),
+            ))
+            .into_any_element()
     }
 
     fn adjust_wallpaper_blur(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -12153,15 +14368,14 @@ impl Workspace {
                 this.update(cx, |this, cx| {
                     let allowed = bgm_core::prefs::is_wallpaper_path(&path.to_string_lossy());
                     if !allowed {
-                        this.notice = "请选择 JPG、PNG、WebP 图片或 MP4 视频".into();
+                        this.show_toast("请选择 JPG、PNG、WebP 图片或 MP4 视频", true, cx);
                     } else if let Err(error) = this
                         .library
                         .set_wallpaper("custom", Some(&path.to_string_lossy()))
                     {
-                        this.notice = error;
+                        this.show_toast(error, true, cx);
                     } else {
-                        this.wallpaper_popover = false;
-                        this.notice = "已应用自定义壁纸".into();
+                        this.show_toast("已应用自定义壁纸", false, cx);
                     }
                     cx.notify();
                 })
@@ -12179,12 +14393,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let panel = self.panel_alpha();
+        if self.schedule_draft.is_some() {
+            return div()
+                .id("schedule-editor-view")
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .bg(fade(theme_color(BG), panel))
+                .child(div().flex().px_6().py_2().child(self.tool_button(
+                    "back-to-schedule",
+                    "chevron-left",
+                    "返回节目单",
+                    false,
+                    cx,
+                    |this, window, cx| this.cancel_schedule_edit(window, cx),
+                )))
+                .child(self.schedule_editor(window, cx));
+        }
         let entries = self.library.schedule.entries.clone();
-        let editing_id = self
-            .schedule_draft
-            .as_ref()
-            .and_then(|draft| draft.id.clone());
-        let draft_open = self.schedule_draft.is_some();
         let now = self.scheduler_now.unwrap_or_else(Self::local_now);
         let current = self.current_program();
         let current_song = self.current_program_song();
@@ -12212,7 +14441,7 @@ impl Workspace {
 
         let mut list = div().flex().flex_col().gap_2().px_6().pb_6();
         for entry in &entries {
-            list = list.child(self.schedule_entry_row(entry, &current, &editing_id, window, cx));
+            list = list.child(self.schedule_entry_row(entry, &current, window, cx));
         }
         if entries.is_empty() {
             list = list.child(
@@ -12402,9 +14631,6 @@ impl Workspace {
                             .child(notice),
                     ),
             )
-            .when(draft_open, |this| {
-                this.child(self.schedule_editor(window, cx))
-            })
             .child(list)
     }
 
@@ -12412,14 +14638,12 @@ impl Workspace {
         &mut self,
         entry: &ScheduleEntry,
         current: &Option<ScheduleEntry>,
-        editing_id: &Option<String>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let panel = self.panel_alpha();
         let is_current = current.as_ref().is_some_and(|item| item.id == entry.id);
-        let is_editing = editing_id.as_deref() == Some(entry.id.as_str());
-        let expanded = self.expanded_schedule.contains(&entry.id) || is_editing;
+        let expanded = self.expanded_schedule.contains(&entry.id);
         let entry_clone = entry.clone();
         let entry_id = entry.id.clone();
         let headline = if entry.songs.is_empty() {
@@ -12546,10 +14770,14 @@ impl Workspace {
                     .gap_3()
                     .child(
                         div()
-                            .id(SharedString::from(format!("slot-toggle-{}", entry.id)))
+                            .id(SharedString::from(format!("slot-expand-{}", entry.id)))
                             .cursor_pointer()
                             .child(icon(
-                                "chevron-down",
+                                if expanded {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                },
                                 14.,
                                 if expanded {
                                     theme_color(ACCENT)
@@ -12697,7 +14925,7 @@ impl Workspace {
                             )),
                     ),
             )
-            .when(expanded && !is_editing, |this| {
+            .when(expanded, |this| {
                 this.child(div().px_4().pb_3().flex().flex_col().gap_1().children(rows))
             })
     }
@@ -12710,33 +14938,22 @@ impl Workspace {
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
-        div()
-            .id(id.into())
-            .h(px(26.))
-            .px_2()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.))
-            .cursor_pointer()
-            .text_size(px(11.))
-            .text_color(if danger {
-                theme_color(DANGER)
+        controls::ui_button(
+            id.into(),
+            label,
+            None,
+            if danger {
+                controls::ButtonTone::Danger
             } else {
-                theme_color(MUTED)
-            })
-            .hover(|style| {
-                style
-                    .bg(fade(theme_color(CONTROL_TINT), 0.08))
-                    .text_color(if danger {
-                        theme_color(DANGER)
-                    } else {
-                        theme_color(TEXT)
-                    })
-            })
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(label)
-            .into_any_element()
+                controls::ButtonTone::Ghost
+            },
+            true,
+            true,
+            self.keyboard_focus_visible,
+            cx,
+            on_click,
+        )
+        .into_any_element()
     }
 
     fn schedule_editor(
@@ -12748,7 +14965,7 @@ impl Workspace {
         let draft_name = self
             .schedule_draft
             .as_ref()
-            .map(|draft| draft.id.is_some())
+            .map(|draft| !draft.original.id.is_empty())
             .unwrap_or(false);
         let volume_enabled = self
             .schedule_draft
@@ -12786,7 +15003,9 @@ impl Workspace {
 
         div()
             .mx_6()
-            .mb_3()
+            .mt_2()
+            .mb_4()
+            .flex_none()
             .p_4()
             .flex()
             .flex_col()
@@ -12795,6 +15014,12 @@ impl Workspace {
             .bg(fade(theme_color(PANEL), panel))
             .border_1()
             .border_color(fade(theme_color(ACCENT), 0.3))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_base()
+                    .child(draft_name_hint),
+            )
             .child(
                 div()
                     .flex()
@@ -12812,7 +15037,9 @@ impl Workspace {
                                     .text_color(theme_color(FAINT))
                                     .child("节目名称"),
                             )
-                            .child(self.schedule_name_field.clone()),
+                            .child(audio_tools::tool_text_input(
+                                self.schedule_name_field.clone(),
+                            )),
                     )
                     .child(
                         div()
@@ -12826,7 +15053,9 @@ impl Workspace {
                                     .text_color(theme_color(FAINT))
                                     .child("开始时间"),
                             )
-                            .child(self.schedule_start_field.clone()),
+                            .child(audio_tools::tool_text_input(
+                                self.schedule_start_field.clone(),
+                            )),
                     )
                     .child(
                         div()
@@ -12840,7 +15069,9 @@ impl Workspace {
                                     .text_color(theme_color(FAINT))
                                     .child("结束时间"),
                             )
-                            .child(self.schedule_end_field.clone()),
+                            .child(audio_tools::tool_text_input(
+                                self.schedule_end_field.clone(),
+                            )),
                     )
                     .child(
                         div()
@@ -12984,13 +15215,15 @@ impl Workspace {
                             .child(format!("{song_count} 首")),
                     )
                     .child(div().flex_1())
-                    .child(self.slot_action(
-                        "draft-autofill",
-                        "自动排期",
-                        false,
-                        cx,
-                        |this, _, cx| this.auto_fill_draft_songs(cx),
-                    ))
+                    .when(song_count > 0, |row| {
+                        row.child(self.slot_action(
+                            "draft-autofill",
+                            "按曲目时长排期",
+                            false,
+                            cx,
+                            |this, _, cx| this.auto_fill_draft_songs(cx),
+                        ))
+                    })
                     .child(self.slot_action(
                         "draft-add",
                         "添加歌曲",
@@ -13009,36 +15242,73 @@ impl Workspace {
                             .py_4()
                             .text_size(px(11.5))
                             .text_color(theme_color(FAINT))
-                            .child("还没有歌曲。点「添加歌曲」，在弹窗中按歌单多选后确定。"),
+                            .child("添加歌曲后，可以逐首设置时间，或按时长自动排期。"),
                     )
                 },
             ))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme_color(FAINT))
-                            .child(format!(
-                                "{draft_name_hint} · 每首歌的起止时间需要落在节目范围内"
-                            )),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        self.tiny_button("取消", "schedule-cancel", cx, |this, window, cx| {
-                            this.cancel_schedule_edit(window, cx)
-                        }),
-                    )
-                    .child(self.tiny_button(
-                        "保存节目",
-                        "schedule-save",
-                        cx,
-                        |this, window, cx| this.save_schedule_draft(window, cx),
-                    )),
+            .children(
+                self.schedule_feedback
+                    .clone()
+                    .map(|error| audio_tools::tool_banner(error, true)),
             )
+            .when(self.schedule_discard_pending, |editor| {
+                editor.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().child(audio_tools::tool_banner(
+                            "节目有未保存的更改。".into(),
+                            false,
+                        )))
+                        .child(self.tiny_button(
+                            "继续编辑",
+                            "keep-schedule-draft",
+                            cx,
+                            |this, _, cx| {
+                                this.schedule_discard_pending = false;
+                                cx.notify();
+                            },
+                        ))
+                        .child(self.tiny_button(
+                            "放弃更改",
+                            "discard-schedule-draft",
+                            cx,
+                            |this, window, cx| {
+                                this.close_schedule_draft(window, cx);
+                            },
+                        )),
+                )
+            })
+            .when(!self.schedule_discard_pending, |editor| {
+                editor.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme_color(MUTED))
+                                .child("曲目的播放时间应在节目时段内。"),
+                        )
+                        .child(div().flex_1())
+                        .child(self.tiny_button(
+                            "取消",
+                            "schedule-cancel",
+                            cx,
+                            |this, window, cx| this.cancel_schedule_edit(window, cx),
+                        ))
+                        .child(self.hero_button(
+                            "schedule-save",
+                            "check",
+                            "保存节目",
+                            true,
+                            cx,
+                            |this, window, cx| this.save_schedule_draft(window, cx),
+                        )),
+                )
+            })
     }
 
     fn draft_song_row(
@@ -13216,6 +15486,15 @@ impl Render for Tip {
     }
 }
 
+fn settings_section(title: &'static str) -> gpui::Div {
+    div()
+        .pt_4()
+        .pb_1()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_sm()
+        .child(title)
+}
+
 fn detail_button(
     id: &'static str,
     glyph: &'static str,
@@ -13237,6 +15516,159 @@ fn detail_button(
         .text_size(px(13.))
         .child(icon(glyph, 14., gpui::white()))
         .child(label)
+}
+
+#[derive(Clone, Copy)]
+enum ModelStatusTone {
+    Ready,
+    Warning,
+    Neutral,
+}
+
+impl ModelStatusTone {
+    fn fg(self) -> Rgba {
+        match self {
+            Self::Ready => theme_color(ACCENT),
+            Self::Warning => theme_color(WARNING),
+            Self::Neutral => theme_color(MUTED),
+        }
+    }
+
+    fn icon_bg(self) -> gpui::Hsla {
+        match self {
+            Self::Ready => fade(theme_color(ACCENT), 0.14),
+            Self::Warning => fade(theme_color(WARNING), 0.16),
+            Self::Neutral => fade(theme_color(CONTROL_TINT), 0.08),
+        }
+    }
+
+    fn pill_bg(self) -> gpui::Hsla {
+        match self {
+            Self::Ready => fade(theme_color(ACCENT), 0.14),
+            Self::Warning => fade(theme_color(WARNING), 0.16),
+            Self::Neutral => fade(theme_color(CONTROL_TINT), 0.09),
+        }
+    }
+}
+
+fn display_asr_model_name(id: &str) -> String {
+    if id == DEFAULT_MODEL_NAME {
+        "Qwen3-ASR 0.6B".to_owned()
+    } else {
+        id.to_owned()
+    }
+}
+
+fn model_card_shell(highlight: bool) -> gpui::Div {
+    div()
+        .rounded_lg()
+        .bg(fade(theme_color(CONTROL_TINT), 0.035))
+        .border_1()
+        .border_color(if highlight {
+            fade(theme_color(ACCENT), 0.35)
+        } else {
+            theme_color(LINE).into()
+        })
+        .overflow_hidden()
+}
+
+fn model_status_pill(label: impl Into<SharedString>, tone: ModelStatusTone) -> gpui::Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .flex_none()
+        .bg(tone.pill_bg())
+        .text_size(px(10.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tone.fg())
+        .child(label.into())
+}
+
+fn model_progress_bar(percent: f32) -> gpui::Div {
+    div().px_3p5().pb_3().child(
+        div()
+            .h(px(4.))
+            .rounded_full()
+            .overflow_hidden()
+            .bg(theme_color(LINE))
+            .child(
+                div()
+                    .h_full()
+                    .w(relative(percent.clamp(0.0, 1.0)))
+                    .bg(theme_color(ACCENT)),
+            ),
+    )
+}
+
+fn model_card_header(
+    icon_name: &'static str,
+    tone: ModelStatusTone,
+    title: &str,
+    pill: Option<(&str, ModelStatusTone)>,
+    detail: &str,
+    accessory: impl IntoElement,
+) -> gpui::Div {
+    div()
+        .px_3p5()
+        .py_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .size(px(32.))
+                .flex_none()
+                .rounded_md()
+                .bg(tone.icon_bg())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(icon_name, 15., tone.fg())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme_color(TEXT))
+                                .truncate()
+                                .child(title.to_owned()),
+                        )
+                        .when_some(pill, |row, (label, pill_tone)| {
+                            row.child(model_status_pill(label.to_owned(), pill_tone))
+                        }),
+                )
+                .when(!detail.is_empty(), |col| {
+                    col.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme_color(MUTED))
+                            .truncate()
+                            .child(detail.to_owned()),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(accessory),
+        )
 }
 
 fn settings_row(title: &str, detail: &str, accessory: impl IntoElement) -> gpui::AnyElement {

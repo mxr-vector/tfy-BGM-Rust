@@ -1,6 +1,8 @@
 //! 曲库文件监听，含 700 ms 事件防抖和 30 秒补偿扫描。
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,9 +22,10 @@ pub struct LibraryWatcher {
 }
 
 impl LibraryWatcher {
-    pub fn start(root: &Path) -> Result<Self, String> {
-        if !root.is_dir() {
-            return Err(format!("曲库目录不存在：{}", root.display()));
+    pub fn start_many(roots: &[PathBuf]) -> Result<Self, String> {
+        let targets = deduplicate_watch_roots(roots);
+        if targets.is_empty() {
+            return Err("没有可监听的音乐文件夹".into());
         }
         let last_event = Arc::new(Mutex::new(None));
         let thread_last_event = Arc::clone(&last_event);
@@ -36,9 +39,19 @@ impl LibraryWatcher {
                 }
             })
             .map_err(|error| format!("无法创建文件监听器：{error}"))?;
-        watcher
-            .watch(root, RecursiveMode::Recursive)
-            .map_err(|error| format!("无法监听曲库目录 {}：{error}", root.display()))?;
+        let mut watched = 0usize;
+        let mut last_error = None;
+        for root in &targets {
+            match watcher.watch(root, RecursiveMode::Recursive) {
+                Ok(()) => watched += 1,
+                Err(error) => {
+                    last_error = Some(format!("无法监听文件夹 {}：{error}", root.display()));
+                }
+            }
+        }
+        if watched == 0 {
+            return Err(last_error.unwrap_or_else(|| "无法启动文件监听".into()));
+        }
 
         Ok(Self {
             last_event,
@@ -52,6 +65,31 @@ impl LibraryWatcher {
             Err(_) => fallback_due,
         }
     }
+}
+
+fn deduplicate_watch_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut canonical: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let real = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if seen.insert(real.clone()) {
+            canonical.push((real, root.clone()));
+        }
+    }
+    canonical.sort_by_key(|(real, _)| real.components().count());
+    let mut kept: Vec<PathBuf> = Vec::new();
+    let mut result = Vec::new();
+    for (real, raw) in canonical {
+        if kept.iter().any(|ancestor| real.starts_with(ancestor)) {
+            continue;
+        }
+        kept.push(real);
+        result.push(raw);
+    }
+    result
 }
 
 fn take_scan_due(event: &mut Option<Instant>, now: Instant, fallback_due: bool) -> bool {
@@ -104,7 +142,6 @@ mod tests {
     use super::*;
     use notify::EventKind;
     use notify::event::{CreateKind, Flag, RemoveKind};
-    use std::path::PathBuf;
 
     #[test]
     fn scan_consumes_only_a_ready_notification() {
@@ -146,5 +183,18 @@ mod tests {
         assert!(is_relevant(&folder));
         let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
         assert!(is_relevant(&rescan));
+    }
+
+    #[test]
+    fn deduplicates_parent_and_child_watch_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let child = parent.join("child");
+        let sibling = temp.path().join("sibling");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+
+        let deduped = deduplicate_watch_roots(&[child, parent.clone(), sibling.clone(), parent]);
+        assert_eq!(deduped.len(), 2);
     }
 }

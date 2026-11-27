@@ -1,0 +1,16 @@
+# playlist-migration Specification
+
+## Purpose
+
+支持从网易云音乐、QQ 音乐和汽水音乐的公开分享链接批量读取歌单并预览、复制或导出为 UTF-8 TXT。
+
+## Requirements
+
+### Requirement: 公开歌单批量读取
+
+歌单迁移 SHALL 支持网易云音乐、QQ 音乐和汽水音乐的公开分享链接，保留各来源曲序、曲名与艺人。
+
+#### Scenario: 混合成功与失败
+
+- **WHEN** 批量提交公开歌单，其中一个来源无效或只返回部分曲目
+- **THEN** 保留其余结果，在各自来源显示读取状态，按输入顺序预览并可复制或保存 UTF-8 TXT

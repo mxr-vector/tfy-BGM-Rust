@@ -394,7 +394,15 @@ mod tests {
         touch(&root.join("cheerful/notes.txt"));
         touch(&root.join("epic/x.MP3"));
 
-        let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
+        let mut categories = categories();
+        categories.sort_by_key(|category| match category.id.as_str() {
+            "cheerful" => 0,
+            "epic" => 1,
+            _ => 2,
+        });
+        categories.retain(|category| matches!(category.id.as_str(), "cheerful" | "epic"));
+
+        let snapshot = scan_library(root, LibrarySource::Bundled, &categories);
 
         let keys: Vec<_> = snapshot
             .songs
@@ -403,10 +411,12 @@ mod tests {
             .collect();
         assert_eq!(keys, ["cheerful/a_first", "cheerful/z_last", "epic/x"]);
         assert_eq!(snapshot.songs[0].title, "a first");
+        assert_eq!(snapshot.categories.len(), 2);
+        assert_eq!(snapshot.categories[0].id, "cheerful");
         assert_eq!(snapshot.categories[0].count, 2);
         assert_eq!(snapshot.categories[0].icon, "sparkles");
-        assert_eq!(snapshot.categories[3].count, 1);
-        assert_eq!(snapshot.categories[5].count, 0);
+        assert_eq!(snapshot.categories[1].id, "epic");
+        assert_eq!(snapshot.categories[1].count, 1);
         assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
     }
 
@@ -493,22 +503,27 @@ mod tests {
     }
 
     #[test]
-    fn scans_case_variant_audio_names_as_one_track() {
+    #[cfg_attr(
+        any(windows, target_os = "macos"),
+        ignore = "Windows 与默认 macOS APFS 大小写不敏感，无法在同一目录制造同名不同扩展的重复文件"
+    )]
+    fn skips_duplicate_keys() {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
-        let category = root.join("cheerful");
-        fs::create_dir_all(&category).unwrap();
-        touch(&category.join("same.mp3"));
-        touch(&category.join("same.MP3"));
-        let case_sensitive = fs::read_dir(&category).unwrap().count() == 2;
+        fs::create_dir_all(root.join("cheerful")).unwrap();
+        touch(&root.join("cheerful/same.mp3"));
+        touch(&root.join("cheerful/same.MP3"));
 
         let snapshot = scan_library(root, LibrarySource::Bundled, &categories());
-        let warned = snapshot
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("跳过同名曲目"));
 
         assert_eq!(snapshot.songs.len(), 1);
-        assert_eq!(warned, case_sensitive, "{:?}", snapshot.warnings);
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|w| w.contains("跳过同名曲目 same.mp3")),
+            "{:?}",
+            snapshot.warnings
+        );
     }
 }

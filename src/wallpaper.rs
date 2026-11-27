@@ -136,19 +136,132 @@ pub fn is_video(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
 }
 
-pub fn builtin_video() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let resources = if let Some(contents) = executable
-        .parent()?
-        .parent()
-        .filter(|path| path.ends_with("Contents"))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinWallpaper {
+    pub id: String,
+    pub label: String,
+    pub path: PathBuf,
+    pub video: bool,
+}
+
+pub fn discover_builtin() -> Vec<BuiltinWallpaper> {
+    let mut dirs = Vec::new();
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(contents) = executable
+            .parent()
+            .and_then(|dir| dir.parent())
+            .filter(|path| path.ends_with("Contents"))
     {
-        contents.join("Resources")
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+        dirs.push(contents.join("Resources/assets/bg"));
+    }
+    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/bg"));
+    discover_in_dirs(&dirs)
+}
+
+fn discover_in_dirs(dirs: &[PathBuf]) -> Vec<BuiltinWallpaper> {
+    let mut assets = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for dir in dirs {
+        for item in discover_in_dir(dir) {
+            if seen_ids.insert(item.id.clone()) {
+                assets.push(item);
+            }
+        }
+    }
+    assets
+}
+
+fn discover_in_dir(dir: &Path) -> Vec<BuiltinWallpaper> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let path = resources.join("bg/1.mp4");
-    path.is_file().then_some(path)
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+
+    let mut stem_counts = std::collections::HashMap::<&str, usize>::new();
+    for path in &files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !supported_builtin(path, name) {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            *stem_counts.entry(stem).or_insert(0) += 1;
+        }
+    }
+
+    let mut found = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for path in &files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !supported_builtin(path, name) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let base = builtin_id(stem);
+        let mut id = base.clone();
+        let mut suffix = 2;
+        while !seen_ids.insert(id.clone()) {
+            id = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        let label = if stem_counts.get(stem).copied().unwrap_or(0) > 1 {
+            name.to_owned()
+        } else {
+            stem.to_owned()
+        };
+        found.push(BuiltinWallpaper {
+            id,
+            label,
+            video: is_video(path),
+            path: path.clone(),
+        });
+    }
+    found
+}
+
+fn supported_builtin(path: &Path, name: &str) -> bool {
+    !name.starts_with('.')
+        && !name.to_ascii_lowercase().contains(".thumb.")
+        && path
+            .to_str()
+            .is_some_and(bgm_core::prefs::is_wallpaper_path)
+}
+
+fn builtin_id(stem: &str) -> String {
+    let mut suffix = String::new();
+    for ch in stem.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            suffix.push(ch);
+        } else if !suffix.ends_with('-') {
+            suffix.push('-');
+        }
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        format!("builtin-{:016x}", fnv1a(stem.as_bytes()))
+    } else {
+        format!("builtin-{suffix}")
+    }
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
 }
 
 fn decode_bytes(bytes: &[u8]) -> Result<DynamicImage, String> {
@@ -199,8 +312,40 @@ mod tests {
             }
             .prepare()
             .unwrap();
-            assert_eq!(image.size(0), gpui::size(1920.into(), 1012.into()));
-            assert_eq!(image.as_bytes(0).unwrap().len(), 1920 * 1012 * 4);
+            assert_eq!(image.size(0), gpui::size(1920.into(), 1013.into()));
+            assert_eq!(image.as_bytes(0).unwrap().len(), 1920 * 1013 * 4);
         }
+    }
+
+    #[test]
+    fn discovers_builtin_wallpapers_skips_thumbnails_and_disambiguates_stems() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("bundle");
+        let fallback = temp.path().join("dev");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::write(primary.join("幻彩流光.mp4"), b"v").unwrap();
+        std::fs::write(primary.join("幻彩流光.thumb.jpg"), b"t").unwrap();
+        std::fs::write(primary.join(".hidden.jpg"), b"h").unwrap();
+        std::fs::write(primary.join("scene.jpg"), b"a").unwrap();
+        std::fs::write(primary.join("scene.png"), b"b").unwrap();
+        std::fs::write(fallback.join("scene.jpg"), b"dup").unwrap();
+        std::fs::write(fallback.join("雪山云海.jpg"), b"s").unwrap();
+
+        let items = discover_in_dirs(&[primary.clone(), fallback]);
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].label, "scene.jpg");
+        assert_eq!(items[0].id, "builtin-scene");
+        assert_eq!(items[0].path, primary.join("scene.jpg"));
+        assert_eq!(items[1].label, "scene.png");
+        assert_eq!(items[1].id, "builtin-scene-2");
+        assert!(items[2].video);
+        assert_eq!(items[2].label, "幻彩流光");
+        assert!(items[2].id.starts_with("builtin-"));
+        assert_eq!(items[3].label, "雪山云海");
+        assert_eq!(
+            builtin_id("雪山云海"),
+            format!("builtin-{:016x}", fnv1a("雪山云海".as_bytes()))
+        );
     }
 }

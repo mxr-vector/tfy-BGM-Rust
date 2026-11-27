@@ -1,13 +1,13 @@
 [
   {
-    "id": "cheerful",
-    "nameZh": "欢快",
-    "nameEn": "Cheerful",
-    "labelEn": "CHEERFUL / UPBEAT",
-    "color": "#f59e0b",
-    "icon": "sparkles",
-    "title": "欢快节奏 · Cheerful & Upbeat",
-    "description": "适用于生活 Vlog、开箱解说、美食探店、搞笑趣味、快闪卡点等轻松愉悦的视频剪辑。"
+    "id": "epic",
+    "nameZh": "史诗",
+    "nameEn": "Epic",
+    "labelEn": "EPIC / MAJESTIC",
+    "color": "#ef4444",
+    "icon": "flame",
+    "title": "震撼史诗 · Epic & Grand",
+    "description": "气势磅礴的大片感战歌，适合燃向混剪、企业宣传片、运动高光、游戏集锦、宏大叙事。"
   },
   {
     "id": "solitude",
@@ -30,16 +30,6 @@
     "description": "温情故事、毕业季纪念、告白与重逢、岁月光影、情感纪实剪辑首选配乐。"
   },
   {
-    "id": "epic",
-    "nameZh": "史诗",
-    "nameEn": "Epic",
-    "labelEn": "EPIC / MAJESTIC",
-    "color": "#ef4444",
-    "icon": "flame",
-    "title": "震撼史诗 · Epic & Grand",
-    "description": "气势磅礴的大片感战歌，适合燃向混剪、企业宣传片、运动高光、游戏集锦、宏大叙事。"
-  },
-  {
     "id": "gufeng",
     "nameZh": "古风",
     "nameEn": "GuFeng",
@@ -48,6 +38,16 @@
     "icon": "feather",
     "title": "东方古风 · Traditional Chinese",
     "description": "笛子、古筝、二胡等国风雅韵，完美契合汉服国风、古建文旅、武侠唯美剪辑。"
+  },
+  {
+    "id": "cheerful",
+    "nameZh": "欢快",
+    "nameEn": "Cheerful",
+    "labelEn": "CHEERFUL / UPBEAT",
+    "color": "#f59e0b",
+    "icon": "sparkles",
+    "title": "欢快节奏 · Cheerful & Upbeat",
+    "description": "适用于生活 Vlog、开箱解说、美食探店、搞笑趣味、快闪卡点等轻松愉悦的视频剪辑。"
   },
   {
     "id": "country",

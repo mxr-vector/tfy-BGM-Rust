@@ -182,6 +182,26 @@ fn integrated(blocks: &[f64], hop: usize, frames: usize) -> Option<f64> {
     lufs(sum / f64::from(count))
 }
 
+pub fn speech_gain(samples: &[f32], rate: u32) -> f32 {
+    let (mut shelf, mut high_pass) = weighting(f64::from(rate));
+    let hop = (rate as usize / 10).max(1);
+    let mut peak = 0.0_f32;
+    let mut energy = Vec::with_capacity(samples.len().div_ceil(hop));
+    for block in samples.chunks(hop) {
+        let mut sum = 0.0;
+        for &sample in block {
+            peak = peak.max(sample.abs());
+            let weighted = high_pass.sample(shelf.sample(f64::from(sample)));
+            sum += weighted * weighted;
+        }
+        energy.push(sum);
+    }
+    let loudness = integrated(&energy, hop, samples.len())
+        .or_else(|| lufs(energy.iter().sum::<f64>() / samples.len().max(1) as f64));
+    let loudness_gain = loudness.map_or(1.0, |level| 10_f64.powf((-16.0 - level) / 20.0) as f32);
+    loudness_gain.min(0.89125 / peak.max(f32::EPSILON))
+}
+
 pub fn analyse(track: &PcmTrack) -> Analysis {
     let channels = usize::from(track.channels.get());
     let rate = track.sample_rate.get() as usize;

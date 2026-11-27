@@ -660,3 +660,158 @@ pub use native::{
 pub fn wallpaper_window_active(window: &gpui::Window) -> bool {
     window.is_window_active() && window_visible(window)
 }
+
+#[cfg(target_os = "macos")]
+pub fn unhide_and_focus_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        if app.isHidden() {
+            app.unhide(None);
+        }
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn unhide_and_focus_app() {}
+
+#[cfg(unix)]
+mod instance {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
+
+    pub struct SingleInstance {
+        _lock: File,
+        sock_path: PathBuf,
+        wake_rx: Option<UnboundedReceiver<()>>,
+    }
+
+    pub enum AcquireOutcome {
+        Primary(SingleInstance),
+        AlreadyRunning,
+    }
+
+    impl SingleInstance {
+        pub fn acquire(config_dir: &Path) -> Result<AcquireOutcome, String> {
+            fs::create_dir_all(config_dir).map_err(|error| error.to_string())?;
+            let lock_path = config_dir.join(".instance.lock");
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|error| error.to_string())?;
+            if lock.try_lock().is_err() {
+                let sock_path = config_dir.join(".instance.sock");
+                if let Ok(mut stream) = UnixStream::connect(&sock_path) {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+                    let _ = stream.write_all(b"show\n");
+                }
+                return Ok(AcquireOutcome::AlreadyRunning);
+            }
+            let sock_path = config_dir.join(".instance.sock");
+            let _ = fs::remove_file(&sock_path);
+            let listener = UnixListener::bind(&sock_path).map_err(|error| error.to_string())?;
+            let (wake_tx, wake_rx) = mpsc::unbounded_channel();
+            std::thread::Builder::new()
+                .name("tfy-single-instance".into())
+                .spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        let mut stream = stream;
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                        let mut buf = [0u8; 32];
+                        if let Ok(n) = stream.read(&mut buf)
+                            && buf[..n].starts_with(b"show")
+                        {
+                            let _ = wake_tx.send(());
+                        }
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(AcquireOutcome::Primary(Self {
+                _lock: lock,
+                sock_path,
+                wake_rx: Some(wake_rx),
+            }))
+        }
+
+        pub fn take_receiver(&mut self) -> Option<UnboundedReceiver<()>> {
+            self.wake_rx.take()
+        }
+    }
+
+    impl Drop for SingleInstance {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.sock_path);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn single_instance_detects_second_launch_and_delivers_wake_signal() {
+            let first_dir = tempfile::tempdir().unwrap();
+            let second_dir = tempfile::tempdir().unwrap();
+            let AcquireOutcome::Primary(mut guard) =
+                SingleInstance::acquire(first_dir.path()).unwrap()
+            else {
+                panic!("expected primary lock");
+            };
+            let mut rx = guard.take_receiver().unwrap();
+            assert!(matches!(
+                SingleInstance::acquire(first_dir.path()).unwrap(),
+                AcquireOutcome::AlreadyRunning
+            ));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            });
+            assert!(matches!(
+                SingleInstance::acquire(second_dir.path()).unwrap(),
+                AcquireOutcome::Primary(_)
+            ));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod instance {
+    use std::path::Path;
+
+    pub struct SingleInstance;
+
+    pub enum AcquireOutcome {
+        Primary(SingleInstance),
+        AlreadyRunning,
+    }
+
+    impl SingleInstance {
+        pub fn acquire(_: &Path) -> Result<AcquireOutcome, String> {
+            Ok(AcquireOutcome::Primary(Self))
+        }
+
+        pub fn take_receiver(&mut self) -> Option<tokio::sync::mpsc::UnboundedReceiver<()>> {
+            None
+        }
+    }
+}
+
+pub use instance::{AcquireOutcome as InstanceOutcome, SingleInstance};

@@ -48,3 +48,17 @@ F02 与 F17 的集成测试共用曲目稳定键，验证手动恢复及派生�
 - [播放与设置交互归档](changes/archive/2026-11-23-refine-player-settings/tasks.md)
 - [播放页滚动歌词与切歌归档](changes/archive/2026-11-23-scroll-now-playing-lyrics/tasks.md)
 - [播放、诊断与壁纸内存优化归档](changes/archive/2026-11-24-reduce-gpui-memory-retention/tasks.md)
+- [工作区交互升级与原生验收](changes/archive/2026-11-27-refine-desktop-experience/tasks.md)
+- [曲库不可读与重连恢复归档](changes/archive/2026-11-28-refine-library-recovery/tasks.md)
+- [多音乐文件夹与界面交互升级归档](changes/archive/2026-11-28-upgrade-library-folders-and-ux/tasks.md)
+
+
+## 上游最新同步（`origin/bgm-tauri2@0f2cc01`）
+
+已完成基于主线 `bgm-tauri2@0f2cc01` 的业务与共享核心全量同步：`core/` 已原样同步该提交（仅在 `#[cfg(test)]` 下保留 2 处 macOS 测试兼容守卫，非测试代码逐字节一致），同步 `prefs.json` v5（`ttsDownloadUrls`）、`bgm_core::ops::trash_indexed_files`、`bgm_core::loudness::normalize_wav`、`bgm_core::process`，并完整接入内置 11 个参考音色（`models/voices/` + `prompts.json`）及新版内置壁纸（`assets/bg/` 动态发现、移除旧版 `1.mp4`/`2.jpg`）、曲目菜单「在 Finder 中显示」、应用单实例锁与唤起聚焦。
+
+| 功能 | OpenSpec | 当前进度 |
+| --- | --- | --- |
+| F19 音频索引、以声搜声与查重 | [归档任务](changes/archive/2026-11-28-align-audio-index/tasks.md) | 已对齐主线行为与纯 Rust FFT/subband 指纹引擎，完成真实多格式建索引、7.99s 片段命中（91%）、3 曲相似聚组（100%）与 `.tfy-trash/` 按文件软删除实测（保留收藏与循环点）。 |
+| F20 公开歌单迁移 | [归档任务](changes/archive/2026-11-28-align-playlist-migration/tasks.md) | 已对齐网易云、QQ 音乐（适配 `i.y.qq.com/qzone-music`）、汽水音乐抓取、SSRF/Redirect 防护与 Fake-IP TUN 下 DoH 公网解析回退，完成三平台真实公开歌单抓取实测。 |
+| F21 文生语音 | [归档任务](changes/archive/2026-11-28-align-text-to-speech/tasks.md) | 已对齐 5 种官方模型规格与校验、`prefs.ttsDownloadUrls` 持久化和下载源验证、Kokoro v1.1（103 说话人）、ZipVoice 共享词典/声码器、CosyVoice3 Python 3.11 CPU 运行时、11 个内置参考音色及缺逐字稿拦截（`0f2cc01`）；已完成 Kokoro INT8、ZipVoice INT8 与 CosyVoice3 ONNX 真实下载与 CPU 合成实测。已修复长脚本导出误触发参考音频的 15 秒限制，并用 Kokoro INT8 验证约 72 秒 WAV 输出。当前结果就绪后，底部主按钮切换为试听。 |

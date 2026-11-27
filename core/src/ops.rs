@@ -361,6 +361,107 @@ pub fn trash_songs(root: &Path, categories: &[Category], songs: &[&Song]) -> Bat
     outcome
 }
 
+/// 按索引中的原始路径软删除文件，覆盖曲库视图因同名而忽略的副本。
+///
+/// 路径必须位于当前注册分类目录内；拒绝绝对路径穿越、符号链接和回收站重入。
+pub fn trash_indexed_files(
+    root: &Path,
+    categories: &[Category],
+    paths: &[PathBuf],
+) -> BatchOutcome {
+    let mut outcome = BatchOutcome {
+        report: BatchReport::new(paths.len()),
+        ..BatchOutcome::default()
+    };
+    if paths.is_empty() {
+        return outcome;
+    }
+    let batch_dir = unique_trash_dir(root);
+    if let Err(error) = fs::create_dir_all(&batch_dir) {
+        outcome.report.fail(format!(
+            "无法创建回收站目录 {}：{error}",
+            batch_dir.display()
+        ));
+        return outcome;
+    }
+    let mut used = HashSet::new();
+    for path in paths {
+        let source = match indexed_file_path(root, categories, path) {
+            Ok(path) => path,
+            Err(error) => {
+                outcome.report.fail(format!("{}：{error}", path.display()));
+                continue;
+            }
+        };
+        if !source.is_file() {
+            outcome
+                .report
+                .skip(format!("{}：文件已不存在，已跳过", source.display()));
+            continue;
+        }
+        let category = source
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut song = Song {
+            key: String::new(),
+            title: source
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "audio".to_owned()),
+            file_name: source
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            category,
+            path: String::new(),
+            artist: None,
+            album: None,
+            genre: None,
+            duration_ms: None,
+        };
+        song.key = format!("{}/{}", song.category, song.title);
+        let target = unique_trash_path(&batch_dir, &song, &mut used);
+        match fs::rename(&source, &target) {
+            Ok(()) => outcome.report.succeeded += 1,
+            Err(error) => outcome
+                .report
+                .fail(format!("{}：{error}", source.display())),
+        }
+    }
+    if outcome.report.succeeded > 0 {
+        outcome.report.notice = Some(format!(
+            "已移入回收站：{}（可手动恢复）",
+            batch_dir.display()
+        ));
+    }
+    outcome
+}
+
+fn indexed_file_path(
+    root: &Path,
+    categories: &[Category],
+    path: &Path,
+) -> Result<PathBuf, OpError> {
+    if !path.is_absolute() || path.is_symlink() || !is_audio(path) {
+        return Err(OpError::InvalidFile(path.to_path_buf()));
+    }
+    let source = fs::canonicalize(path).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => OpError::SourceMissing(path.to_path_buf()),
+        _ => OpError::Io(error),
+    })?;
+    let category = categories.iter().find(|category| {
+        root.join(&category.id)
+            .canonicalize()
+            .is_ok_and(|dir| source.parent() == Some(dir.as_path()))
+    });
+    if category.is_none() {
+        return Err(OpError::InvalidFile(path.to_path_buf()));
+    }
+    Ok(source)
+}
+
 /// 把曲目复制（或按设置做响度归一化）到指定目录，同名时追加序号。
 pub fn export_songs(
     root: &Path,
@@ -793,6 +894,26 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(files, 2);
+    }
+
+    #[test]
+    fn indexed_trash_accepts_hidden_copies_and_rejects_paths_outside_categories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        fs::create_dir_all(root.join("epic")).unwrap();
+        let indexed = root.join("epic/copy.wav");
+        fs::write(&indexed, b"audio").unwrap();
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"audio").unwrap();
+
+        let rejected = trash_indexed_files(&root, &categories(), std::slice::from_ref(&outside));
+        assert_eq!(rejected.report.failed, 1);
+        assert!(outside.is_file());
+
+        let outcome = trash_indexed_files(&root, &categories(), &[indexed]);
+        assert_eq!(outcome.report.succeeded, 1);
+        assert!(!root.join("epic/copy.wav").exists());
+        assert!(outcome.report.notice.unwrap().contains(TRASH_DIR));
     }
 
     #[test]

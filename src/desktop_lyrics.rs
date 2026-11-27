@@ -9,6 +9,7 @@ use gpui::{
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::design::{ACCENT, BG, LINE, MUTED, PANEL, PANEL_LIGHT, TEXT, theme_color};
 use crate::lyrics;
 
 pub const STYLE_KEY: &str = "desktopLyricsStyle";
@@ -269,7 +270,7 @@ impl Render for Overlay {
                         .when(!self.style.locked, |bar| {
                             bar.child(button(
                                 "lyrics-settings",
-                                "设置",
+                                "歌词样式",
                                 self.handle.clone(),
                                 Event::Settings,
                             ))
@@ -314,11 +315,17 @@ impl Settings {
         let mut style = self.style.clone();
         change(&mut style);
         button(id, label, self.handle.clone(), Event::Style(style))
+            .bg(theme_color(BG))
+            .text_color(theme_color(TEXT))
+            .border_1()
+            .border_color(theme_color(LINE))
+            .hover(|style| style.bg(theme_color(PANEL_LIGHT)))
     }
 
     fn stepper(
         &self,
         label: &str,
+        unit: &str,
         field: fn(&mut Style) -> &mut u16,
         step: u16,
         min: u16,
@@ -335,7 +342,12 @@ impl Settings {
                     "−",
                     |style| *field(style) = value.saturating_sub(step).max(min),
                 ))
-                .child(div().w(px(72.)).text_center().child(value.to_string()))
+                .child(
+                    div()
+                        .w(px(72.))
+                        .text_center()
+                        .child(format!("{value}{unit}")),
+                )
                 .child(
                     self.change(SharedString::from(format!("{label}-plus")), "+", |style| {
                         *field(style) = value.saturating_add(step).min(max)
@@ -347,12 +359,19 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let lead = setting("高亮提前").children([0, 1, 2].into_iter().map(|lead| {
-            self.change(("lead", lead as u32), format!("{lead} 秒"), |style| {
+        let lead = setting("高亮提前量").children([0, 1, 2].into_iter().map(|lead| {
+            let label = if lead == 0 {
+                "同步".into()
+            } else {
+                format!("{lead} 秒")
+            };
+            self.change(("lead", lead as u32), label, |style| {
                 style.lead_seconds = lead
             })
             .when(self.style.lead_seconds == lead, |button| {
-                button.bg(rgb(0x345446))
+                button
+                    .bg(theme_color(PANEL_LIGHT))
+                    .text_color(theme_color(ACCENT))
             })
         }));
         let colors = setting("高亮颜色").children(COLORS.into_iter().map(|(label, color)| {
@@ -362,7 +381,7 @@ impl Render for Settings {
                 .h(px(26.))
                 .bg(rgb(swatch))
                 .when(self.style.highlight == color, |button| {
-                    button.border_2().border_color(gpui::white())
+                    button.border_2().border_color(theme_color(TEXT))
                 })
                 .tooltip(move |_, cx| cx.new(|_| ColorLabel(label)).into())
         }));
@@ -377,31 +396,57 @@ impl Render for Settings {
             .map(|(name, family)| {
                 self.change(name, name, |style| style.font_family = family.into())
                     .when(self.style.font_family == family, |button| {
-                        button.bg(rgb(0x345446))
+                        button
+                            .bg(theme_color(PANEL_LIGHT))
+                            .text_color(theme_color(ACCENT))
                     })
             }),
         );
         div()
+            .id("desktop-lyrics-settings")
             .size_full()
+            .overflow_y_scroll()
             .p_4()
-            .bg(rgb(0x1a2229))
-            .text_color(rgb(0xe6f4ee))
+            .bg(theme_color(PANEL))
+            .text_color(theme_color(TEXT))
             .flex()
             .flex_col()
             .gap_3()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
+                    .child("歌词外观"),
+            )
             .child(fonts)
-            .child(self.stepper("字号", |s| &mut s.font_size, 2, 12, 64))
+            .child(self.stepper("字号", " pt", |s| &mut s.font_size, 2, 12, 64))
             .child(colors)
-            .child(self.stepper("背景不透明度", |s| &mut s.background, 5, 0, 90))
             .child(lead)
-            .child(self.stepper("窗口宽度", |s| &mut s.width, 40, 420, 1600))
-            .child(self.stepper("窗口高度", |s| &mut s.height, 20, 120, 900))
-            .child(div().flex().justify_end().child(button(
-                "reset-lyrics-style",
-                "恢复默认",
-                self.handle.clone(),
-                Event::Style(Style::default()),
-            )))
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme_color(LINE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
+                    .child("歌词窗口"),
+            )
+            .child(self.stepper("背景不透明度", "%", |s| &mut s.background, 5, 0, 90))
+            .child(self.stepper("窗口宽度", " pt", |s| &mut s.width, 40, 420, 1600))
+            .child(self.stepper("窗口高度", " pt", |s| &mut s.height, 20, 120, 900))
+            .child(
+                div().flex().justify_end().child(
+                    button(
+                        "reset-lyrics-style",
+                        "恢复默认样式",
+                        self.handle.clone(),
+                        Event::Style(Style::default()),
+                    )
+                    .bg(theme_color(BG))
+                    .text_color(theme_color(MUTED))
+                    .hover(|style| style.bg(theme_color(PANEL_LIGHT))),
+                ),
+            )
     }
 }
 
