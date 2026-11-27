@@ -1,0 +1,145 @@
+# Gitee Go 原生发版流水线：推送 v* 标签后，交叉编译 Windows x64 绿色版并发布 Release。
+# Gitee 托管构建环境是 Linux，因此使用 Tauri 官方支持的 cargo-xwin，不依赖 Windows Runner。
+# 绿色版默认不内置曲库；Gitee 普通仓库单附件上限为 100 MiB，含模型的安装包仍由 GitHub Actions 发布。
+name: package
+displayName: 听风吟 · Gitee 发版
+
+triggers:
+  push:
+    tags:
+      prefix:
+        - v
+
+stages:
+  - name: verify
+    displayName: 版本校验
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: build@gcc
+        name: verify_tag
+        displayName: 校验 Tag 与应用版本
+        gccVersion: '10.3'
+        commands:
+          - |
+            set -euo pipefail
+            tag="$(git describe --tags --exact-match 2>/dev/null || true)"
+            if [[ "$tag" != v* ]]; then
+              echo "error: 请在准确的 Git 标签上运行发版流水线" >&2
+              exit 1
+            fi
+
+            version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json", encoding="utf-8"))["version"])')"
+            cargo_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' src-tauri/Cargo.toml | head -n1)"
+            if [ "$tag" != "v$version" ] || [ "$cargo_version" != "$version" ]; then
+              echo "error: tag=$tag, tauri.conf.json=$version, Cargo.toml=$cargo_version" >&2
+              exit 1
+            fi
+
+            printf 'TAG=%s\nVERSION=%s\n' "$tag" "$version" >> GITEE_PARAMS
+        notify: []
+        strategy:
+          retry: '0'
+
+  - name: build
+    displayName: 构建 Windows 绿色版
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: build@gcc
+        name: build_windows_portable
+        displayName: 交叉编译并打包
+        gccVersion: '10.3'
+        commands:
+          - |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            export XWIN_CACHE_DIR="$HOME/.xwin"
+
+            as_root() {
+              if [ "$(id -u)" -eq 0 ]; then
+                "$@"
+              else
+                sudo "$@"
+              fi
+            }
+
+            as_root apt-get update
+            as_root apt-get install -y --no-install-recommends \
+              ca-certificates clang curl git lld llvm pkg-config python3 xz-utils
+
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            source "$HOME/.cargo/env"
+            rustup target add x86_64-pc-windows-msvc
+            cargo install --locked cargo-xwin
+
+            if [ "$(id -u)" -eq 0 ]; then
+              bash <(curl -fsSL https://deb.nodesource.com/setup_22.x)
+            else
+              curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+            fi
+            as_root apt-get install -y nodejs
+            as_root corepack enable
+
+            pnpm install --frozen-lockfile
+            pnpm run build
+            (
+              cd src-tauri
+              cargo build --release \
+                --target x86_64-pc-windows-msvc \
+                --features custom-protocol \
+                --runner cargo-xwin
+            )
+
+            python3 scripts/package-gitee-portable.py \
+              --exe src-tauri/target/x86_64-pc-windows-msvc/release/tfy-bgm.exe \
+              --max-mib 100
+        artifacts:
+          - name: PORTABLE_RELEASE
+            path:
+              - ./dist
+        caches:
+          - ~/.cargo/bin
+          - ~/.cargo/.crates.toml
+          - ~/.cargo/.crates2.json
+          - ~/.cargo/registry
+          - ~/.cargo/git
+          - ~/.xwin
+          - ~/.cache/node/corepack
+          - ~/.local/share/pnpm/store
+        notify: []
+        strategy:
+          retry: '0'
+
+  - name: release
+    displayName: 发布 Gitee Release
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: release@gitee
+        name: publish_release
+        displayName: 创建发行版并上传附件
+        releaseName: 听风吟 ${TAG}
+        description: |
+          听风吟 ${TAG} · Windows x64 绿色版
+
+          - 适用于 Windows 10/11 x64，需要 WebView2 Runtime。
+          - 解压后运行 `tfy-bgm/tfy-bgm.exe`。
+          - 默认不内置曲库，首次启动后可选择本地曲库目录。
+          - 人声分离模型未随绿色版分发，请按 README 的说明放置到 `models/`。
+          - `SHA256SUMS.txt` 用于校验下载文件。
+        tagName: ${TAG}
+        upstreamArtifact:
+          - PORTABLE_RELEASE
+        assertFiles:
+          - ./dist/tfy-bgm-${VERSION}-windows-x64-portable.zip
+          - ./dist/SHA256SUMS.txt
+        prerelease: false
+        allowUpdate: false
+        notify: []
+        strategy:
+          retry: '0'

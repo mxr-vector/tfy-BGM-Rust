@@ -722,7 +722,7 @@ SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
 - `SHA256SUMS.txt` 与 `sha256sum -c` 兼容（小写十六进制、两个空格、LF 换行），Windows 与 Linux 产物可写入同一份。
 - `dist/` 里旧版本产物不会自动清理，发版前手动删除，避免误传。
 
-### 用 GitHub Actions 打包
+### 用 GitHub Actions / Gitee Go 打包
 
 `.github/workflows/package.yml` 先用 `plan` 作业校验标签版本并解析勾选项，再展开 `windows` / `linux` 矩阵，最后由 `release` 发布：
 
@@ -731,7 +731,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-推 `v*` 标签会构建 **x64 全平台**并创建 Release，附上全部产物与合并的 `SHA256SUMS.txt`；
+推 `v*` 标签会构建 **x64 + arm64 全平台**并创建 Release，附上全部产物与合并的 `SHA256SUMS.txt`；
 标签名（去掉 `v`）必须等于 `tauri.conf.json` 的 `version`，否则 `plan` 直接失败。
 
 也可在 Actions 页面手动 `Run workflow`，只构建不发布：
@@ -749,7 +749,10 @@ git push origin v1.0.0
 - artifact 只上传最终安装包，保留 3 天；`dist/tfy-bgm/` 组装目录不进 artifact。
 - Linux 使用 `ubuntu-24.04`，产物只支持 glibc ≥ 2.39 的系统。
 - 仓库 `bgm/` 约 350 MB，私有仓库建议手动触发时选 `empty-library` 以节省 Actions 存储配额。
-- 工作流只在 GitHub 生效；当前 `origin` 是 Gitee，需先推到 GitHub 镜像仓库。
+
+Gitee 原生流水线位于 `.workflow/package.yml`。推送到 Gitee 的 `v*` 标签会校验版本，使用 `cargo-xwin` 在 Linux 托管环境交叉编译 **Windows x64 绿色版**，再由 `release@gitee` 创建发行版并上传压缩包与 `SHA256SUMS.txt`，无需配置 Token。
+
+Gitee 绿色版默认不带曲库和人声分离模型，压缩包限制在 100 MiB 以内；含模型的 Windows 安装包、Linux deb/rpm 与 arm64 产物继续由 GitHub Actions 发布。
 
 ---
 
