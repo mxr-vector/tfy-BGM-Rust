@@ -48,6 +48,11 @@ pub fn run() {
     platform::apply_gpu_acceleration(&mut context, gpu_acceleration);
 
     tauri::Builder::default()
+        // 单实例：重复启动时把命令行转发给已有进程，并唤醒其主窗口（可能已隐藏到托盘）。
+        // 该插件必须最先注册，后续插件才能复用同一进程的初始化结果。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop::show_main_window(app);
+        }))
         // WebView 只有在获得麦克风权限后才会暴露完整的输出设备列表。
         // 以声搜声也在用户主动开始录音时使用麦克风。
         .on_permission_request(|_, kind| match kind {

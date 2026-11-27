@@ -198,7 +198,7 @@ pub fn hide_to_tray(app: &AppHandle) -> Result<()> {
     window.hide().context("隐藏主窗口失败")
 }
 
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
