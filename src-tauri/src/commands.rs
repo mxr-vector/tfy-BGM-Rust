@@ -298,6 +298,19 @@ pub fn open_library_dir(app: AppHandle, state: State<'_, AppState>) -> CommandRe
         .map_err(|error| format!("打开曲库目录失败：{error}"))
 }
 
+/// 在文件管理器中定位曲目文件；定位失败时退化为打开其所在目录。
+#[tauri::command]
+pub fn reveal_track_in_dir(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+) -> CommandResult<()> {
+    let song = state
+        .song(&key)
+        .ok_or_else(|| format!("曲目不存在：{key}"))?;
+    reveal_in_dir(&app, Path::new(&song.path), "音频")
+}
+
 #[tauri::command]
 pub fn audio_index_status(state: State<'_, AppState>) -> AudioIndexStatus {
     state.audio_index_status()

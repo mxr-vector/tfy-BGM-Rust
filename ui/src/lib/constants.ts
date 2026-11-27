@@ -14,6 +14,7 @@ export const COMMANDS = {
   chooseLibraryDir: 'choose_library_dir',
   resetLibraryDir: 'reset_library_dir',
   openLibraryDir: 'open_library_dir',
+  revealTrackInDir: 'reveal_track_in_dir',
   audioIndexStatus: 'audio_index_status',
   buildAudioIndex: 'build_audio_index',
   disableAudioIndex: 'disable_audio_index',

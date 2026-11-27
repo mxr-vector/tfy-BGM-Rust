@@ -304,3 +304,11 @@ export function openLibraryDir(): Promise<void> {
   });
 }
 
+export async function openTrackLocation(song: Song): Promise<void> {
+  try {
+    await invoke(COMMANDS.revealTrackInDir, { key: song.key });
+  } catch (error) {
+    toast(`打开文件所在位置失败：${normalizeError(error)}`, 'error');
+  }
+}
+

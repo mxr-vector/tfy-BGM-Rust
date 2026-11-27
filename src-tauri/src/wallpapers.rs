@@ -71,6 +71,9 @@ pub fn allow_wallpaper_file(app: &AppHandle, path: &Path) -> Result<()> {
 /// 内置壁纸目录候选：发布包读资源目录，调试构建直接读仓库目录。
 /// 调试时 `target/<profile>/assets/bg` 会累积历次构建的旧副本，
 /// 文件改名或删除后仍会被扫描到，因此 debug 构建跳过该目录。
+///
+/// 仓库目录用 `parent()` 而不是 `join("..")`：asset 协议会拒绝含 `..`
+/// 组件的路径，带 `..` 的壁纸地址会一律 403。
 fn bg_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if !cfg!(debug_assertions) {
@@ -78,12 +81,9 @@ fn bg_dirs(app: &AppHandle) -> Vec<PathBuf> {
             dirs.push(resource_dir.join("assets").join("bg"));
         }
     }
-    dirs.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("assets")
-            .join("bg"),
-    );
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap_or(manifest_dir);
+    dirs.push(repo_root.join("assets").join("bg"));
     dirs
 }
 
@@ -210,5 +210,36 @@ pub fn prime_custom(app: &AppHandle, path: Option<&str>) {
     let path = Path::new(path);
     if path.is_file() && is_supported(path) {
         let _ = allow_wallpaper_file(app, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_bg_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("assets")
+            .join("bg")
+    }
+
+    /// id 必须与 `prefs.json` 中已持久化的取值保持一致，否则升级后壁纸会静默回退默认样式。
+    #[test]
+    fn builtin_id_is_stable_for_chinese_names() {
+        assert_eq!(builtin_id("幻彩流光"), "builtin-da6fc012554a8ed0");
+        assert_eq!(builtin_id("雪山云海"), "builtin-fc1961bdcbd769d7");
+        assert_eq!(builtin_id("3"), "builtin-3");
+        assert_eq!(builtin_id("bgm-01"), "builtin-bgm-01");
+    }
+
+    /// 仓库内置资源应被完整发现：跳过旧版缩略图，四种壁纸各一条。
+    #[test]
+    fn discover_skips_thumbnails() {
+        let found = discover(&repo_bg_dir());
+        let ids: Vec<&str> = found.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(ids.contains(&"builtin-da6fc012554a8ed0"), "ids = {ids:?}");
+        assert!(!found.iter().any(|(_, label, _)| label.contains(".thumb.")));
+        assert!(found.iter().all(|(_, _, path)| is_supported(path)));
     }
 }

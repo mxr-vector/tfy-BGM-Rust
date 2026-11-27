@@ -122,6 +122,7 @@ pub fn run() {
             commands::choose_library_dir,
             commands::reset_library_dir,
             commands::open_library_dir,
+            commands::reveal_track_in_dir,
             commands::audio_index_status,
             commands::build_audio_index,
             commands::disable_audio_index,

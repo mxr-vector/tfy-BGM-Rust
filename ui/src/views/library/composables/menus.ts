@@ -16,6 +16,7 @@ import {
   openEditCategory,
   openMove,
   openRenameTrack,
+  openTrackLocation,
 } from '@/stores/actions';
 import { clearSelection, selectedKeys, setSelected } from '@/stores/library';
 import { addSubtitleRecord } from '@/stores/subtitles';
@@ -99,6 +100,11 @@ export function openSongMenu(
       icon: 'edit',
       label: '重命名文件',
       action: () => void openRenameTrack(song),
+    });
+    items.push({
+      icon: 'external',
+      label: '打开文件所在位置',
+      action: () => void openTrackLocation(song),
     });
     const loop = loopPointFor(song.key);
     items.push({
