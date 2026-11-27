@@ -786,6 +786,22 @@ cargo check --workspace                # 需要 WebKitGTK 等系统依赖
 
 ## 📄 许可与免责声明
 
-- 代码与文档采用 **Apache License 2.0** 授权（见 `LICENSE`，Copyright 2026 YuanJie）。
-- **音频素材版权归原权利人所有**。本仓库不附带任何音频授权，`bgm/` 下的音频文件不属于 Apache-2.0 授权范围。
-- 素材仅供个人学习与剪辑练手；商业发布前请自行向版权方取得授权。
+- **代码与文档**：采用 **Apache License 2.0** 授权（见 `LICENSE`，Copyright 2026 YuanJie）。
+- **音频、模型与壁纸素材**：版权归各自原作者或权利人所有，不属于 Apache-2.0 授权范围；仓库内附带相关素材不代表已取得再分发或商业使用授权。
+- **使用范围**：素材仅供个人学习与剪辑练手；商业发布、公开传播或随产品分发前，请自行确认并取得相应授权。
+- **第三方项目**：致谢仅表示对技术、资源与开源贡献的认可，不代表获得官方背书，也不表示相关项目采用与本项目相同的许可。
+
+---
+
+## 🙏 致谢
+
+感谢以下优秀的开源项目、语音技术与设计资源，为听风吟的端侧语音、界面美化与歌单迁移功能提供了支持与参考：
+
+| 项目 / 资源 | 说明 |
+| :--- | :--- |
+| [sherpa-onnx](https://csukuangfj.github.io/sherpa/onnx/index.html) | 端侧语音框架，为 ASR 与 Kokoro / ZipVoice 语音合成提供 ONNX 推理能力 |
+| [CosyVoice3 · 通义千问语音实验室](https://github.com/FunAudioLLM/CosyVoice) | 本地零样本语音合成与声音克隆，支持自然、富有表现力的口播生成 |
+| [哲风壁纸](https://haowallpaper.com/) | 为界面预览与壁纸设计提供视觉灵感 |
+| [PlaylistAggregatorLite](https://github.com/BabaBoyGegeBoy/PlaylistAggregatorLite) | 云平台歌单聚合与迁移参考，助力跨平台整理收藏的音乐灵感 |
+
+也感谢每一位贡献代码、反馈问题与分享素材的朋友。正是这些开放分享，让本地创作工具变得更丰富、更易用。
