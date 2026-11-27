@@ -352,13 +352,37 @@ jobs:
           sha256sum tfy-bgm-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: artifacts/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          # Gitee 镜像只同步分支、标签和提交，不负责发布状态；这里显式覆盖
-          # 已有草稿/预发布标志，确保 tag 构建完成后直接发布正式最新版。
-          draft: false
-          prerelease: false
-          make_latest: true
+      # softprops/action-gh-release@v3 会先创建草稿再上传，重跑失败时会把
+      # 同一 tag 的发布入口变成草稿。已有 Release 直接更新，保持发布状态。
+      - name: Publish or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(artifacts/*)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "error: 没有可发布的构建产物" >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            # 先上传再修正状态：已发布版本全程保持 published，不会退化成草稿。
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GH_REPO" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
+              --draft=false --prerelease=false --latest
+          else
+            # 新 tag 直接创建正式 Release，不创建中间草稿。
+            gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GH_REPO" \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes \
+              --draft=false --prerelease=false --latest
+          fi
+
+          release_json="$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG")"
+          jq -e --argjson expected "${#assets[@]}" '
+            .draft == false and .prerelease == false and
+            ([.assets[].name] | unique | length >= $expected)
+          ' <<<"$release_json" >/dev/null
+          jq -r '"Release ready: \(.html_url)"' <<<"$release_json"
