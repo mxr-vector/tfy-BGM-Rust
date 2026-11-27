@@ -102,7 +102,11 @@ const generationBlocker = computed(() => {
   if (!scriptEditor.value?.hasText) return '请在左侧输入或导入合成文本';
   if (family.value === 'ZipVoice' || family.value === 'CosyVoice3') {
     if (!referenceAudio.value) return '请先载入或录制参考音色';
-    if (!referenceText.value.trim()) return '请录制参考音色';
+    if (!referenceText.value.trim()) {
+      return referenceMode.value === 'builtin'
+        ? '该内置音色缺少配套逐字稿，请改用麦克风录制'
+        : '请录制参考音色';
+    }
   }
   return '';
 });
@@ -171,6 +175,7 @@ async function loadBuiltinReference(): Promise<void> {
     if (disposed || family.value === 'Kokoro' || modelId.value !== model
       || referenceMode.value !== 'builtin' || builtinVoice.value !== voice) return;
     setReferenceAudio(Uint8Array.from(reference.audio), voice, reference.text);
+    if (!reference.text) toast('该内置音色缺少配套逐字稿，无法用于声音克隆，请改用麦克风录制', 'error');
   } catch (error) { toast(`内置参考音频不可用：${normalizeError(error)}`, 'error'); }
   finally { recordingClip.value = false; }
 }
@@ -417,7 +422,7 @@ onBeforeUnmount(() => {
                 <p v-else class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? `${referenceKind} · 已录制` : '请安静环境录制清晰人声，录制满 5 秒后可结束，15 秒自动停止。' }}</p>
               </template>
               <audio v-if="referencePreviewUrl" ref="referencePlayer" class="tts-voice-preview" :src="referencePreviewUrl" :controls="!captureActive" preload="none" aria-label="试听参考音频" @play="pauseCompetingAudio" />
-              <p v-if="referenceAudio && referenceMode === 'builtin'" class="tts-reference-status">已载入配套逐字稿</p>
+              <p v-if="referenceAudio && referenceMode === 'builtin' && referenceText" class="tts-reference-status">已载入配套逐字稿</p>
             </template>
           </template>
           <div v-if="ttsInstalling" class="tts-download-status">

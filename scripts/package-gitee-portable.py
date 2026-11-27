@@ -79,8 +79,10 @@ def main() -> None:
 
         voices = package / "voices"
         voices.mkdir()
-        for prompt in sorted((REPO / "models/voices").glob("*.wav")):
-            shutil.copy2(prompt, voices / prompt.name)
+        # 逐字稿 prompts.json 与音频同目录，缺了它内置音色无法用于克隆。
+        for asset in sorted((REPO / "models/voices").iterdir()):
+            if asset.is_file():
+                shutil.copy2(asset, voices / asset.name)
 
         categories = json.loads(
             (REPO / "src-tauri/core/assets/categories.default.json").read_text(

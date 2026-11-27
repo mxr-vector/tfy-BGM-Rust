@@ -88,7 +88,8 @@ New-Item -ItemType Directory -Force (Join-Path $package "assets") | Out-Null
 Copy-Item (Join-Path $repo "assets\bg") (Join-Path $package "assets") -Recurse -Force
 $voicesTarget = Join-Path $package "voices"
 New-Item -ItemType Directory -Force $voicesTarget | Out-Null
-Copy-Item (Join-Path $repo "models\voices\*.wav") $voicesTarget -Force
+# 逐字稿 prompts.json 与音频同目录，缺了它内置音色无法用于克隆。
+Copy-Item (Join-Path $repo "models\voices\*") $voicesTarget -Force
 
 $bgmTarget = Join-Path $package "bgm"
 $audioExtensions = @(".mp3", ".m4a", ".flac", ".wav", ".ogg")
