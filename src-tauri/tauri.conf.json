@@ -1,63 +1,66 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tfy-bgm",
-  "version": "0.8.0",
-  "identifier": "com.yuanjie.tfybgm",
-  "build": {
-    "beforeDevCommand": "pnpm run dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm run build",
-    "frontendDist": "../ui/dist"
-  },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "听风吟 · TFY BGM",
-        "width": 1280,
-        "height": 840,
-        "minWidth": 980,
-        "minHeight": 640,
-        "center": true,
-        "resizable": true,
-        "theme": "Dark",
-        "decorations": false,
-        "shadow": true,
-        "dragDropEnabled": false
-      }
-    ],
-    "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data:; media-src 'self' blob: asset: http://asset.localhost http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:",
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["$APPCACHE/tts/speech-????????????????????????????????.wav"]
-      }
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "resources": {
-      "../assets/bg/*": "assets/bg",
-      "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
-      "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
-      "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx",
-      "../models/voices": "voices"
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "tfy-bgm",
+    "version": "0.8.0",
+    "identifier": "com.yuanjie.tfybgm",
+    "build": {
+        "beforeDevCommand": "pnpm run dev",
+        "devUrl": "http://localhost:1420",
+        "beforeBuildCommand": "pnpm run build",
+        "frontendDist": "../ui/dist"
     },
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ],
-    "shortDescription": "视频剪辑 BGM 音频素材库与试听客户端",
-    "longDescription": "基于 Rust + Tauri 2 的本地 BGM 素材库客户端：目录扫描、分类检索、收藏与全功能播放器，支持导出音频。",
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser"
-      }
+    "app": {
+        "withGlobalTauri": true,
+        "windows": [
+            {
+                "label": "main",
+                "title": "听风吟 · TFY BGM",
+                "width": 1280,
+                "height": 840,
+                "minWidth": 980,
+                "minHeight": 640,
+                "center": true,
+                "resizable": true,
+                "theme": "Dark",
+                "decorations": false,
+                "shadow": true,
+                "dragDropEnabled": false
+            }
+        ],
+        "security": {
+            "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data:; media-src 'self' blob: asset: http://asset.localhost http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:",
+            "assetProtocol": {
+                "enable": true,
+                "scope": [
+                    "$APPCACHE/tts/speech-????????????????????????????????.wav"
+                ]
+            }
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "resources": {
+            "../bgm": "bgm",
+            "../assets/bg/*": "assets/bg",
+            "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
+            "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
+            "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx",
+            "../models/voices": "voices"
+        },
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "shortDescription": "视频剪辑 BGM 音频素材库与试听客户端",
+        "longDescription": "基于 Rust + Tauri 2 的本地 BGM 素材库客户端：目录扫描、分类检索、收藏与全功能播放器，支持导出音频。",
+        "windows": {
+            "nsis": {
+                "installMode": "currentUser"
+            }
+        }
     }
-  }
 }

@@ -172,7 +172,7 @@ function isBusy(): boolean {
           type="button"
           class="nav-item is-sub"
           id="btn-reset"
-          title="清除自定义目录，恢复程序同级的外置曲库"
+          title="清除自定义目录，恢复默认曲库"
           :disabled="isBusy()"
           @click="resetLibraryDir"
         >

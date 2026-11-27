@@ -19,6 +19,8 @@
 #   - Requires tauri-cli: cargo install tauri-cli --version "^2" --locked
 #   - The rpm file name drops the release field on purpose (uniform 4 fields);
 #     the package metadata still keeps Release: 1.
+#   - deb/rpm include bgm/ through tauri.conf.json; the app reads it from the
+#     resource directory.
 
 set -euo pipefail
 

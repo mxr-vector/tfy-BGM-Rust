@@ -16,7 +16,7 @@ pub const LOOPS_FILE: &str = "loops.json";
 /// 本地音频索引与指纹缓存。
 pub const AUDIO_INDEX_FILE: &str = "audio-index.json";
 
-/// 外置曲库目录名（默认位于 exe 同级）。
+/// 曲库目录名（内置资源或外置挂载点均使用该名称）。
 pub const LIBRARY_DIR_NAME: &str = "bgm";
 /// ASR 模型目录名（默认位于系统「下载」目录下，带 `bgm-` 前缀以免与其它模型目录混淆）。
 pub const MODELS_DIR_NAME: &str = "bgm-models";

@@ -5,8 +5,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1 -SkipBuild
 #
 # Output: dist\tfy-bgm-<version>-windows-<arch>-setup.exe
-# The installer does not contain audio; the app creates bgm/ next to the exe on
-# first launch (or points at a library via the UI).
+# The installer bundles bgm/ through tauri.conf.json; the app reads it from the
+# resource directory (or a user-selected library).
 #
 # Requires tauri-cli: cargo install tauri-cli --version "^2" --locked
 
@@ -74,4 +74,4 @@ Write-Checksums -DistDir $dist -Version $version
 
 Write-Host "[done]"
 Write-Host ("Installer: $targetPath ({0})" -f (Format-FileSize (Get-Item $targetPath).Length))
-Write-Host "Note: this package has no audio; bgm/ is created on first launch."
+Write-Host "Note: this package includes the bundled bgm/ library."
