@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::check_cancelled;
-use crate::speech_audio;
+use crate::{
+    speech_audio,
+    speech_device::{eligible_nvidia_device, force_cpu, minimum_vram_mib},
+};
 use sha2::Digest;
 
 const SAMPLE_RATE: u32 = 24_000;
@@ -38,12 +41,11 @@ const MIN_GPU_MIB: u64 = 6_144;
 // Lourdle/CosyVoice 24c9212eb54e832af4d9b03bcd9157d88acbf6db.
 const PYTHON_WORKER: &str = include_str!("../py/cosyvoice_worker.py");
 
-fn runtime_paths(
-    model: &Path,
+fn runtime_source(
     app_cache: &Path,
     token: &CancellationToken,
     progress: &dyn Fn(&str),
-) -> Result<(PathBuf, PathBuf)> {
+) -> Result<PathBuf> {
     progress("正在检查 CosyVoice3 运行环境…");
     // 代码包与环境都只允许准备一次，避免并发解压/安装互相覆盖。
     let _setup = RUNTIME_SETUP.lock();
@@ -54,8 +56,7 @@ fn runtime_paths(
         }
         prepare_runtime(&home, token, progress)?;
     }
-    prepare_environment(app_cache, model, token, progress)?;
-    Ok((home, runtime_python(app_cache)))
+    Ok(home)
 }
 
 fn runtime_home(app_cache: &Path) -> PathBuf {
@@ -76,6 +77,73 @@ fn runtime_python(app_cache: &Path) -> PathBuf {
         "bin/python3"
     };
     app_cache.join("cosyvoice/venv").join(binary)
+}
+
+fn managed_cuda_dir(app_cache: &Path) -> PathBuf {
+    app_cache.join(format!("cosyvoice/venv-cuda-{COSYVOICE_ENV}"))
+}
+
+fn managed_cuda_python(app_cache: &Path) -> PathBuf {
+    managed_cuda_dir(app_cache).join("Scripts/python.exe")
+}
+
+fn managed_cuda_marker(app_cache: &Path) -> PathBuf {
+    managed_cuda_dir(app_cache).join(".tfy-bgm-cuda-ready")
+}
+
+pub(super) fn managed_cuda_status(app_cache: &Path) -> Option<bool> {
+    cfg!(all(windows, target_arch = "x86_64")).then(|| {
+        managed_cuda_python(app_cache).is_file()
+            && fs::read_to_string(managed_cuda_marker(app_cache))
+                .is_ok_and(|value| value == "ready\n")
+    })
+}
+
+fn managed_cuda_cache(app_cache: &Path) -> PathBuf {
+    app_cache.join("cosyvoice/uv-cache-cuda")
+}
+
+pub(super) fn managed_cuda_present(app_cache: &Path) -> bool {
+    cfg!(all(windows, target_arch = "x86_64"))
+        && [managed_cuda_dir(app_cache), managed_cuda_cache(app_cache)]
+            .iter()
+            .any(|path| path.symlink_metadata().is_ok())
+}
+
+pub(super) fn remove_managed_cuda(app_cache: &Path) -> Result<()> {
+    ensure!(
+        cfg!(all(windows, target_arch = "x86_64")),
+        "当前平台不支持托管 GPU 环境"
+    );
+    let _setup = RUNTIME_SETUP.lock();
+    let cache = app_cache.canonicalize()?;
+    let paths = [managed_cuda_dir(&cache), managed_cuda_cache(&cache)];
+    for path in &paths {
+        match path.canonicalize() {
+            Ok(target) => ensure!(&target == path, "GPU 环境目录指向链接，无法删除"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                ensure!(
+                    path.symlink_metadata().is_err(),
+                    "GPU 环境目录指向无效链接，无法删除"
+                );
+            }
+            Err(error) => return Err(error).context("无法定位 GPU 环境目录"),
+        }
+    }
+    for path in paths {
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("无法删除 GPU 环境目录"),
+        }
+    }
+    Ok(())
+}
+
+fn selected_cuda_python(app_cache: &Path) -> Option<PathBuf> {
+    cuda_python(env::var_os("TFY_COSYVOICE_CUDA_PYTHON")).or_else(|| {
+        (managed_cuda_status(app_cache) == Some(true)).then(|| managed_cuda_python(app_cache))
+    })
 }
 
 /// uv 管理的 Python 安装目录名由 `uv python install` 决定，格式为
@@ -221,7 +289,10 @@ fn prepare_runtime(home: &Path, token: &CancellationToken, progress: &dyn Fn(&st
         for item in tar.entries()? {
             check_cancelled(token)?;
             let mut item = item?;
-            if item.header().entry_type().is_symlink() || item.header().entry_type().is_hard_link()
+            let entry_type = item.header().entry_type();
+            if entry_type.is_symlink()
+                || entry_type.is_hard_link()
+                || entry_type.is_pax_global_extensions()
             {
                 continue;
             }
@@ -255,7 +326,8 @@ fn prepare_runtime(home: &Path, token: &CancellationToken, progress: &dyn Fn(&st
         if name == "CosyVoice" {
             fs::rename(&extract, destination_root)?;
         } else {
-            fs::rename(extract.join("matcha"), destination_root)?;
+            fs::create_dir_all(&destination_root)?;
+            fs::rename(extract.join("matcha"), destination_root.join("matcha"))?;
         }
     }
     Ok(())
@@ -308,11 +380,29 @@ fn prepare_environment(
     let python = runtime_python(app_cache);
     let python_home = managed_python(&root);
     let marker = root.join("venv/.tfy-bgm-cosyvoice-env");
-    let variant = environment_variant(progress);
-    let expected = format!("{COSYVOICE_ENV}:{variant}\n");
+    let expected = format!("{COSYVOICE_ENV}:cpu\n");
     if python.is_file() && fs::read_to_string(&marker).is_ok_and(|current| current == expected) {
         return Ok(());
     }
+    let uv = prepare_python(app_cache, token)?;
+    prepare_venv(
+        &uv,
+        app_cache,
+        &python_home,
+        &root.join("venv"),
+        token,
+        progress,
+    )?;
+    install_environment(&uv, &root, &python, token, progress)?;
+    check_environment(&python, app_cache, model, token, progress)?;
+    check_cancelled(token)?;
+    fs::write(&marker, expected).context("无法标记 CosyVoice CPU 环境已就绪")?;
+    Ok(())
+}
+
+fn prepare_python(app_cache: &Path, token: &CancellationToken) -> Result<PathBuf> {
+    let root = app_cache.join("cosyvoice");
+    let python_home = managed_python(&root);
     fs::create_dir_all(&root)?;
     let uv = uv_path(&root);
     if !uv.is_file() {
@@ -340,81 +430,168 @@ fn prepare_environment(
             python_home.display()
         );
     }
-    if !root.join("venv/pyvenv.cfg").is_file() {
+    Ok(uv)
+}
+
+fn prepare_venv(
+    uv: &Path,
+    app_cache: &Path,
+    python_home: &Path,
+    venv: &Path,
+    token: &CancellationToken,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    if !venv.join("pyvenv.cfg").is_file() {
         progress("正在创建 CosyVoice3 Python 环境…");
-        let python_home = python_home.to_string_lossy();
-        let venv = root.join("venv");
-        run_setup(
-            &uv,
-            app_cache,
-            token,
-            &[
-                "venv",
-                "--python",
-                python_home.as_ref(),
-                venv.to_string_lossy().as_ref(),
-            ],
-        )
-        .context("创建 CosyVoice Python 环境失败")?;
+        let mut command = Command::new(uv);
+        command
+            .args(["venv", "--python"])
+            .arg(python_home)
+            .arg(venv)
+            .env("UV_CACHE_DIR", app_cache.join("cosyvoice/uv-cache"));
+        run_cancellable(&mut command, token, SETUP_COMMAND_TIMEOUT)
+            .context("创建 CosyVoice Python 环境失败")?;
     }
-    let mut last_error = None;
-    for candidate in std::iter::once(variant).chain(fallback_variants(variant).iter().copied()) {
-        progress(&format!("正在准备 {candidate} 推理环境…"));
-        let installed = install_environment(&uv, &root, &python, candidate, token, progress)
-            .and_then(|()| check_environment(&python, app_cache, model, token, progress));
-        match installed {
-            Ok(()) => {
-                fs::write(&marker, format!("{COSYVOICE_ENV}:{candidate}\n"))?;
-                return Ok(());
+    Ok(())
+}
+
+const CUDA_PACKAGES: &[&str] = &[
+    "onnxruntime-gpu==1.23.2",
+    "nvidia-cuda-runtime-cu12==12.6.77",
+    "nvidia-cuda-nvrtc-cu12==12.6.77",
+    "nvidia-cublas-cu12==12.6.4.1",
+    "nvidia-cufft-cu12==11.3.0.4",
+    "nvidia-nvjitlink-cu12==12.6.85",
+    "nvidia-curand-cu12==10.3.7.77",
+    "nvidia-cudnn-cu12==9.8.0.87",
+];
+
+pub(super) fn install_managed_cuda(
+    model: &Path,
+    app_cache: &Path,
+    token: &CancellationToken,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let ready = managed_cuda_status(app_cache).context("一键安装仅支持 Windows x64")?;
+    if ready {
+        return Ok(());
+    }
+    check_cancelled(token)?;
+    ensure!(
+        !force_cpu(),
+        "当前已强制使用 CPU，请取消 TFY_SPEECH_DEVICE 设置后重启应用"
+    );
+    progress("正在检查 NVIDIA 驱动和空闲显存…");
+    let minimum = minimum_vram_mib("TFY_TTS_MIN_VRAM_MIB", MIN_GPU_MIB);
+    let gpu = eligible_nvidia_device(0, token)
+        .context("无法检测 NVIDIA 显卡，请确认 NVIDIA 驱动已安装")?
+        .context("未检测到可用的 NVIDIA 显卡")?;
+    ensure!(
+        gpu.free_mib >= minimum,
+        "空闲显存不足（{} MiB，至少需要 {minimum} MiB），请关闭占用显存的程序后重试",
+        gpu.free_mib
+    );
+    let home = runtime_source(app_cache, token, progress)?;
+    let _setup = RUNTIME_SETUP.lock();
+    progress("正在准备 CosyVoice3 CUDA Python 环境…");
+    let uv = prepare_python(app_cache, token)?;
+    let root = app_cache.join("cosyvoice");
+    prepare_venv(
+        &uv,
+        app_cache,
+        &managed_python(&root),
+        &managed_cuda_dir(app_cache),
+        token,
+        progress,
+    )?;
+    let python = managed_cuda_python(app_cache);
+    progress("正在下载并安装 GPU 推理依赖（可能需要几分钟）…");
+    let mut command = Command::new(uv);
+    command
+        .args(["pip", "install", "--python"])
+        .arg(&python)
+        .args(["torch==2.3.1", "torchaudio==2.3.1"])
+        .args(COSYVOICE_COMMON_PACKAGES)
+        .args(CUDA_PACKAGES)
+        .env("UV_CACHE_DIR", managed_cuda_cache(app_cache));
+    let diagnostics = tempfile::NamedTempFile::new().context("无法创建 GPU 安装日志")?;
+    command.stderr(diagnostics.reopen()?);
+    let mut output = BufReader::new(diagnostics.reopen()?);
+    let mut downloads = CudaDownloads::default();
+    let mut pending = Vec::new();
+    let result = run_cancellable_with_poll(&mut command, token, SETUP_COMMAND_TIMEOUT, || {
+        while let Ok(count) = output.read_until(b'\n', &mut pending) {
+            if count == 0 || !pending.ends_with(b"\n") {
+                break;
             }
-            Err(error) => {
-                eprintln!("CosyVoice {candidate} 环境准备失败：{error:#}");
-                last_error = Some(error);
+            if let Some(stage) = downloads.update(&String::from_utf8_lossy(&pending)) {
+                progress(&stage);
             }
+            pending.clear();
         }
+    });
+    if let Err(error) = result {
+        let mut diagnostics = diagnostics.reopen()?;
+        check_cancelled(token)?;
+        use std::io::{Seek, SeekFrom};
+        let start = diagnostics
+            .metadata()?
+            .len()
+            .saturating_sub(STDERR_LIMIT as u64);
+        diagnostics.seek(SeekFrom::Start(start))?;
+        let mut tail = Vec::new();
+        diagnostics
+            .take(STDERR_LIMIT as u64)
+            .read_to_end(&mut tail)?;
+        let detail = String::from_utf8_lossy(&tail);
+        return Err(error).context(format!("安装 GPU 推理依赖失败：{}", detail.trim()));
     }
-    Err(last_error.context("CosyVoice 推理环境准备失败")?)
+    progress("正在用 CosyVoice3 模型验证 CUDA…");
+    let model = std::path::absolute(model)?;
+    drop(
+        Engine::load_worker(&python, &home, &model, app_cache, Some(&gpu.uuid), token)
+            .context("CosyVoice3 CUDA 验证失败")?,
+    );
+    check_cancelled(token)?;
+    fs::write(managed_cuda_marker(app_cache), "ready\n").context("无法标记 GPU 环境已就绪")
 }
 
-fn gpu_memory_mib() -> Option<u64> {
-    let output = bgm_core::process::command(Path::new("nvidia-smi"))
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u64>().ok())
-        .max()
+#[derive(Default)]
+struct CudaDownloads {
+    active: std::collections::BTreeMap<String, String>,
+    completed: usize,
 }
 
-fn environment_variant(progress: &dyn Fn(&str)) -> &'static str {
-    match gpu_memory_mib() {
-        Some(mib) if mib >= MIN_GPU_MIB => {
-            progress(&format!(
-                "检测到 NVIDIA 显卡（{mib} MiB），将用 DirectML 加速 Flow/HiFT…"
-            ));
-            "dml"
+impl CudaDownloads {
+    fn update(&mut self, line: &str) -> Option<String> {
+        let line = line.trim();
+        if let Some(item) = line.strip_prefix("Downloading ") {
+            let name = item.split_whitespace().next()?;
+            self.active.insert(name.to_owned(), item.to_owned());
+        } else if let Some(item) = line.strip_prefix("Downloaded ") {
+            if self
+                .active
+                .remove(item.split_whitespace().next()?)
+                .is_none()
+            {
+                return None;
+            }
+            self.completed += 1;
+        } else if line.starts_with("Prepared ") {
+            return Some("依赖下载完成，正在安装到 GPU 环境…".to_owned());
+        } else {
+            return None;
         }
-        Some(mib) => {
-            progress(&format!(
-                "显卡可用显存 {mib} MiB 低于 {MIN_GPU_MIB} MiB，将使用 CPU 推理…"
-            ));
-            "cpu"
-        }
-        None => {
-            progress("未检测到可用 NVIDIA 显卡，将使用 CPU 推理…");
-            "cpu"
-        }
-    }
-}
-
-fn fallback_variants(variant: &str) -> &'static [&'static str] {
-    match variant {
-        "dml" => &["cpu"],
-        _ => &[],
+        let names = self.active.values().cloned().collect::<Vec<_>>().join("、");
+        Some(if names.is_empty() {
+            format!("已下载 {} 个包，正在准备安装…", self.completed)
+        } else {
+            format!(
+                "已下载 {} 个包 · 正在下载 {} 个：{names}",
+                self.completed,
+                self.active.len()
+            )
+        })
     }
 }
 
@@ -442,12 +619,11 @@ const COSYVOICE_COMMON_PACKAGES: &[&str] = &[
     "pydantic",
 ];
 
-/// 按设备变体安装推理包；切换变体前先卸载旧的 torch/onnxruntime，避免两份实现共存。
+/// 清理旧环境的推理包（含 DirectML），避免同一个 venv 存在多份 ONNX Runtime。
 fn install_environment(
     uv: &Path,
     root: &Path,
     python: &Path,
-    variant: &str,
     token: &CancellationToken,
     progress: &dyn Fn(&str),
 ) -> Result<()> {
@@ -462,30 +638,16 @@ fn install_environment(
             "onnxruntime-gpu",
             "onnxruntime-directml",
         ]);
-    let _ = run_cancellable(&mut uninstall, token, SETUP_COMMAND_TIMEOUT);
+    run_cancellable(&mut uninstall, token, SETUP_COMMAND_TIMEOUT)
+        .context("无法清理旧的 CosyVoice 推理依赖")?;
 
-    progress(match variant {
-        "dml" => "正在安装 DirectML 版 ONNX Runtime（Flow/HiFT 将使用显卡）…",
-        _ => "正在安装 CPU 推理依赖…",
-    });
+    progress("正在安装 CPU 推理依赖（可选 CUDA 环境由用户单独配置）…");
     // 不写死索引地址：uv 默认使用 PyPI，并尊重 UV_INDEX_URL 等用户/镜像配置。
     let mut command = Command::new(uv);
-    command.args(["pip", "install", "--python"]).arg(python);
-    match variant {
-        "dml" => {
-            // PyTorch 用 CPU 版（DirectML 不依赖 CUDA/cuDNN）；LLM/Flow/HiFT 的
-            // ONNX 会话由 worker 按可用显存尝试 DirectML，失败时自动回退 CPU。
-            command.args([
-                "torch==2.3.1",
-                "torchaudio==2.3.1",
-                "onnxruntime-directml==1.24.4",
-            ]);
-        }
-        _ => {
-            command.args(["torch==2.3.1", "torchaudio==2.3.1", "onnxruntime==1.23.2"]);
-        }
-    }
     command
+        .args(["pip", "install", "--python"])
+        .arg(python)
+        .args(["torch==2.3.1", "torchaudio==2.3.1", "onnxruntime==1.23.2"])
         .args(COSYVOICE_COMMON_PACKAGES)
         .env("UV_CACHE_DIR", root.join("uv-cache"));
     run_cancellable(&mut command, token, SETUP_COMMAND_TIMEOUT)
@@ -542,20 +704,48 @@ fn check_environment(
 ) -> Result<()> {
     progress("正在验证 CosyVoice3 环境及模型…");
     let home = runtime_home(app_cache);
-    let args = ["-u", "-c", PYTHON_WORKER];
-    let mut command = Command::new(python);
+    let mut command = worker_command(python, &home, model, app_cache, None);
+    command.arg("--self-test");
+    run_cancellable(&mut command, token, ENV_CHECK_TIMEOUT).context("CosyVoice 环境及模型验证失败")
+}
+
+fn worker_command(
+    python: &Path,
+    home: &Path,
+    model: &Path,
+    app_cache: &Path,
+    gpu_uuid: Option<&str>,
+) -> Command {
+    let mut command = bgm_core::process::command(python);
     command
-        .args(args)
-        .arg(&home)
+        .args(["-u", "-c", PYTHON_WORKER])
+        .arg(home)
         .arg(model)
-        .arg("--self-test")
+        .env("HF_HUB_OFFLINE", "1")
+        .env("MODELSCOPE_OFFLINE", "1")
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONPATH", home.join("third_party/Matcha-TTS"))
         .env("MODELSCOPE_CACHE", app_cache.join("cosyvoice/modelscope"))
-        .env("HF_HUB_OFFLINE", "1")
-        .env("MODELSCOPE_OFFLINE", "1");
-    run_cancellable(&mut command, token, ENV_CHECK_TIMEOUT).context("CosyVoice 环境及模型验证失败")
+        .env(
+            "TFY_COSYVOICE_USE_CUDA",
+            if gpu_uuid.is_some() { "1" } else { "0" },
+        )
+        .env("CUDA_VISIBLE_DEVICES", gpu_uuid.unwrap_or(""))
+        .env(
+            "TFY_COSYVOICE_MANAGED_CUDA",
+            if gpu_uuid.is_some() && python == managed_cuda_python(app_cache) {
+                "1"
+            } else {
+                "0"
+            },
+        );
+    command
+}
+
+fn cuda_python(path: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    path.map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file())
 }
 
 fn run_setup(uv: &Path, cache: &Path, token: &CancellationToken, args: &[&str]) -> Result<()> {
@@ -570,6 +760,15 @@ fn run_cancellable(
     command: &mut Command,
     token: &CancellationToken,
     timeout: Duration,
+) -> Result<()> {
+    run_cancellable_with_poll(command, token, timeout, || {})
+}
+
+fn run_cancellable_with_poll(
+    command: &mut Command,
+    token: &CancellationToken,
+    timeout: Duration,
+    mut poll: impl FnMut(),
 ) -> Result<()> {
     check_cancelled(token)?;
     bgm_core::process::suppress_console(command);
@@ -587,7 +786,9 @@ fn run_cancellable(
             let _ = child.wait();
             bail!("CosyVoice 环境准备命令超时（{} 秒）", timeout.as_secs());
         }
-        if let Some(status) = child.try_wait()? {
+        let status = child.try_wait()?;
+        poll();
+        if let Some(status) = status {
             ensure!(status.success(), "CosyVoice 环境准备命令失败（{status}）");
             return Ok(());
         }
@@ -611,11 +812,38 @@ enum Reply {
     Error { message: String },
 }
 
+struct CpuFallback {
+    home: PathBuf,
+    model: PathBuf,
+    app_cache: PathBuf,
+}
+
+impl CpuFallback {
+    fn load(&self, token: &CancellationToken, progress: &dyn Fn(&str)) -> Result<Engine> {
+        {
+            let _setup = RUNTIME_SETUP.lock();
+            prepare_environment(&self.app_cache, &self.model, token, progress)?;
+        }
+        progress("正在启动 CosyVoice3 CPU 推理进程…");
+        Engine::load_worker(
+            &runtime_python(&self.app_cache),
+            &self.home,
+            &self.model,
+            &self.app_cache,
+            None,
+            token,
+        )
+    }
+}
+
 pub(super) struct Engine {
     child: Option<Child>,
     requests: Option<SyncSender<Vec<u8>>>,
     replies: Receiver<Result<Reply>>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
+    // Only a successfully initialized CUDA worker can switch to CPU.
+    cpu_fallback: Option<CpuFallback>,
+    managed_cuda: bool,
 }
 
 impl Engine {
@@ -650,10 +878,62 @@ impl Engine {
                 file.display()
             );
         }
-        let (home, python) = runtime_paths(&model, app_cache, token, progress)?;
+        let home = runtime_source(app_cache, token, progress)?;
+        let cpu = CpuFallback {
+            home,
+            model,
+            app_cache: app_cache.to_owned(),
+        };
         check_cancelled(token)?;
-        progress("正在启动 CosyVoice3 推理进程…");
-        let mut engine = Self::spawn(&python, &home, &model, app_cache)?;
+        if !force_cpu()
+            && let Some(python) = selected_cuda_python(app_cache)
+        {
+            let minimum = minimum_vram_mib("TFY_TTS_MIN_VRAM_MIB", MIN_GPU_MIB);
+            match eligible_nvidia_device(minimum, token) {
+                Ok(Some(gpu)) => {
+                    progress("正在启动 CosyVoice3 CUDA 推理进程…");
+                    let result = Self::load_worker(
+                        &python,
+                        &cpu.home,
+                        &cpu.model,
+                        &cpu.app_cache,
+                        Some(&gpu.uuid),
+                        token,
+                    );
+                    return match result {
+                        Ok(mut engine) => {
+                            engine.cpu_fallback = Some(cpu);
+                            Ok(engine)
+                        }
+                        Err(error) => {
+                            check_cancelled(token)?;
+                            progress("CosyVoice CUDA 初始化失败，正在回退 CPU…");
+                            eprintln!("CosyVoice CUDA 初始化失败：{error:#}");
+                            cpu.load(token, progress)
+                        }
+                    };
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    check_cancelled(token)?;
+                    progress("GPU 显存检测失败，使用 CPU 推理…");
+                    eprintln!("CosyVoice GPU 探测失败：{error:#}");
+                }
+            }
+        }
+        cpu.load(token, progress)
+    }
+
+    fn load_worker(
+        python: &Path,
+        home: &Path,
+        model: &Path,
+        app_cache: &Path,
+        gpu_uuid: Option<&str>,
+        token: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(token)?;
+        let mut engine = Self::spawn(python, home, model, app_cache, gpu_uuid)?;
         let result = engine
             .wait_for_reply(LOAD_TIMEOUT, token)
             .and_then(|reply| match reply {
@@ -673,6 +953,18 @@ impl Engine {
         Ok(engine)
     }
 
+    pub(super) fn device(&self) -> &'static str {
+        if self.cpu_fallback.is_some() {
+            "cuda"
+        } else {
+            "cpu"
+        }
+    }
+
+    pub(super) fn uses_managed_cuda(&self) -> bool {
+        self.managed_cuda
+    }
+
     pub(super) fn sample_rate(&self) -> u32 {
         SAMPLE_RATE
     }
@@ -688,19 +980,56 @@ impl Engine {
         prompt_path: &Path,
         output_path: &Path,
         token: &CancellationToken,
+        on_fallback: &dyn Fn(),
+    ) -> Result<Vec<f32>> {
+        if token.is_cancelled() {
+            self.stop();
+            check_cancelled(token)?;
+        }
+        let prompt_path = std::path::absolute(prompt_path).context("参考音频路径无效")?;
+        let output_path = std::path::absolute(output_path).context("语音输出路径无效")?;
+        let mut line = serde_json::to_vec(&GenerateRequest {
+            text,
+            prompt_text,
+            prompt_path: &prompt_path,
+            output_path: &output_path,
+        })
+        .context("无法编码 CosyVoice3 请求")?;
+        line.push(b'\n');
+        if self.cpu_fallback.is_none() {
+            return self.generate_once(line, &output_path, token);
+        }
+        match self.generate_once(line.clone(), &output_path, token) {
+            Ok(samples) => Ok(samples),
+            Err(error) => {
+                // generate_once has already stopped and reaped the failed worker.
+                check_cancelled(token)?;
+                let Some(cpu) = self.cpu_fallback.take() else {
+                    return Err(error);
+                };
+                eprintln!("CosyVoice CUDA 推理失败，正在回退 CPU 并重试当前片段：{error:#}");
+                match fs::remove_file(&output_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("无法清理 CosyVoice3 重试前的输出"),
+                }
+                let engine = cpu.load(token, &|stage| eprintln!("[cosyvoice] {stage}"));
+                check_cancelled(token)?;
+                *self = engine.context("CosyVoice3 CUDA 推理失败后无法启动 CPU 进程")?;
+                on_fallback();
+                self.generate_once(line, &output_path, token)
+            }
+        }
+    }
+
+    fn generate_once(
+        &mut self,
+        line: Vec<u8>,
+        output_path: &Path,
+        token: &CancellationToken,
     ) -> Result<Vec<f32>> {
         let result = (|| {
             check_cancelled(token)?;
-            let prompt_path = std::path::absolute(prompt_path).context("参考音频路径无效")?;
-            let output_path = std::path::absolute(output_path).context("语音输出路径无效")?;
-            let mut line = serde_json::to_vec(&GenerateRequest {
-                text,
-                prompt_text,
-                prompt_path: &prompt_path,
-                output_path: &output_path,
-            })
-            .context("无法编码 CosyVoice3 请求")?;
-            line.push(b'\n');
             self.requests
                 .as_ref()
                 .context("CosyVoice3 Python 进程已关闭")?
@@ -713,7 +1042,7 @@ impl Engine {
                 ),
                 "CosyVoice3 Python 进程返回了无效的推理响应"
             );
-            let wave = speech_audio::read_wave(&output_path)
+            let wave = speech_audio::read_wave(output_path)
                 .context("CosyVoice3 未生成有效的单声道 PCM WAV")?;
             ensure!(
                 wave.sample_rate() == self.sample_rate() as i32,
@@ -729,27 +1058,24 @@ impl Engine {
         self.finish(result, "CosyVoice3 推理失败", token)
     }
 
-    fn spawn(python: &Path, home: &Path, model: &Path, app_cache: &Path) -> Result<Self> {
-        let child = bgm_core::process::command(python)
-            .args(["-u", "-c", PYTHON_WORKER])
-            .arg(home)
-            .arg(model)
-            .env("HF_HUB_OFFLINE", "1")
-            .env("MODELSCOPE_OFFLINE", "1")
-            .env("PYTHONUTF8", "1")
-            .env("PYTHONIOENCODING", "utf-8")
-            .env("PYTHONPATH", home.join("third_party/Matcha-TTS"))
-            .env("MODELSCOPE_CACHE", app_cache.join("cosyvoice/modelscope"))
+    fn spawn(
+        python: &Path,
+        home: &Path,
+        model: &Path,
+        app_cache: &Path,
+        gpu_uuid: Option<&str>,
+    ) -> Result<Self> {
+        let mut command = worker_command(python, home, model, app_cache, gpu_uuid);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "无法启动 CosyVoice3 Python 推理进程（{}），请清理应用缓存后重试",
-                    python.display()
-                )
-            })?;
+            .stderr(Stdio::piped());
+        let child = command.spawn().with_context(|| {
+            format!(
+                "无法启动 CosyVoice3 Python 推理进程（{}），请清理应用缓存后重试",
+                python.display()
+            )
+        })?;
 
         let (requests, pending) = mpsc::sync_channel::<Vec<u8>>(1);
         let (events, replies) = mpsc::channel();
@@ -758,6 +1084,8 @@ impl Engine {
             requests: Some(requests),
             replies,
             stderr_tail: Arc::default(),
+            cpu_fallback: None,
+            managed_cuda: gpu_uuid.is_some() && python == managed_cuda_python(app_cache),
         };
         // Each thread owns its pipe. In particular, writing a large request to
         // a stalled worker must never block the caller's cancellation polling.
@@ -924,6 +1252,189 @@ fn drain_stderr(mut stderr: impl Read, tail: &Mutex<Vec<u8>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_progress_tracks_parallel_downloads_and_installation() {
+        let mut downloads = CudaDownloads::default();
+        assert!(downloads.update("Resolved 121 packages in 2.98s").is_none());
+        assert!(
+            downloads
+                .update("Downloading onnxruntime-gpu (233.2MiB)")
+                .unwrap()
+                .contains("233.2MiB")
+        );
+        assert!(
+            downloads
+                .update("Downloading nvidia-cudnn-cu12 (652.9MiB)")
+                .unwrap()
+                .contains("正在下载 2 个")
+        );
+        let stage = downloads.update(" Downloaded onnxruntime-gpu").unwrap();
+        assert!(stage.contains("已下载 1 个包"));
+        assert!(!stage.contains("onnxruntime-gpu"));
+        assert!(downloads.update("Downloaded onnxruntime-gpu").is_none());
+        assert!(
+            downloads
+                .update("Prepared 121 packages in 2m")
+                .unwrap()
+                .contains("正在安装")
+        );
+    }
+
+    #[test]
+    fn managed_cuda_requires_a_verified_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !cfg!(all(windows, target_arch = "x86_64")) {
+            assert_eq!(managed_cuda_status(root), None);
+            return;
+        }
+        assert_eq!(managed_cuda_status(root), Some(false));
+        let python = managed_cuda_python(root);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, b"test").unwrap();
+        assert_eq!(managed_cuda_status(root), Some(false));
+        fs::write(managed_cuda_marker(root), "").unwrap();
+        assert_eq!(managed_cuda_status(root), Some(false));
+        fs::write(managed_cuda_marker(root), "ready\n").unwrap();
+        assert_eq!(managed_cuda_status(root), Some(true));
+        fs::remove_file(python).unwrap();
+        assert_eq!(managed_cuda_status(root), Some(false));
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn removes_unverified_cuda_without_touching_cpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cpu = runtime_python(root);
+        fs::create_dir_all(cpu.parent().unwrap()).unwrap();
+        fs::write(&cpu, b"cpu").unwrap();
+        fs::create_dir_all(managed_cuda_dir(root)).unwrap();
+        fs::create_dir_all(managed_cuda_cache(root)).unwrap();
+        assert_eq!(managed_cuda_status(root), Some(false));
+        assert!(managed_cuda_present(root));
+        remove_managed_cuda(root).unwrap();
+        assert!(!managed_cuda_present(root));
+        assert_eq!(fs::read(&cpu).unwrap(), b"cpu");
+    }
+
+    #[test]
+    fn cuda_python_requires_an_absolute_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("python.exe");
+        fs::write(&python, b"test").unwrap();
+        assert_eq!(
+            cuda_python(Some(python.clone().into_os_string())),
+            Some(python)
+        );
+        assert!(cuda_python(None).is_none());
+        assert!(cuda_python(Some("python.exe".into())).is_none());
+        assert!(cuda_python(Some(dir.path().as_os_str().to_owned())).is_none());
+        assert!(cuda_python(Some(dir.path().join("missing.exe").into_os_string())).is_none());
+    }
+
+    #[test]
+    fn worker_environment_pins_the_device_even_for_cpu_self_test() {
+        let path = Path::new("test");
+        for (uuid, expected_flag) in [(None, "0"), (Some("GPU-test"), "1")] {
+            let command = worker_command(path, path, path, path, uuid);
+            let value = |key| {
+                command.get_envs().find_map(|(name, value)| {
+                    (name == std::ffi::OsStr::new(key))
+                        .then_some(value)
+                        .flatten()
+                })
+            };
+            assert_eq!(value("TFY_COSYVOICE_USE_CUDA").unwrap(), expected_flag);
+            assert_eq!(value("CUDA_VISIBLE_DEVICES").unwrap(), uuid.unwrap_or(""));
+        }
+    }
+
+    fn test_cuda_worker(root: &Path) -> (Engine, Receiver<Vec<u8>>, mpsc::Sender<Result<Reply>>) {
+        let python = runtime_python(root);
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(python, b"invalid interpreter").unwrap();
+        fs::write(
+            root.join("cosyvoice/venv/.tfy-bgm-cosyvoice-env"),
+            format!("{COSYVOICE_ENV}:cpu\n"),
+        )
+        .unwrap();
+        let (requests, pending) = mpsc::sync_channel(1);
+        let (events, replies) = mpsc::channel();
+        let engine = Engine {
+            child: Some(long_running_command().spawn().unwrap()),
+            requests: Some(requests),
+            replies,
+            stderr_tail: Arc::default(),
+            managed_cuda: false,
+            cpu_fallback: Some(CpuFallback {
+                home: root.to_owned(),
+                model: root.to_owned(),
+                app_cache: root.to_owned(),
+            }),
+        };
+        (engine, pending, events)
+    }
+
+    #[test]
+    fn cuda_failure_reaps_worker_and_consumes_fallback_before_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("speech.wav");
+        fs::write(&output, b"partial WAV").unwrap();
+        let (mut engine, pending, events) = test_cuda_worker(dir.path());
+        events
+            .send(Ok(Reply::Error {
+                message: "CUDA failed".into(),
+            }))
+            .unwrap();
+        let error = engine
+            .generate(
+                "text",
+                "prompt",
+                &output,
+                &output,
+                &CancellationToken::new(),
+                &|| panic!("failed CPU startup must not publish CPU inference"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("无法启动 CPU 进程"), "{error:#}");
+        assert!(!engine.is_alive());
+        assert!(engine.cpu_fallback.is_none());
+        assert!(!output.exists());
+        assert!(pending.try_recv().is_ok());
+        assert!(matches!(
+            pending.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn cancellation_during_cuda_request_does_not_start_cpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("speech.wav");
+        fs::write(&output, b"partial WAV").unwrap();
+        let (mut engine, pending, events) = test_cuda_worker(dir.path());
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let responder = thread::spawn(move || {
+            pending.recv_timeout(Duration::from_secs(3)).unwrap();
+            cancel.cancel();
+            let _ = events.send(Ok(Reply::Error {
+                message: "CUDA failed".into(),
+            }));
+        });
+        let error = engine
+            .generate("text", "prompt", &output, &output, &token, &|| {
+                panic!("cancellation must not publish CPU inference");
+            })
+            .unwrap_err();
+        responder.join().unwrap();
+        assert!(error.to_string().contains("已取消"), "{error:#}");
+        assert!(!engine.is_alive());
+        assert!(engine.cpu_fallback.is_some());
+        assert!(output.exists());
+    }
 
     #[test]
     fn uv_wheel_script_path_uses_forward_slashes() {

@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 /// ASR 默认模型（仅 0.6B-int8 版本）。
 pub const DEFAULT_MODEL_NAME: &str = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25";
@@ -22,6 +23,11 @@ pub const DOWNLOAD_EVENT: &str = "model-download-progress";
 /// 模型加载状态事件名；`idle / loading / success / failed` 四态均会推送，
 /// 下载完成后的自动加载与手动加载共用同一通道，前端据此显示状态与重试入口。
 pub const LOAD_STATUS_EVENT: &str = "model-load-status";
+
+pub(crate) fn emit_load_status(app: &AppHandle, status: &ModelLoadStatus) {
+    let _ = app.emit(LOAD_STATUS_EVENT, status);
+}
+
 /// 推理引擎标识，界面上原样展示。
 const ENGINE: &str = "sherpa-onnx";
 /// 扫描目录的最大深度，避免异常目录结构拖慢界面。

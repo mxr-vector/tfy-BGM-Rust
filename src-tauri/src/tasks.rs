@@ -7,8 +7,7 @@
 //! - 同一时刻只运行一个任务，避免 ASR 推理与分离子进程争抢 CPU / 内存；
 //! - 提交立即返回任务 id，调用方通过 `GET /v1/tasks/{id}` 轮询，
 //!   或订阅 `GET /v1/tasks/{id}/events`（SSE）接收逐条进度；
-//! - 暂不支持取消：sherpa-onnx 的识别循环与分离子进程都没有安全的取消点，
-//!   强行中断会留下半截交付物；
+//! - HTTP 队列不提供独立的取消接口；
 //! - 已完成任务保留最近 [`HISTORY_LIMIT`] 条，避免长期运行时无限增长。
 //!
 //! 队列只依赖 `AppHandle` 获取 `AppState`，不持有任何界面对象；状态变化统一交给
@@ -22,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+use tokio_util::sync::CancellationToken;
 
 use crate::event_bus::EventBus;
 use crate::separation;
@@ -364,6 +364,7 @@ impl TaskStore {
                     &separation_model,
                     separation_target.as_deref(),
                     &root,
+                    &CancellationToken::new(),
                     move |progress| store.apply_progress(&job_id, progress),
                 )
                 .map_err(|error| format!("{error:#}"))?;
@@ -392,10 +393,11 @@ impl TaskStore {
                 self.set_stage(id, "loading", "正在加载 ASR 模型…");
                 let root = state.models_root();
                 let loaded = runtime
-                    .load(&root, &dir)
+                    .load(&root, &dir, |status| {
+                        crate::models::emit_load_status(app, status)
+                    })
                     .map_err(|error| format!("{error:#}"))?;
                 state.remember_loaded_model(model_id);
-                let _ = app.emit(crate::models::LOAD_STATUS_EVENT, runtime.load_status());
                 serde_json::to_value(&loaded)
                     .map(|value| json!({ "loaded": value }))
                     .map_err(|error| format!("序列化模型信息失败：{error}"))

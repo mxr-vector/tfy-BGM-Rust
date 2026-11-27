@@ -19,7 +19,9 @@ import { wakeLockSupported } from '@/composables/useSystemIntegration';
 import type { AsrModel, CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
 import { apiStatus, refreshApiInfo } from '@/stores/api';
 import {
+  asrLoadCancelling,
   autoLoading,
+  cancelAsrLoad,
   cancelDownload,
   chooseModelsDir,
   deleteAsrModel,
@@ -80,7 +82,7 @@ import { state } from '@/stores/state';
 import {
   cancelTtsInstall, cancelTtsLoad, installTtsModel, manageTtsModel,
   openModelDownloadSource, refreshTtsModels, ttsDownloadPercent, ttsDownloadProgress,
-  ttsInstallCancelling, ttsInstalling, ttsLoadCancelling, ttsLoadProgress, ttsModelActionLabel,
+  ttsGpuInstalling, ttsGpuRemoving, ttsInstallCancelling, ttsInstalling, ttsLoadCancelling, ttsLoadProgress, ttsModelActionLabel,
   ttsModelBusy, ttsModels, ttsModelsLoading, type TtsModel,
 } from '@/stores/tts';
 import FontSelect from './FontSelect.vue';
@@ -223,6 +225,27 @@ async function editDownloadSource(target: DownloadSourceTarget): Promise<void> {
   } finally {
     savingDownloadSource.value = false;
   }
+}
+
+const gpuEnvironmentModel = computed(() => ttsModels.value.find(model => model.family === 'CosyVoice3'));
+
+async function confirmInstallGpu(model: TtsModel): Promise<void> {
+  const confirmed = await showModal({
+    title: '安装 GPU 环境',
+    description: '需要 NVIDIA 驱动和网络连接。首次下载约 2 GB，运行库安装到本地缓存，不会更改系统驱动或 CPU 环境。',
+    confirmText: '安装',
+  });
+  if (confirmed !== null) await manageTtsModel(model, 'installGpu');
+}
+
+async function confirmRemoveGpu(model: TtsModel): Promise<void> {
+  const confirmed = await showModal({
+    title: '删除 GPU 环境',
+    description: '只删除应用托管的 CosyVoice3 GPU 环境和专用下载缓存。如果模型正在使用该环境，会先释放模型。模型文件、CPU 环境和 NVIDIA 驱动不受影响。',
+    confirmText: '删除',
+    danger: true,
+  });
+  if (confirmed !== null) await manageTtsModel(model, 'removeGpu');
 }
 
 async function confirmDeleteTtsModel(model: TtsModel): Promise<void> {
@@ -723,6 +746,30 @@ watch(settingsOpen, async (open) => {
 
               <div class="settings-subgroup">
                 <div class="settings-subgroup-head">
+                  <h4>GPU 推理环境</h4>
+                  <span class="settings-muted">目前支持 CosyVoice3</span>
+                </div>
+                <template v-if="gpuEnvironmentModel">
+                  <div v-if="ttsGpuInstalling && ttsLoadProgress" class="settings-download">
+                    <progress class="settings-gpu-progress" aria-label="GPU 环境安装进度"></progress>
+                    <p class="settings-hint" role="status">{{ ttsLoadProgress.stage }}</p>
+                    <button type="button" class="settings-btn" :disabled="ttsLoadCancelling" @click="cancelTtsLoad">{{ ttsLoadCancelling ? '正在取消…' : '取消安装' }}</button>
+                  </div>
+                  <p v-else-if="gpuEnvironmentModel.gpuEnvironmentReady === null" class="settings-hint">一键安装需要 Windows x64 和 NVIDIA 显卡。</p>
+                  <template v-else-if="gpuEnvironmentModel.gpuEnvironmentReady">
+                    <p class="settings-hint" role="status">GPU 环境已就绪。加载 CosyVoice3 时会在显存充足的情况下尝试使用 GPU。</p>
+                    <button v-if="gpuEnvironmentModel.installed && gpuEnvironmentModel.device !== 'cuda'" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(gpuEnvironmentModel, 'load')">{{ gpuEnvironmentModel.loaded ? '重新加载 CosyVoice3' : '加载 CosyVoice3' }}</button>
+                  </template>
+                  <template v-else>
+                    <p class="settings-hint">{{ gpuEnvironmentModel.installed ? '需要 NVIDIA 驱动。环境单独安装，不影响 CPU 推理。' : '请先下载 CosyVoice3 模型，用于验证 GPU 环境。' }}</p>
+                    <button type="button" class="settings-btn" :disabled="ttsModelBusy || !gpuEnvironmentModel.installed" @click="confirmInstallGpu(gpuEnvironmentModel)">安装 GPU 环境</button>
+                  </template>
+                  <button v-if="gpuEnvironmentModel.gpuEnvironmentPresent && !ttsGpuInstalling" type="button" class="settings-btn is-danger" :disabled="ttsModelBusy" @click="confirmRemoveGpu(gpuEnvironmentModel)">{{ ttsGpuRemoving ? '正在删除 GPU 环境…' : '删除 GPU 环境' }}</button>
+                </template>
+              </div>
+
+              <div class="settings-subgroup">
+                <div class="settings-subgroup-head">
                   <h4>模型目录</h4>
                   <span class="settings-muted">{{ modelsRootBadge }}</span>
                 </div>
@@ -782,9 +829,12 @@ watch(settingsOpen, async (open) => {
                     重试加载
                   </button>
                 </div>
-                <p v-else-if="autoLoading && !models.some(model => model.path === loadingModelPath)" class="settings-hint" role="status">
-                  下载完成，正在自动加载模型…
-                </p>
+                <div v-else-if="loadStatus.phase === 'loading'" class="settings-subgroup-actions">
+                  <p class="settings-hint" role="status">{{ autoLoading ? '下载完成，正在自动加载模型…' : '正在加载 ASR 模型…' }}</p>
+                  <button type="button" class="settings-btn" :disabled="asrLoadCancelling" @click="cancelAsrLoad">
+                    {{ asrLoadCancelling ? '正在取消…' : '取消加载' }}
+                  </button>
+                </div>
 
                 <div v-if="defaultModel && !defaultModel.installed" class="settings-model-callout">
                   <div class="settings-model-callout-text">
@@ -933,7 +983,7 @@ watch(settingsOpen, async (open) => {
                     <p class="settings-hint">{{ ttsDownloadProgress ? `${ttsDownloadProgress.file} · ${formatBytes(ttsDownloadProgress.received)} / ${formatBytes(ttsDownloadProgress.total)} · ${ttsDownloadPercent}%` : '正在准备安全校验的模型下载…' }}</p>
                     <button type="button" class="settings-btn" :disabled="ttsInstallCancelling" @click="cancelTtsInstall()">{{ ttsInstallCancelling ? '正在取消…' : '取消下载' }}</button>
                   </div>
-                  <div v-else-if="ttsLoadProgress" class="settings-download" role="status" aria-live="polite">
+                  <div v-else-if="ttsLoadProgress && !ttsGpuInstalling" class="settings-download" role="status" aria-live="polite">
                     <p class="settings-hint">{{ ttsLoadProgress.stage }}</p>
                     <button type="button" class="settings-btn" :disabled="ttsLoadCancelling" @click="cancelTtsLoad">{{ ttsLoadCancelling ? '正在取消…' : '取消加载' }}</button>
                   </div>

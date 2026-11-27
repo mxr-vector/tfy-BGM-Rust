@@ -26,6 +26,7 @@ axum = "0.8"
 bgm-core = { path = "core" }
 # 解析系统「下载」目录（Windows FOLDERID_Downloads / Linux XDG_DOWNLOAD_DIR）作为模型默认位置。
 dirs = "7"
+libloading = "0.7"
 notify = "8.2"
 parking_lot = "0.12"
 # 下载 ASR 模型：阻塞式客户端 + rustls，避免依赖系统 OpenSSL。

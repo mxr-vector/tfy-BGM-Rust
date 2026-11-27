@@ -121,9 +121,9 @@ fn remove_rejects_loading_or_downloading_models() {
     fs::write(dir.path().join("custom-model/encoder.int8.onnx"), b"x").unwrap();
     let runtime = ModelRuntime::default();
 
-    runtime.loading.store(true, Ordering::SeqCst);
+    *runtime.loading.lock() = Some(tokio_util::sync::CancellationToken::new());
     assert!(runtime.remove(dir.path(), "custom-model").is_err());
-    runtime.loading.store(false, Ordering::SeqCst);
+    runtime.loading.lock().take();
     runtime.downloading.store(true, Ordering::SeqCst);
     assert!(runtime.remove(dir.path(), "custom-model").is_err());
     runtime.downloading.store(false, Ordering::SeqCst);
@@ -141,12 +141,42 @@ fn remove_rejects_active_model_tasks_and_recovers_after_drop() {
     let task = runtime.reserve_model_task().unwrap();
     assert!(runtime.remove(dir.path(), "custom-model").is_err());
     assert!(runtime.unload().is_err());
-    assert!(runtime.load(dir.path(), &model).is_err());
+    assert!(runtime.load(dir.path(), &model, |_| {}).is_err());
     assert!(model.exists());
 
     drop(task);
     runtime.remove(dir.path(), "custom-model").unwrap();
     assert!(!model.exists());
+}
+
+#[test]
+fn cancelled_load_restores_previous_status_and_releases_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target-model");
+    let runtime = ModelRuntime::default();
+    runtime.set_load_status(ModelLoadStatus {
+        phase: LoadPhase::Failed,
+        path: Some("previous-model".to_owned()),
+        error: Some("previous error".to_owned()),
+    });
+
+    let error = runtime
+        .load(dir.path(), &target, |status| {
+            if status.phase == LoadPhase::Loading {
+                assert!(!runtime.cancel_load("another-model"));
+                assert!(runtime.cancel_load(status.path.as_deref().unwrap()));
+            }
+        })
+        .unwrap_err();
+
+    assert!(error.is::<crate::tts::SpeechCancelled>());
+    assert!(!runtime.is_loading());
+    assert!(runtime.loaded().is_none());
+    let status = runtime.load_status();
+    assert_eq!(status.phase, LoadPhase::Failed);
+    assert_eq!(status.path.as_deref(), Some("previous-model"));
+    assert_eq!(status.error.as_deref(), Some("previous error"));
+    assert!(!runtime.cancel_load(target.to_str().unwrap()));
 }
 
 #[test]

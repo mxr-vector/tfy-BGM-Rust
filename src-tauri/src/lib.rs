@@ -12,7 +12,10 @@ mod platform;
 mod playlist_migration;
 mod separation;
 mod settings;
+mod sherpa_cuda;
 mod speech_audio;
+mod speech_bench;
+mod speech_device;
 mod state;
 mod subtitles;
 mod tasks;
@@ -33,6 +36,8 @@ use tauri::webview::{PermissionKind, PermissionResponse};
 /// 必须在初始化 Tauri 之前调用，worker 不创建窗口、不加载状态。
 pub fn separation_worker_main() -> Option<i32> {
     separation::worker_main()
+        .or_else(sherpa_cuda::worker_main)
+        .or_else(speech_bench::main)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -131,15 +136,19 @@ pub fn run() {
             commands::open_models_dir,
             commands::download_asr_model,
             commands::load_asr_model,
+            commands::cancel_asr_load,
             commands::unload_asr_model,
             commands::delete_asr_model,
             commands::cancel_asr_download,
             commands::transcribe_wav,
+            commands::cancel_wav_transcription,
             tts::tts_models,
             tts::install_tts_model,
             tts::open_model_download_source,
             tts::save_model_download_source,
             tts::load_tts_model,
+            tts::install_tts_gpu,
+            tts::remove_tts_gpu,
             tts::remove_tts_model,
             tts::parse_tts_script,
             tts::normalize_tts_reference,
@@ -150,6 +159,7 @@ pub fn run() {
             tts::save_tts_audio,
             commands::separation_models,
             commands::generate_subtitles,
+            commands::cancel_subtitle_generation,
             commands::export_subtitle,
             commands::parse_playlist_migration_source,
             commands::save_playlist_migration_text,

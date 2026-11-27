@@ -2,7 +2,7 @@
 
 协议：stdin 每行一个 JSON 请求；stdout 输出 TFY_COSYVOICE 前缀的 JSON 回复。
 参考语音特征沿用 CosyVoice 前端（Tokenizer/campplus/speech_tokenizer），
-LLM、Flow、HiFT 全部走 ONNX Runtime，优先使用 DirectML/CUDA 显卡。
+LLM、Flow、HiFT 全部走 ONNX Runtime；CUDA 或 CPU 由父进程选择。
 """
 import os
 import sys
@@ -15,7 +15,6 @@ sys.stdout = sys.stderr
 import hashlib
 import json
 import math
-import subprocess
 import traceback
 
 # 禁用 wetext：它初始化时要联网下载模型，而本 worker 强制离线运行；
@@ -52,12 +51,7 @@ def log(message):
 
 
 def pin_high_performance():
-    """把进程绑定到大小核里的 P 核。
-
-    DirectML 每个算子的调度都在主线程上同步提交；线程一旦被调度到 E 核，
-    逐 token 解码会慢 2-3 倍。这里读取 Windows 的 CPU Set EfficiencyClass，
-    只在大核存在时收紧亲和性，避免影响普通机器。
-    """
+    """在 Windows 混合架构上将进程绑定到性能核。"""
     if os.name != 'nt':
         return
     try:
@@ -112,27 +106,15 @@ def thread_count():
     return max(1, min(os.cpu_count() or 4, 8))
 
 
-def gpu_free_mib():
-    try:
-        completed = subprocess.run(
-            ['nvidia-smi', '--query-gpu=memory.free', '--format=csv,noheader,nounits'],
-            capture_output=True, text=True, timeout=5, check=False)
-    except Exception:
-        return 0
-    if completed.returncode != 0:
-        return 0
-    values = [int(line) for line in completed.stdout.split() if line.isdigit()]
-    return max(values, default=0)
+CUDA_EP = 'CUDAExecutionProvider'
 
 
-def gpu_providers(ort):
-    available = ort.get_available_providers()
-    providers = []
-    if 'CUDAExecutionProvider' in available:
-        providers.append(('CUDAExecutionProvider', {'device_id': 0}))
-    if 'DmlExecutionProvider' in available:
-        providers.append('DmlExecutionProvider')
-    return providers
+def configure_session(session, name, require_cuda):
+    session.disable_fallback()
+    providers = session.get_providers()
+    if require_cuda and CUDA_EP not in providers:
+        raise RuntimeError(f'{name} 未能启用 {CUDA_EP}（实际 providers={providers}）')
+    log(f'{name} providers={providers}')
 
 
 def make_session(path, use_gpu, intra=1):
@@ -141,21 +123,23 @@ def make_session(path, use_gpu, intra=1):
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     options.intra_op_num_threads = intra
     options.inter_op_num_threads = 1
-    providers = gpu_providers(ort) if use_gpu else []
-    providers.append('CPUExecutionProvider')
-    try:
-        session = ort.InferenceSession(path, sess_options=options, providers=providers)
-    except Exception as exc:
-        if providers[0] == 'CPUExecutionProvider':
-            raise
-        log(f'{os.path.basename(path)} GPU 初始化失败，改用 CPU：{exc}')
-        session = ort.InferenceSession(path, sess_options=options,
-                                       providers=['CPUExecutionProvider'])
-    log(f'{os.path.basename(path)} providers={session.get_providers()}')
+    providers = ['CPUExecutionProvider']
+    if use_gpu:
+        # The selected UUID is the only visible device. CPU may still run shape ops.
+        providers.insert(0, (CUDA_EP, {'device_id': 0}))
+    session = ort.InferenceSession(path, sess_options=options, providers=providers,
+                                   enable_fallback=False)
+    # An advertised EP can still fail to register (e.g. missing CUDA/cuDNN DLLs).
+    configure_session(session, path, use_gpu)
     return session
 
 
+_torch_dll_directory = None
+dll_handles = []
+
+
 def enable_cuda_dlls(torch):
+    global _torch_dll_directory
     lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
     if not os.path.isdir(lib):
         return
@@ -163,7 +147,7 @@ def enable_cuda_dlls(torch):
     add_dll_directory = getattr(os, 'add_dll_directory', None)
     if add_dll_directory is not None:
         try:
-            add_dll_directory(lib)
+            _torch_dll_directory = add_dll_directory(lib)
         except OSError:
             pass
 
@@ -228,24 +212,17 @@ class LlmOnnx:
         logits = next(item for item in self.session.get_outputs() if item.name == 'logits')
         if int(logits.shape[-1]) != SPEECH_TOKEN_SIZE + 200:
             raise RuntimeError(f'LLM 词表大小异常：{logits.shape[-1]}')
-        # DirectML 在一次多 token 前向之后，同一 session 的逐 token 解码会明显变慢
-        # （约 2-3 倍）。前向填充与自回归解码分开用两个 session，可让解码始终
-        # 走快路径；CPU 没有这个现象，保持单 session 以节省内存。
-        if not use_gpu:
-            self.decode_session = self.session
-        else:
-            decode = make_session(path, use_gpu, intra)
-            if {'CUDAExecutionProvider', 'DmlExecutionProvider'} & set(decode.get_providers()):
-                self.decode_session = decode
-            else:
-                # 显存不足时第二个会话会回退 CPU，这比共享前一个会话还慢。
-                log('第二个 LLM 会话未获得显卡，回退为单会话解码')
-                self.decode_session = self.session
+        self.use_gpu = use_gpu
+        self.output_names = ['logits', *self.present_names]
 
-    def step(self, session, token_ids, token_types, past):
+    def step(self, token_ids, token_types, past):
         import numpy as np
         new_length = token_ids.shape[1]
-        past_length = 0 if past is None else past[0].shape[2]
+        if past is None:
+            past_length = 0
+        else:
+            shape = past[0].shape() if self.use_gpu else past[0].shape
+            past_length = shape[2]
         position_ids = np.arange(past_length, past_length + new_length,
                                  dtype=np.int64).reshape(1, new_length)
         feeds = {
@@ -257,10 +234,28 @@ class LlmOnnx:
         if past is None:
             empty = np.zeros((1, 2, 0, FLOW_HEAD_DIM), dtype=np.float16)
             feeds.update({name: empty for name in self.past_names})
-        else:
-            feeds.update(dict(zip(self.past_names, past)))
-        outputs = session.run(['logits', *self.present_names], feeds)
-        return outputs[0], outputs[1:]
+        if not self.use_gpu:
+            if past is not None:
+                feeds.update(zip(self.past_names, past))
+            outputs = self.session.run(self.output_names, feeds)
+            return outputs[0], outputs[1:]
+
+        # Share weights between prefill and decode. Only logits return to the CPU
+        # for sampling; each new KV tensor becomes the next step's input OrtValue.
+        binding = self.session.io_binding()
+        for name, value in feeds.items():
+            binding.bind_cpu_input(name, np.ascontiguousarray(value))
+        if past is not None:
+            for name, value in zip(self.past_names, past):
+                binding.bind_ortvalue_input(name, value)
+        binding.bind_output('logits', 'cpu')
+        for name in self.present_names:
+            binding.bind_output(name, 'cuda', 0)
+        binding.synchronize_inputs()
+        self.session.run_with_iobinding(binding)
+        binding.synchronize_outputs()
+        outputs = binding.get_outputs()
+        return outputs[0].numpy(), outputs[1:]
 
     def infer(self, text, prompt_text, prompt_speech, seed=NOISE_SEED, min_ratio=2, max_ratio=20):
         import numpy as np
@@ -282,7 +277,7 @@ class LlmOnnx:
         minimum = int(text.shape[1] * min_ratio)
         maximum = int(text.shape[1] * max_ratio)
         decoded = []
-        logits, past = self.step(self.session, token_ids, token_types, None)
+        logits, past = self.step(token_ids, token_types, None)
         for index in range(maximum):
             scores = logits[0, -1].astype(np.float32)
             scores = scores - scores.max()
@@ -295,7 +290,7 @@ class LlmOnnx:
             decoded.append(token)
             token_ids = np.array([[token]], dtype=np.int64)
             token_types = np.array([[SPEECH_TOKEN_TYPE]], dtype=np.int64)
-            logits, past = self.step(self.decode_session, token_ids, token_types, past)
+            logits, past = self.step(token_ids, token_types, past)
         if not decoded:
             raise RuntimeError('LLM 没有生成任何语音 Token')
         return decoded
@@ -401,10 +396,18 @@ def build_runtime(model_dir):
     import torch
     enable_cuda_dlls(torch)
     import onnxruntime as ort
-    free_mib = gpu_free_mib()
-    minimum = int(os.environ.get('TFY_COSYVOICE_MIN_VRAM_MIB', '6144'))
-    use_gpu = free_mib >= minimum and bool(gpu_providers(ort))
-    log(f'推理设备：{"GPU" if use_gpu else "CPU"}（可用显存 {free_mib} MiB，阈值 {minimum} MiB）')
+    use_gpu = os.environ.get('TFY_COSYVOICE_USE_CUDA') == '1'
+    if use_gpu and os.environ.get('TFY_COSYVOICE_MANAGED_CUDA') == '1':
+        import site
+        from pathlib import Path
+        dll_dirs = [str(path) for root in site.getsitepackages()
+                    for path in Path(root).glob('nvidia/*/bin') if path.is_dir()]
+        os.environ['PATH'] = os.pathsep.join([*dll_dirs, os.environ.get('PATH', '')])
+        dll_handles.extend(os.add_dll_directory(path) for path in dll_dirs)
+        ort.preload_dlls(directory='')
+    if use_gpu and CUDA_EP not in ort.get_available_providers():
+        raise RuntimeError(f'所选 CUDA Python 环境未提供 {CUDA_EP}')
+    log(f'推理设备：{"CUDA" if use_gpu else "CPU"}')
     torch.set_num_threads(thread_count())
     from cosyvoice.cli.frontend import CosyVoiceFrontEnd
     config = load_config(model_dir)
@@ -418,7 +421,10 @@ def build_runtime(model_dir):
         allowed_special=config['allowed_special'],
     )
     intra = thread_count()
-    # LLM/Flow/HiFT 共用同一套设备决策；单个会话建不起来时 make_session 回退 CPU。
+    # The pinned frontend requests CUDA for the tokenizer only with CUDA PyTorch.
+    configure_session(frontend.campplus_session, 'campplus', False)
+    configure_session(frontend.speech_tokenizer_session, 'speech_tokenizer',
+                      use_gpu and frontend.device.type == 'cuda')
     llm = LlmOnnx(os.path.join(model_dir, 'llm', 'model.onnx'), use_gpu, intra)
     flow = FlowOnnx(os.path.join(model_dir, 'flow', 'flow_conditioner.onnx'),
                     os.path.join(model_dir, 'flow', 'flow_dit_step.onnx'), use_gpu, intra)

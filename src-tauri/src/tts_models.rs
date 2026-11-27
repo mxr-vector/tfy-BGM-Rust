@@ -46,6 +46,9 @@ pub struct TtsModel {
     pub installed: bool,
     pub has_files: bool,
     pub loaded: bool,
+    pub device: Option<&'static str>,
+    pub gpu_environment_ready: Option<bool>,
+    pub gpu_environment_present: bool,
     pub path: String,
     /// 默认浏览地址；「访问下载源」在未自定义时打开它。
     pub default_download_url: String,
@@ -107,7 +110,7 @@ struct Spec {
     hash: &'static str,
     size: u64,
 }
-const COSYVOICE_ID: &str = TTS_COSYVOICE_MODEL_ID;
+pub(crate) const COSYVOICE_ID: &str = TTS_COSYVOICE_MODEL_ID;
 const KOKORO_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[0];
 const KOKORO_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[1];
 const ZIPVOICE_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[2];
@@ -307,6 +310,9 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
         installed: false,
         has_files: dir.is_dir(),
         loaded: false,
+        device: None,
+        gpu_environment_ready: None,
+        gpu_environment_present: false,
         path: dir.to_string_lossy().into_owned(),
         default_download_url: default_download_url.to_owned(),
         default_source_url: default_source_url.to_owned(),

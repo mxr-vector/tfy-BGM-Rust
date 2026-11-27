@@ -34,29 +34,118 @@ static SYNTHESIS: JobSlot = JobSlot::new();
 static INSTALL: JobSlot = JobSlot::new();
 static LOAD: JobSlot = JobSlot::new();
 static ENGINE: parking_lot::Mutex<Option<LoadedTts>> = parking_lot::Mutex::new(None);
-static LOADED_PATH: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+static LOADED_STATUS: parking_lot::RwLock<Option<(String, &'static str)>> =
+    parking_lot::RwLock::new(None);
 
 struct LoadedTts {
     path: String,
     engine: TtsEngine,
 }
 
+impl LoadedTts {
+    fn device(&self) -> &'static str {
+        match &self.engine {
+            TtsEngine::Sherpa(engine) => engine.device(),
+            TtsEngine::CosyVoice(engine) => engine.device(),
+        }
+    }
+}
+
 enum TtsEngine {
-    Sherpa(OfflineTts),
+    Sherpa(SherpaEngine),
     CosyVoice(cosyvoice::Engine),
+}
+
+struct SherpaEngine {
+    gpu: Option<crate::sherpa_cuda::Worker>,
+    cpu: Option<OfflineTts>,
+    config: OfflineTtsConfig,
+    rate: u32,
+    speakers: i32,
+}
+
+impl SherpaEngine {
+    fn device(&self) -> &'static str {
+        if self.gpu.is_some() { "cuda" } else { "cpu" }
+    }
+
+    fn load(
+        config: OfflineTtsConfig,
+        init: crate::sherpa_cuda::Init,
+        token: &CancellationToken,
+    ) -> Result<Self> {
+        let minimum = crate::speech_device::minimum_vram_mib("TFY_TTS_MIN_VRAM_MIB", 2048);
+        let gpu = match crate::sherpa_cuda::Worker::try_start(init, minimum, token) {
+            Ok(worker) => worker,
+            Err(error) => {
+                check_cancelled(token)?;
+                eprintln!("[tts] CUDA initialization failed; using CPU: {error:#}");
+                None
+            }
+        };
+        if let Some(gpu) = gpu {
+            return Ok(Self {
+                rate: gpu.sample_rate,
+                speakers: gpu.speakers,
+                gpu: Some(gpu),
+                cpu: None,
+                config,
+            });
+        }
+        check_cancelled(token)?;
+        let cpu = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
+        Ok(Self {
+            rate: sherpa_sample_rate(&cpu)?,
+            speakers: cpu.num_speakers(),
+            gpu: None,
+            cpu: Some(cpu),
+            config,
+        })
+    }
+
+    fn generate(
+        &mut self,
+        config: &GenerationConfig,
+        text: &str,
+        token: &CancellationToken,
+        on_fallback: &dyn Fn(),
+    ) -> Result<Vec<f32>> {
+        if let Some(gpu) = self.gpu.as_ref() {
+            match gpu.generate(text, config, token) {
+                Ok(audio) => return Ok(audio),
+                Err(error) => {
+                    self.gpu.take();
+                    check_cancelled(token)?;
+                    eprintln!("[tts] CUDA inference failed; retrying on CPU: {error:#}");
+                }
+            }
+        }
+        if self.cpu.is_none() {
+            let cpu = OfflineTts::create(&self.config).context("加载 CPU TTS 模型失败")?;
+            anyhow::ensure!(
+                sherpa_sample_rate(&cpu)? == self.rate,
+                "CPU 回退模型的采样率不一致"
+            );
+            self.cpu = Some(cpu);
+            on_fallback();
+        }
+        generate_sherpa(self.cpu.as_ref().unwrap(), config, text, self.rate, token)
+    }
 }
 
 impl LoadedTts {
     fn is_alive(&mut self) -> bool {
         match &mut self.engine {
-            TtsEngine::Sherpa(_) => true,
+            TtsEngine::Sherpa(engine) => engine.gpu.is_some() || engine.cpu.is_some(),
             TtsEngine::CosyVoice(engine) => engine.is_alive(),
         }
     }
 }
 
 fn set_engine(slot: &mut Option<LoadedTts>, engine: Option<LoadedTts>) {
-    *LOADED_PATH.write() = engine.as_ref().map(|loaded| loaded.path.clone());
+    *LOADED_STATUS.write() = engine
+        .as_ref()
+        .map(|loaded| (loaded.path.clone(), loaded.device()));
     *slot = engine;
 }
 
@@ -71,14 +160,21 @@ fn catalog(root: &Path, sources: &BTreeMap<String, String>) -> Vec<tts_models::T
         clear_dead_engine(&mut slot);
     }
     let mut models = tts_models::catalog(root);
-    let loaded = LOADED_PATH.read();
+    let loaded = LOADED_STATUS.read().clone();
     for model in &mut models {
-        model.loaded = model.installed && loaded.as_deref() == Some(model.path.as_str());
+        apply_loaded_status(model, loaded.as_ref());
         if let Some(source) = sources.get(model.id) {
             model.custom_download_url = source.clone();
         }
     }
     models
+}
+
+fn apply_loaded_status(model: &mut tts_models::TtsModel, loaded: Option<&(String, &'static str)>) {
+    model.device = loaded
+        .filter(|(path, _)| model.installed && path == &model.path)
+        .map(|(_, device)| *device);
+    model.loaded = model.device.is_some();
 }
 
 fn with_idle_models<T>(operation: impl FnOnce(&mut Option<LoadedTts>) -> Result<T>) -> Result<T> {
@@ -106,7 +202,7 @@ pub(crate) fn change_models_root<T>(
     })
 }
 
-struct JobSlot(parking_lot::Mutex<JobState>);
+pub(crate) struct JobSlot(parking_lot::Mutex<JobState>);
 
 struct JobState {
     active: Option<(uuid::Uuid, CancellationToken)>,
@@ -114,18 +210,18 @@ struct JobState {
 }
 
 impl JobSlot {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self(parking_lot::Mutex::new(JobState {
             active: None,
             pending: std::collections::VecDeque::new(),
         }))
     }
 
-    fn start(&'static self, id: uuid::Uuid, busy: &str) -> Result<ActiveJob> {
+    pub(crate) fn start(&'static self, id: uuid::Uuid, busy: &str) -> Result<ActiveJob> {
         let mut state = self.0.lock();
         if let Some(index) = state.pending.iter().position(|pending| *pending == id) {
             state.pending.remove(index);
-            bail!("语音任务已取消");
+            bail!(SpeechCancelled);
         }
         if state.active.is_some() {
             bail!("{busy}");
@@ -135,7 +231,7 @@ impl JobSlot {
         Ok(ActiveJob { slot: self, token })
     }
 
-    fn cancel(&self, id: uuid::Uuid) {
+    pub(crate) fn cancel(&self, id: uuid::Uuid) {
         let mut state = self.0.lock();
         if let Some((_, token)) = state.active.as_ref().filter(|(active, _)| *active == id) {
             token.cancel();
@@ -149,9 +245,9 @@ impl JobSlot {
     }
 }
 
-struct ActiveJob {
+pub(crate) struct ActiveJob {
     slot: &'static JobSlot,
-    token: CancellationToken,
+    pub(crate) token: CancellationToken,
 }
 
 impl Drop for ActiveJob {
@@ -160,9 +256,20 @@ impl Drop for ActiveJob {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct SpeechCancelled;
+
+impl std::fmt::Display for SpeechCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("语音任务已取消")
+    }
+}
+
+impl std::error::Error for SpeechCancelled {}
+
 pub(crate) fn check_cancelled(token: &CancellationToken) -> Result<()> {
     if token.is_cancelled() {
-        bail!("语音任务已取消");
+        bail!(SpeechCancelled);
     }
     Ok(())
 }
@@ -213,6 +320,7 @@ pub(super) struct SynthesisProgress {
     pub(super) job_id: uuid::Uuid,
     pub(super) current: usize,
     pub(super) total: usize,
+    pub(super) device: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -242,10 +350,71 @@ async fn worker<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn tts_models(state: State<'_, AppState>) -> CommandResult<Vec<tts_models::TtsModel>> {
+pub async fn tts_models(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<tts_models::TtsModel>> {
     let root = state.models_root();
     let sources = state.tts_download_urls();
-    worker(move || Ok(catalog(&root, &sources))).await
+    worker(move || {
+        let mut models = catalog(&root, &sources);
+        if let Some(model) = models
+            .iter_mut()
+            .find(|model| model.id == tts_models::COSYVOICE_ID)
+        {
+            let cache = app.path().app_cache_dir()?;
+            model.gpu_environment_ready = cosyvoice::managed_cuda_status(&cache);
+            model.gpu_environment_present = cosyvoice::managed_cuda_present(&cache);
+        }
+        Ok(models)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn install_tts_gpu(app: AppHandle, job_id: uuid::Uuid) -> CommandResult<()> {
+    worker(move || {
+        let job = LOAD.start(job_id, "已有 TTS 加载或 GPU 环境安装任务正在进行")?;
+        with_idle_models(|engine| {
+            let root = app.state::<AppState>().models_root();
+            let model = tts_models::model(&root, tts_models::COSYVOICE_ID)?;
+            if !model.installed {
+                bail!("请先下载 CosyVoice3 模型，再安装 GPU 环境");
+            }
+            if engine
+                .as_ref()
+                .is_some_and(|loaded| loaded.device() == "cuda")
+            {
+                bail!("请先释放正在使用 GPU 的 TTS 模型，再安装 GPU 环境");
+            }
+            let app_cache = app.path().app_cache_dir()?;
+            cosyvoice::install_managed_cuda(
+                Path::new(&model.path),
+                &app_cache,
+                &job.token,
+                &|stage| {
+                    emit_load_progress(&app, job_id, stage);
+                },
+            )
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_tts_gpu(app: AppHandle) -> CommandResult<()> {
+    worker(move || {
+        with_idle_models(|engine| {
+            let cache = app.path().app_cache_dir()?;
+            if cosyvoice::managed_cuda_present(&cache) {
+                if matches!(engine.as_ref().map(|loaded| &loaded.engine), Some(TtsEngine::CosyVoice(worker)) if worker.uses_managed_cuda()) {
+                    set_engine(engine, None);
+                }
+                cosyvoice::remove_managed_cuda(&cache)?;
+            }
+            Ok(())
+        })
+    }).await
 }
 
 #[tauri::command]
@@ -596,25 +765,19 @@ fn synthesize(
     check_cancelled(token)?;
     clear_dead_engine(slot);
     if slot.as_ref().is_none_or(|loaded| loaded.path != model.path) {
-        let _ = app.emit(
-            "tts-synthesis-progress",
-            SynthesisProgress {
-                job_id,
-                current: 0,
-                total: request.segments.len(),
-            },
-        );
         set_engine(slot, None);
         let app_cache = app.path().app_cache_dir()?;
         let loaded = create_engine(root, &model, &app_cache, token, &|_| {})?;
         check_cancelled(token)?;
         set_engine(slot, Some(loaded));
     }
-    let result = match &mut slot.as_mut().context("TTS 模型未加载")?.engine {
+    let loaded = slot.as_mut().context("TTS 模型未加载")?;
+    let device = std::cell::Cell::new(loaded.device());
+    let result = match &mut loaded.engine {
         TtsEngine::Sherpa(engine) => {
-            let sample_rate = sherpa_sample_rate(engine)?;
+            let sample_rate = engine.rate;
             let mut generation = match (model.family, reference) {
-                ("Kokoro", _) => kokoro::generation(request.voice_id, engine)?,
+                ("Kokoro", _) => kokoro::generation(request.voice_id, engine.speakers)?,
                 ("ZipVoice", Some((audio, text))) => zipvoice::generation(audio, text),
                 _ => bail!("未知的 TTS 模型类别"),
             };
@@ -625,9 +788,10 @@ fn synthesize(
                 token,
                 sample_rate,
                 true,
-                |text, speed| {
+                &device,
+                |text, speed, on_cpu| {
                     generation.speed = speed;
-                    generate_sherpa(engine, &generation, text, sample_rate, token)
+                    engine.generate(&generation, text, token, on_cpu)
                 },
             )
         }
@@ -649,7 +813,10 @@ fn synthesize(
                 token,
                 sample_rate,
                 false,
-                |text, _| engine.generate(text, reference_text, &prompt, &output, token),
+                &device,
+                |text, _, on_cpu| {
+                    engine.generate(text, reference_text, &prompt, &output, token, on_cpu)
+                },
             )
         }
     };
@@ -688,9 +855,29 @@ fn create_engine(
             "ZipVoice" => zipvoice::configure(&mut config, root, model),
             _ => bail!("未知的 TTS 模型类别"),
         }
-        let engine = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
-        sherpa_sample_rate(&engine)?;
-        TtsEngine::Sherpa(engine)
+        let field = |value: &Option<String>| value.clone().context("TTS 模型配置缺少路径");
+        let threads = config.model.num_threads;
+        let init = if model.family == "Kokoro" {
+            let c = &config.model.kokoro;
+            crate::sherpa_cuda::Init::Kokoro {
+                model: field(&c.model)?,
+                voices: field(&c.voices)?,
+                tokens: field(&c.tokens)?,
+                lexicon: field(&c.lexicon)?,
+                threads,
+            }
+        } else {
+            let c = &config.model.zipvoice;
+            crate::sherpa_cuda::Init::ZipVoice {
+                tokens: field(&c.tokens)?,
+                encoder: field(&c.encoder)?,
+                decoder: field(&c.decoder)?,
+                vocoder: field(&c.vocoder)?,
+                lexicon: field(&c.lexicon)?,
+                threads,
+            }
+        };
+        TtsEngine::Sherpa(SherpaEngine::load(config, init, token)?)
     };
     Ok(LoadedTts {
         path: model.path.clone(),
@@ -718,6 +905,113 @@ fn generate_sherpa(
     Ok(audio.samples().to_vec())
 }
 
+pub(crate) fn benchmark(
+    root: &Path,
+    id: &str,
+    cache: &Path,
+    texts: &[String],
+    prompt: Option<(&Path, &str)>,
+    output: &Path,
+    warmup: usize,
+    runs: usize,
+) -> Result<serde_json::Value> {
+    use std::time::Instant;
+
+    anyhow::ensure!(!texts.is_empty() && runs > 0, "no benchmark input or runs");
+    let model = tts_models::model(root, id)?;
+    let reference = prompt
+        .map(|(path, text)| -> Result<_> {
+            Ok((speech_audio::read_reference(&fs::read(path)?)?, text))
+        })
+        .transpose()?;
+    let token = CancellationToken::new();
+    let scratch = tempfile::tempdir()?;
+    let prompt_wav = scratch.path().join("prompt.wav");
+    let worker_wav = scratch.path().join("worker.wav");
+    let raw_wav = scratch.path().join("raw.wav");
+    if let Some((audio, _)) = &reference {
+        crate::separation::write_wav16_slices(&prompt_wav, &[audio], speech_audio::REFERENCE_RATE)?;
+    }
+    let load_started = Instant::now();
+    let mut loaded = create_engine(root, &model, cache, &token, &|stage| {
+        eprintln!("[tts] {stage}")
+    })?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let (rate, mut generation) = match &loaded.engine {
+        TtsEngine::CosyVoice(engine) => (engine.sample_rate(), None),
+        TtsEngine::Sherpa(engine) if model.family == "Kokoro" => {
+            (engine.rate, Some(kokoro::generation(3, engine.speakers)?))
+        }
+        TtsEngine::Sherpa(engine) => {
+            let (audio, text) = reference
+                .as_ref()
+                .context("ZipVoice requires a reference WAV and text")?;
+            (engine.rate, Some(zipvoice::generation(audio.clone(), text)))
+        }
+    };
+    let segments: Vec<_> = texts
+        .iter()
+        .map(|text| TtsSegment {
+            text: text.clone(),
+            start_ms: None,
+            end_ms: None,
+        })
+        .collect();
+    let mut iterations = Vec::with_capacity(runs);
+    let mut first_segment = Vec::with_capacity(runs);
+    let mut rtfs = Vec::with_capacity(runs);
+    for n in 0..warmup + runs {
+        let run_started = Instant::now();
+        let mut track = Vec::new();
+        let mut first_segment_ms = 0.0;
+        for (index, segment) in segments.iter().enumerate() {
+            let text = segment.text.trim();
+            let samples = match &mut loaded.engine {
+                TtsEngine::Sherpa(engine) => {
+                    engine.generate(generation.as_mut().unwrap(), text, &token, &|| {})?
+                }
+                TtsEngine::CosyVoice(engine) => {
+                    let (_, prompt_text) = reference
+                        .as_ref()
+                        .context("CosyVoice3 requires a reference WAV and text")?;
+                    engine.generate(text, prompt_text, &prompt_wav, &worker_wav, &token, &|| {})?
+                }
+            };
+            let samples = speech_audio::polish_segment(&samples, rate)?;
+            append_segment(&mut track, segment, &samples, rate)?;
+            if index == 0 {
+                first_segment_ms = run_started.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        finalize_track(&mut track, false)?;
+        crate::separation::write_wav16_slices(&raw_wav, &[&track], rate)?;
+        speech_audio::normalize_output(&raw_wav, output, rate, track.len())?;
+        let duration_s = speech_audio::read_wave(output)?.samples().len() as f64 / f64::from(rate);
+        let elapsed = run_started.elapsed().as_secs_f64();
+        if n >= warmup {
+            iterations.push(elapsed * 1000.0);
+            first_segment.push(first_segment_ms);
+            rtfs.push(elapsed / duration_s);
+        }
+    }
+    let quantile = |values: &[f64], fraction: f64| {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted[((fraction * sorted.len() as f64).ceil() as usize).saturating_sub(1)]
+    };
+    let duration_s = speech_audio::read_wave(output)?.samples().len() as f64 / f64::from(rate);
+    Ok(serde_json::json!({
+        "model": id, "load_ms": load_ms, "sample_rate": rate, "duration_s": duration_s,
+        "device": match &loaded.engine {
+            TtsEngine::Sherpa(engine) => engine.device(),
+            TtsEngine::CosyVoice(engine) => engine.device(),
+        },
+        "total_ms": iterations, "p50_ms": quantile(&iterations, 0.5), "p95_ms": quantile(&iterations, 0.95),
+        "first_segment_ms": first_segment, "first_segment_p50_ms": quantile(&first_segment, 0.5),
+        "playable_first_packet_ms": null, "rtf": rtfs, "output": output,
+    }))
+}
+
 fn synthesize_track(
     app: &AppHandle,
     segments: &[TtsSegment],
@@ -725,24 +1019,37 @@ fn synthesize_track(
     token: &CancellationToken,
     sample_rate: u32,
     supports_model_speed: bool,
-    mut generate: impl FnMut(&str, f32) -> Result<Vec<f32>>,
+    device: &std::cell::Cell<&'static str>,
+    mut generate: impl FnMut(&str, f32, &dyn Fn()) -> Result<Vec<f32>>,
 ) -> Result<SynthesisResult> {
     let mut track = Vec::new();
     let timed = segments[0].start_ms.is_some();
     let total = segments.len();
-    let _ = app.emit(
-        "tts-synthesis-progress",
-        SynthesisProgress {
-            job_id,
-            current: 0,
-            total,
-        },
-    );
+    let emit_progress = |current| {
+        let _ = app.emit(
+            "tts-synthesis-progress",
+            SynthesisProgress {
+                job_id,
+                current,
+                total,
+                device: device.get(),
+            },
+        );
+    };
+    emit_progress(0);
     for (index, segment) in segments.iter().enumerate() {
+        let on_cpu = || {
+            if device.replace("cpu") != "cpu" {
+                if let Some((_, current)) = LOADED_STATUS.write().as_mut() {
+                    *current = "cpu";
+                }
+                emit_progress(index);
+            }
+        };
         let mut process = || -> Result<()> {
             let mut generate = |speed| {
                 check_cancelled(token)?;
-                let samples = generate(segment.text.trim(), speed)?;
+                let samples = generate(segment.text.trim(), speed, &on_cpu)?;
                 check_cancelled(token)?;
                 speech_audio::polish_segment(&samples, sample_rate)
             };
@@ -769,31 +1076,9 @@ fn synthesize_track(
             append_segment(&mut track, segment, &samples, sample_rate)
         };
         process().with_context(|| format!("第 {} 段音频处理失败", index + 1))?;
-        let _ = app.emit(
-            "tts-synthesis-progress",
-            SynthesisProgress {
-                job_id,
-                current: index + 1,
-                total,
-            },
-        );
+        emit_progress(index + 1);
     }
-    if !timed {
-        while track.last() == Some(&0.0) {
-            track.pop();
-        }
-    }
-    let peak = track
-        .iter()
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-    if peak == 0.0 {
-        bail!("合成结果没有有效声音");
-    }
-    if peak > 1.0 {
-        for sample in &mut track {
-            *sample /= peak;
-        }
-    }
+    finalize_track(&mut track, timed)?;
     check_cancelled(token)?;
     let dir = result_dir(app)?;
     fs::create_dir_all(&dir)?;
@@ -837,6 +1122,26 @@ pub(super) fn frames(ms: u64, rate: u32) -> usize {
     ((ms * u64::from(rate) + 500) / 1000) as usize
 }
 
+fn finalize_track(track: &mut Vec<f32>, timed: bool) -> Result<()> {
+    if !timed {
+        while track.last() == Some(&0.0) {
+            track.pop();
+        }
+    }
+    let peak = track
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    if peak == 0.0 {
+        bail!("合成结果没有有效声音");
+    }
+    if peak > 1.0 {
+        for sample in track {
+            *sample /= peak;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn append_segment(
     track: &mut Vec<f32>,
     segment: &TtsSegment,
@@ -873,6 +1178,27 @@ pub(super) fn append_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_reports_the_loaded_backend_and_clears_it_on_release() {
+        let mut model = tts_models::model(Path::new("models"), "kokoro-int8").unwrap();
+        let mut loaded = (model.path.clone(), "cuda");
+        apply_loaded_status(&mut model, Some(&loaded));
+        assert_eq!(model.device, None);
+        model.installed = true;
+        for device in ["cuda", "cpu"] {
+            loaded.1 = device;
+            apply_loaded_status(&mut model, Some(&loaded));
+            assert!(model.loaded);
+            assert_eq!(model.device, Some(device));
+        }
+        loaded.0 = "another model".into();
+        apply_loaded_status(&mut model, Some(&loaded));
+        assert_eq!(model.device, None);
+        apply_loaded_status(&mut model, None);
+        assert!(!model.loaded);
+        assert_eq!(model.device, None);
+    }
 
     #[test]
     fn cancellation_matches_job_and_releases_slot_on_drop() {

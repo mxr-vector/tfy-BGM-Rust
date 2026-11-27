@@ -4,11 +4,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::Mutex;
 use sherpa_onnx::{OfflineQwen3ASRModelConfig, OfflineRecognizer, OfflineRecognizerConfig, Wave};
 use tauri::{AppHandle, Emitter};
+use tokio_util::sync::CancellationToken;
+
+use crate::sherpa_cuda::{Init, Worker};
+use crate::tts::check_cancelled;
 
 use super::catalog::{
     delete_model_files, missing_components, resolve_scanned_model, snapshot_model_files,
@@ -27,7 +32,7 @@ pub struct ModelRuntime {
     pub(super) downloading: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
     /// 同一时刻只允许一个加载任务，防止下载完成后的自动加载与手动加载重复触发。
-    pub(super) loading: Arc<AtomicBool>,
+    pub(super) loading: Arc<Mutex<Option<CancellationToken>>>,
     /// 删除任务进行中；阻止新的加载 / 下载与正在删除的模型竞争。
     deleting: Arc<AtomicBool>,
     /// 加载、下载与删除共享的状态切换锁，避免检查和设置任务标志之间发生竞态。
@@ -40,7 +45,67 @@ pub struct ModelRuntime {
 
 pub(super) struct Loaded {
     model: LoadedModel,
-    recognizer: OfflineRecognizer,
+    backend: Mutex<Backend>,
+}
+
+enum Backend {
+    Cuda(Worker),
+    Cpu(Arc<OfflineRecognizer>),
+    Interrupted,
+    Failed,
+}
+
+impl Loaded {
+    fn decode(
+        &self,
+        pcm: &[f32],
+        token: &CancellationToken,
+        on_failure: impl FnOnce(&anyhow::Error),
+    ) -> Result<Option<String>> {
+        let mut backend = loop {
+            check_cancelled(token)?;
+            if let Some(backend) = self.backend.try_lock_for(Duration::from_millis(50)) {
+                break backend;
+            }
+        };
+        let dir = Path::new(&self.model.path);
+        let recognizer = loop {
+            check_cancelled(token)?;
+            let replacement = match &*backend {
+                Backend::Cpu(cpu) => break Arc::clone(cpu),
+                Backend::Interrupted => start_backend(dir, self.model.threads, token),
+                Backend::Failed => bail!("ASR 模型已失效，请重新加载"),
+                Backend::Cuda(worker) => match worker.decode(pcm, token) {
+                    Ok(text) => return Ok(Some(text)),
+                    Err(error) => {
+                        // A cancelled request may still have an unread reply.
+                        *backend = Backend::Interrupted;
+                        check_cancelled(token)?;
+                        eprintln!("[asr] CUDA inference failed; retrying on CPU: {error:#}");
+                        create_recognizer(dir, self.model.threads)
+                            .map(|cpu| Backend::Cpu(Arc::new(cpu)))
+                            .context("ASR CPU 回退加载失败")
+                    }
+                },
+            };
+            match replacement {
+                Ok(replacement) => *backend = replacement,
+                Err(error) => {
+                    check_cancelled(token)?;
+                    *backend = Backend::Failed;
+                    on_failure(&error);
+                    return Err(error);
+                }
+            }
+        };
+        drop(backend);
+        check_cancelled(token)?;
+        let stream = recognizer.create_stream();
+        stream.accept_waveform(ASR_SAMPLE_RATE, pcm);
+        recognizer.decode(&stream);
+        check_cancelled(token)?;
+        Ok(stream.get_result().map(|result| result.text))
+    }
 }
 
 /// ASR 推理或字幕生成任务对当前模型的占用；`Drop` 时自动释放。
@@ -54,13 +119,11 @@ impl Drop for ModelTaskGuard {
     }
 }
 
-/// `Drop` 时复位加载标志；即使 `load_inner` panic，后续加载也不会被永久拒绝。
-/// 加载标志的守卫。
-pub(super) struct LoadFlag<'a>(&'a AtomicBool);
+struct LoadFlag<'a>(&'a Mutex<Option<CancellationToken>>);
 
 impl Drop for LoadFlag<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.lock().take();
     }
 }
 
@@ -80,6 +143,16 @@ impl ModelRuntime {
             .lock()
             .as_ref()
             .map(|loaded| loaded.model.clone())
+    }
+
+    pub(crate) fn loaded_device(&self) -> Option<&'static str> {
+        let loaded = self.loaded.lock().as_ref().cloned()?;
+        let backend = loaded.backend.lock();
+        match &*backend {
+            Backend::Cuda(_) => Some("cuda"),
+            Backend::Cpu(_) => Some("cpu"),
+            Backend::Interrupted | Backend::Failed => None,
+        }
     }
 
     pub fn load_status(&self) -> ModelLoadStatus {
@@ -109,13 +182,27 @@ impl ModelRuntime {
 
     /// 是否有加载任务在运行；命令层据此避免重复触发并保护正在进行的加载状态。
     pub fn is_loading(&self) -> bool {
-        self.loading.load(Ordering::SeqCst)
+        self.loading.lock().is_some()
+    }
+
+    pub fn cancel_load(&self, path: &str) -> bool {
+        let loading = self.loading.lock();
+        let status = self.status.lock();
+        if let Some(token) = loading.as_ref()
+            && status.phase == LoadPhase::Loading
+            && status.path.as_deref() == Some(path)
+        {
+            token.cancel();
+            true
+        } else {
+            false
+        }
     }
 
     /// 登记一次模型任务占用，阻止删除、释放或重新加载与任务竞争。
     pub fn reserve_model_task(&self) -> Result<ModelTaskGuard> {
         let _operation = self.operation.lock();
-        if self.loading.load(Ordering::SeqCst) {
+        if self.is_loading() {
             bail!("模型正在加载中，请等待加载完成后再识别");
         }
         if self.deleting.load(Ordering::SeqCst) {
@@ -129,7 +216,7 @@ impl ModelRuntime {
 
     pub fn unload(&self) -> Result<bool> {
         let _operation = self.operation.lock();
-        if self.loading.load(Ordering::SeqCst) {
+        if self.is_loading() {
             bail!("模型正在加载中，请等待加载完成后再释放");
         }
         if self.deleting.load(Ordering::SeqCst) {
@@ -155,12 +242,21 @@ impl ModelRuntime {
         }
     }
 
-    /// 用 sherpa-onnx 的 Rust API 加载 Qwen3 ASR；耗时较长，调用方应放到阻塞线程。
-    ///
-    /// 全程维护 `loading` 原子标志与 `status` 状态：并发的第二个加载请求直接被拒绝，
-    /// 成功 / 失败都会写入可展示的状态（失败保留完整错误链），供界面重试。
-    pub fn load(&self, root: &Path, dir: &Path) -> Result<LoadedModel> {
-        {
+    /// 加载 Qwen3 ASR 模型。取消时恢复加载前的模型状态。
+    pub fn load(
+        &self,
+        root: &Path,
+        dir: &Path,
+        on_status: impl Fn(&ModelLoadStatus),
+    ) -> Result<LoadedModel> {
+        let token = CancellationToken::new();
+        let target = dir.to_string_lossy().into_owned();
+        let starting = ModelLoadStatus {
+            phase: LoadPhase::Loading,
+            path: Some(target.clone()),
+            error: None,
+        };
+        let previous_status = {
             let _operation = self.operation.lock();
             if self.deleting.load(Ordering::SeqCst) {
                 bail!("模型正在删除中，请稍后再加载");
@@ -168,40 +264,53 @@ impl ModelRuntime {
             if self.inference_tasks.load(Ordering::SeqCst) > 0 {
                 bail!("ASR 识别或字幕生成正在进行，请等待完成后再加载模型");
             }
-            if self
-                .loading
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
+            let mut loading = self.loading.lock();
+            if loading.is_some() {
                 bail!("已有模型加载任务正在进行");
             }
-        }
-        // 抢占成功后由 guard 负责复位，正常返回与 panic 展开都会释放标志。
+            *loading = Some(token.clone());
+            std::mem::replace(&mut *self.status.lock(), starting.clone())
+        };
         let _flag = LoadFlag(&self.loading);
-        let target = dir.to_string_lossy().into_owned();
-        self.set_load_status(ModelLoadStatus {
-            phase: LoadPhase::Loading,
-            path: Some(target.clone()),
-            error: None,
-        });
+        on_status(&starting);
 
-        let result = self.load_inner(root, dir);
-        match &result {
-            Ok(model) => self.set_load_status(ModelLoadStatus {
-                phase: LoadPhase::Success,
-                path: Some(model.path.clone()),
-                error: None,
-            }),
-            Err(error) => self.set_load_status(ModelLoadStatus {
-                phase: LoadPhase::Failed,
-                path: Some(target),
-                error: Some(format!("{error:#}")),
-            }),
-        }
+        let pending = Self::load_inner(root, dir, &token);
+        let (result, status) = {
+            let _loading = self.loading.lock();
+            let (result, status) = if let Err(error) = check_cancelled(&token) {
+                drop(pending);
+                (Err(error), previous_status)
+            } else {
+                match pending {
+                    Ok(loaded) => {
+                        let model = loaded.model.clone();
+                        *self.loaded.lock() = Some(Arc::new(loaded));
+                        let status = ModelLoadStatus {
+                            phase: LoadPhase::Success,
+                            path: Some(model.path.clone()),
+                            error: None,
+                        };
+                        (Ok(model), status)
+                    }
+                    Err(error) => {
+                        let status = ModelLoadStatus {
+                            phase: LoadPhase::Failed,
+                            path: Some(target),
+                            error: Some(format!("{error:#}")),
+                        };
+                        (Err(error), status)
+                    }
+                }
+            };
+            self.set_load_status(status.clone());
+            (result, status)
+        };
+        on_status(&status);
         result
     }
 
-    fn load_inner(&self, root: &Path, dir: &Path) -> Result<LoadedModel> {
+    fn load_inner(root: &Path, dir: &Path, token: &CancellationToken) -> Result<Loaded> {
+        check_cancelled(token)?;
         // canonical 只用于越界校验；Windows 上它会带 `\\?\` 前缀，
         // 因此仍用调用方传入的路径（来自扫描结果）作为模型标识，保证前端逐字匹配。
         let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -210,35 +319,34 @@ impl ModelRuntime {
         if !canonical_dir.starts_with(&canonical_root) {
             bail!("模型必须位于当前模型目录下：{}", root.display());
         }
-        let missing = missing_components(dir);
-        if !missing.is_empty() {
-            bail!("模型缺少必要构件：{}", missing.join("、"));
-        }
-
         let threads = thread_count();
-        let recognizer = create_recognizer(dir, threads)?;
+        let backend = start_backend(dir, threads, token)?;
         let name = dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_owned());
-        let model = LoadedModel {
-            name,
-            path: dir.to_string_lossy().into_owned(),
-            engine: ENGINE,
-            threads,
-        };
-        *self.loaded.lock() = Some(Arc::new(Loaded {
-            model: model.clone(),
-            recognizer,
-        }));
-        Ok(model)
+        Ok(Loaded {
+            model: LoadedModel {
+                name,
+                path: dir.to_string_lossy().into_owned(),
+                engine: ENGINE,
+                threads,
+            },
+            backend: Mutex::new(backend),
+        })
     }
 
     /// 用已加载的模型识别一个 WAV 文件；未加载模型时直接报错。
     ///
     /// 只在取模型句柄时短暂持锁，解码在锁外进行，避免识别期间阻塞
     /// `models_info` / 加载 / 释放等命令。
-    pub fn transcribe(&self, wav: &Path) -> Result<String> {
+    pub fn transcribe(
+        &self,
+        wav: &Path,
+        token: &CancellationToken,
+        on_status: impl Fn(&ModelLoadStatus),
+    ) -> Result<String> {
+        check_cancelled(token)?;
         let _model_task = self.reserve_model_task()?;
         let loaded = {
             let guard = self.loaded.lock();
@@ -253,12 +361,8 @@ impl ModelRuntime {
         // 「设置 → 模型 → 选择 WAV 识别」与「ffmpeg 缺失时直用源 WAV」两条入口，
         // 保证送入引擎的 PCM 恒为 16 kHz。
         let pcm = resample_to_asr(wave.samples(), wave.sample_rate())?;
-        let stream = loaded.recognizer.create_stream();
-        stream.accept_waveform(ASR_SAMPLE_RATE, &pcm);
-        loaded.recognizer.decode(&stream);
-        stream
-            .get_result()
-            .map(|result| strip_meta_instructions(&clean_asr_text(&result.text)))
+        self.decode(&loaded, &pcm, token, on_status)?
+            .map(|text| strip_meta_instructions(&clean_asr_text(&text)))
             .ok_or_else(|| anyhow!("识别失败：sherpa-onnx 未返回结果"))
     }
 
@@ -273,10 +377,13 @@ impl ModelRuntime {
         &self,
         wav: &Path,
         window_secs: f64,
+        token: &CancellationToken,
+        on_status: impl Fn(&ModelLoadStatus),
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<crate::subtitles::SubtitleSegment>> {
         use crate::subtitles::SubtitleSegment;
 
+        check_cancelled(token)?;
         let _model_task = self.reserve_model_task()?;
         let loaded = {
             let guard = self.loaded.lock();
@@ -306,15 +413,13 @@ impl ModelRuntime {
         for (index, (start, end)) in ranges.iter().copied().enumerate() {
             let from = ((start * rate as f64).round() as usize).min(samples.len());
             let to = ((end * rate as f64).round() as usize).min(samples.len());
-            if to > from {
-                let stream = loaded.recognizer.create_stream();
-                stream.accept_waveform(rate, &samples[from..to]);
-                loaded.recognizer.decode(&stream);
-                if let Some(result) = stream.get_result() {
-                    let text = strip_meta_instructions(&clean_asr_text(&result.text));
-                    if !text.is_empty() {
-                        segments.push(SubtitleSegment { start, end, text });
-                    }
+            check_cancelled(token)?;
+            if to > from
+                && let Some(raw) = self.decode(&loaded, &samples[from..to], token, &on_status)?
+            {
+                let text = strip_meta_instructions(&clean_asr_text(&raw));
+                if !text.is_empty() {
+                    segments.push(SubtitleSegment { start, end, text });
                 }
             }
             progress(index + 1, ranges.len());
@@ -324,6 +429,25 @@ impl ModelRuntime {
             bail!("ASR 未识别出任何文本，请确认音频包含人声且模型已正确加载");
         }
         Ok(segments)
+    }
+
+    fn decode(
+        &self,
+        loaded: &Arc<Loaded>,
+        pcm: &[f32],
+        token: &CancellationToken,
+        on_status: impl Fn(&ModelLoadStatus),
+    ) -> Result<Option<String>> {
+        loaded.decode(pcm, token, |error| {
+            self.loaded.lock().take();
+            let status = ModelLoadStatus {
+                phase: LoadPhase::Failed,
+                path: Some(loaded.model.path.clone()),
+                error: Some(format!("{error:#}")),
+            };
+            self.set_load_status(status.clone());
+            on_status(&status);
+        })
     }
 
     /// 删除当前模型目录中扫描到的指定 ASR 模型；已加载时自动释放并卸载。
@@ -338,7 +462,7 @@ impl ModelRuntime {
         delete: impl FnOnce(&AsrModel, &Path) -> Result<()>,
     ) -> Result<String> {
         let _operation = self.operation.lock();
-        if self.loading.load(Ordering::SeqCst) {
+        if self.is_loading() {
             bail!("模型正在加载中，请等待加载完成后再删除");
         }
         if self.downloading.load(Ordering::SeqCst) {
@@ -432,8 +556,37 @@ impl ModelRuntime {
     }
 }
 
+fn start_backend(dir: &Path, threads: u32, token: &CancellationToken) -> Result<Backend> {
+    check_cancelled(token)?;
+    require_model_components(dir)?;
+    let threshold = crate::speech_device::minimum_vram_mib("TFY_ASR_MIN_VRAM_MIB", 4096);
+    let init = Init::Asr {
+        dir: std::path::absolute(dir)?,
+        threads,
+    };
+    match Worker::try_start(init, threshold, token) {
+        Ok(Some(worker)) => return Ok(Backend::Cuda(worker)),
+        Ok(None) => {}
+        Err(error) => {
+            check_cancelled(token)?;
+            eprintln!("[asr] CUDA initialization failed; using CPU: {error:#}");
+        }
+    }
+    check_cancelled(token)?;
+    create_recognizer(dir, threads).map(|cpu| Backend::Cpu(Arc::new(cpu)))
+}
+
+fn require_model_components(dir: &Path) -> Result<()> {
+    let missing = missing_components(dir);
+    if !missing.is_empty() {
+        bail!("模型缺少必要构件：{}", missing.join("、"));
+    }
+    Ok(())
+}
+
 /// 组装 `OfflineQwen3ASRModelConfig`：四个路径全部指向模型目录内的构件。
 pub(super) fn create_recognizer(dir: &Path, threads: u32) -> Result<OfflineRecognizer> {
+    require_model_components(dir)?;
     let path_of = |name: &str| dir.join(name).to_string_lossy().into_owned();
     let mut config = OfflineRecognizerConfig::default();
     config.model_config.qwen3_asr = OfflineQwen3ASRModelConfig {
@@ -459,7 +612,12 @@ pub(super) fn create_recognizer(dir: &Path, threads: u32) -> Result<OfflineRecog
 
 /// 推理线程数：取可用核心数并限制上限，避免占满整机。
 pub(super) fn thread_count() -> u32 {
-    std::thread::available_parallelism()
+    let available = std::thread::available_parallelism()
         .map(|count| count.get().min(4) as u32)
-        .unwrap_or(2)
+        .unwrap_or(2);
+    std::env::var("TFY_ASR_CPU_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|threads| (1..=available).contains(threads))
+        .unwrap_or(available)
 }

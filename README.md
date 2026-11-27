@@ -200,8 +200,7 @@ tfy-bgm.exe ──┬─ 曲库扫描 / 文件监听 ──▶ LibrarySnapshot �
 
 ### ASR 与人声分离模型
 
-ASR 推理统一走 [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/rust-api/index.html) 的 Rust API
-（`OfflineRecognizer` + `OfflineQwen3ASRModelConfig`），不引入其他推理框架。
+ASR 推理由 [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/rust-api/index.html) 提供。默认使用内置 CPU 后端，可选用独立进程加载 CUDA 后端。
 
 - 默认模型 `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25`，仅支持 0.6B-int8。
 - 模型目录默认为系统「下载」目录下的 `bgm-models/`（Windows 取 `FOLDERID_Downloads`，Linux 取 `XDG_DOWNLOAD_DIR`，未定义时退到 `<用户主目录>/Downloads`），可在「模型」中更改或恢复默认。
@@ -209,6 +208,50 @@ ASR 推理统一走 [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/rust-api/
 - 下载完成后自动加载，状态条显示「加载中 / 加载成功 / 加载失败」，失败保留原因并可重试；已加载成功的模型不会重复加载。
 - 识别前若 PCM 不是 16 kHz，会用带限 Lanczos 插值重采样；在「模型」中选择任意采样率的 WAV 试识别也会统一到 16 kHz。
 - 人声分离模型随包提供：`UVR-MDX-NET-Voc_FT`（人声）、`UVR-MDX-NET-Inst_HQ_3`（伴奏）与 `sherpa-onnx-spleeter-2stems-int8` 归档（首次使用时自动解压到应用数据目录）。自定义 2-stem 模型放入 `模型目录/separation/` 即会被扫描；文件名判定为乐器模型的条目不会出现在人声列表。
+
+### 语音推理设备与基准
+
+这些启动环境变量只影响语音推理，与界面「GPU 加速」无关。更改后从同一终端重新启动应用。
+
+| 环境变量 | 用途 |
+| :--- | :--- |
+| `TFY_SPEECH_DEVICE=auto`（默认）或 `cpu` | `auto` 在运行时已配置且显存达标时优先尝试 NVIDIA CUDA；`cpu` 跳过探测，强制 CPU。 |
+| `TFY_ASR_MIN_VRAM_MIB` | Qwen3 空闲显存门槛，默认 4096 MiB。 |
+| `TFY_TTS_MIN_VRAM_MIB` | Kokoro / ZipVoice 默认 2048 MiB，CosyVoice3 默认 6144 MiB。 |
+| `TFY_ASR_CPU_THREADS` | ASR 线程数，可在 1 到 `min(4, 可用逻辑核数)` 之间调优，默认上限。 |
+| `TFY_SHERPA_CUDA_DIR` | Sherpa CUDA 归档解压后的绝对目录，用于 Qwen3、Kokoro 和 ZipVoice。 |
+| `TFY_COSYVOICE_CUDA_PYTHON` | 单独安装的 CosyVoice Python 3.11 环境中解释器的绝对路径。该环境应与应用托管环境使用同一套 CosyVoice Python 依赖，仅将 `onnxruntime` 替换为兼容 CUDA 12 / cuDNN 9 的 `onnxruntime-gpu`，不要在应用托管的 CPU 环境中替换。 |
+
+Sherpa CUDA 可选附件使用 [v2.0.1 发布页](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.1) 的 CUDA 12.x / cuDNN 9.x / ORT 1.28.2 x64 包（Windows 约 597 MB，Linux 约 394 MB）。两平台均需正常工作的 NVIDIA 驱动和 `nvidia-smi`，另需可解析的 CUDA 12 / cuDNN 9 运行库（包括 cuBLAS、cuFFT 和 cuRAND）。Windows 可把依赖 DLL 放在 CUDA 附件的 `lib` 下、与该附件的 ORT DLL 同目录；不要放到应用目录。Linux 确保依赖在系统的动态库搜索路径或启动时指定的 `LD_LIBRARY_PATH` 中。默认安装包不包含 CUDA 附件、不要求安装 CUDA SDK；未配置时保持 CPU。AMD/Intel、无可测显存、未提供 CUDA 运行时均使用 CPU。Windows 旧的 DirectML 自动选择已取消。
+
+PowerShell：`$env:TFY_SPEECH_DEVICE='auto'; $env:TFY_SHERPA_CUDA_DIR='D:\runtime\sherpa-cuda'; .\tfy-bgm.exe`。Linux：`TFY_SPEECH_DEVICE=auto TFY_SHERPA_CUDA_DIR=/opt/sherpa-cuda ./tfy-bgm`。
+
+Windows x64 用户可以先下载 CosyVoice3，再到「设置 → 模型」顶部点击「安装 GPU 环境」。应用将 CUDA 依赖安装到独立的托管环境，验证成功后重新加载 CosyVoice3 即可使用，不需要修改系统 PATH 或重启应用。此安装不包含 NVIDIA 驱动，不影响其他模型和 CPU 环境。同一位置可删除托管 GPU 环境及其专用下载缓存（包括安装未完成的残留），不会删除模型文件或手动配置的外部环境。
+
+如需手动配置，CosyVoice3 首次成功加载后，在终端把应用托管环境的解释器路径记为 `CPU_PY`，另建虚拟环境，并把其解释器路径记为 `CUDA_PY`（Windows 为 `Scripts/python.exe`，Linux 为 `bin/python`）。用 `uv pip freeze --python "$CPU_PY" --exclude onnxruntime | uv pip install --python "$CUDA_PY" -r - onnxruntime-gpu==1.23.2` 安装独立 CUDA 环境，再设置 `TFY_COSYVOICE_CUDA_PYTHON`。Windows 须让该子进程能从 `PATH` 找到 CUDA 12 和 cuDNN 9 的 DLL，即使 DLL 已与 ORT 放在一起；Linux 同样需要正确的动态库搜索路径。
+
+设备探测使用可见 NVIDIA GPU 的 UUID 和空闲显存；GPU 子进程绑定选中的 UUID。初始化、推理报错或超时时停止 GPU 子进程，并在 CPU 上重试当前未完成的 ASR 片段或 TTS 段一次。已完成的段不重发，TTS 取消不触发 CPU 重试。显存阈值不是峰值保证，未被 CUDA 支持的算子仍可在 CPU 上运行。
+
+用同一版本、相同输入和模型分别运行 `TFY_SPEECH_DEVICE=cpu`、`auto`。基准输出 JSON；下面命令在 Bash 中运行，PowerShell 请改用 `$env:TFY_SPEECH_DEVICE='cpu'` 等环境变量语法。
+
+```bash
+python scripts/bench-speech.py --gpu --resources asr-resources.json "$EXE" asr "$ASR_MODEL" vocals-16k.wav 1 5 asr.json
+python scripts/bench-speech.py --gpu --resources tts-resources.json "$EXE" tts "$MODELS" kokoro-int8 "$CACHE" texts.txt out.wav 1 5 tts.json
+```
+
+`texts.txt` 每行一段；CosyVoice3 / ZipVoice 命令把模型 ID 换掉，并在报告文件名后追加参考 WAV 路径及其完整文本。用 `--speech-bench --help` 查看参数。`asr` 复用字幕分段规则，只计已分离的单声道 WAV，不包含人声分离；`asr-whole` 识别整段。TTS 不流式输出可播放音频，报告的首段完成时间不是首包，完整 WAV 就绪才可播放。`--gpu` 记录整卡利用率和显存峰值（含其它进程），可选 `psutil` 记录进程树 CPU 秒数和 RSS。检查报告中的 `device`，不把回退后的 CPU 时间算作 CUDA 成绩。回退测试可在 `auto` 下把两个显存阈值设为 `999999`，再用缺少 CUDA 依赖的附件复测；两种情况下均应有有效 CPU 输出。
+
+本地样本（Ryzen 5 9600X / RTX 4070 Ti SUPER，驱动 621.24，调试构建）使用一段已分离的 20 秒、16 kHz 单声道人声；TTS 输入为「今天我们测试语音合成的速度和音质。」和 `The quick brown fox jumps over the lazy dog.` 两行，CosyVoice3 使用内置「曼波」参考音色。以下为空闲显存达标后实际 CPU/CUDA 对照，预热一次，Windows Sherpa 测 5 次，其它测 3 次。单位为秒：
+
+| 平台 / 模型 | CPU P50 / P95 | CUDA P50 / P95 | CPU / CUDA 首段 P50 |
+| :--- | ---: | ---: | ---: |
+| Windows Qwen3 INT8 | 1.81 / 1.82 | 3.08 / 3.84 | 不适用 |
+| Windows Kokoro INT8 | 4.53 / 5.51 | 4.80 / 5.74 | 2.34 / 2.42 |
+| Windows CosyVoice3 | 12.49 / 12.90 | 2.22 / 2.27 | 5.69 / 1.05 |
+| WSL2 Linux Qwen3 INT8 | 3.94 / 4.62 | 3.84 / 3.92 | 不适用 |
+| WSL2 Linux Kokoro INT8 | 3.09 / 3.19 | 2.75 / 4.11 | 1.63 / 1.41 |
+
+Windows 样本中 Qwen3 和 Kokoro 的 CUDA 总耗时未改善；INT8 模型的算子覆盖、CPU/GPU 数据搬运和子进程通信都可能影响结果，尚未做逐算子归因。Qwen3 两个后端的分段时间相同，转写有两字不同；CosyVoice3 产出同为 24 kHz，音频时长约 5.01 / 4.89 秒，未做正式听测。WSL2 不替代原生 Linux 桌面验收。
 
 ### 应用配置 config.json
 

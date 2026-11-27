@@ -14,6 +14,9 @@ export interface TtsModel {
   installed: boolean;
   hasFiles: boolean;
   loaded: boolean;
+  device: 'cpu' | 'cuda' | null;
+  gpuEnvironmentReady: boolean | null;
+  gpuEnvironmentPresent: boolean;
   path: string;
   /** 默认浏览地址；未自定义时「访问下载源」打开它。 */
   defaultDownloadUrl: string;
@@ -43,36 +46,46 @@ export const ttsLoadCancelling = ref(false);
 export const ttsInstalling = computed(() => activeInstall.value?.modelId ?? null);
 export const ttsInstallCancelling = ref(false);
 export const ttsSynthesizing = ref(false);
-const ttsModelAction = shallowRef<{ id: string; action: 'load' | 'release' | 'delete' } | null>(null);
+type TtsModelAction = 'load' | 'release' | 'delete' | 'installGpu' | 'removeGpu';
+const ttsModelAction = shallowRef<{ id: string; action: TtsModelAction } | null>(null);
+export const ttsGpuInstalling = computed(() => ttsModelAction.value?.action === 'installGpu');
+export const ttsGpuRemoving = computed(() => ttsModelAction.value?.action === 'removeGpu');
 export const ttsModelBusy = computed(() => ttsSynthesizing.value || Boolean(ttsInstalling.value || ttsModelAction.value));
 
 export function ttsModelActionLabel(id: string): string | undefined {
   const task = ttsModelAction.value;
-  if (task?.id === id) return { load: '加载中…', release: '释放中…', delete: '删除中…' }[task.action];
+  if (task?.id === id) return { load: '加载中…', release: '释放中…', delete: '删除中…', installGpu: undefined, removeGpu: undefined }[task.action];
 }
 
-export async function manageTtsModel(model: TtsModel, action: 'load' | 'release' | 'delete'): Promise<void> {
+export async function manageTtsModel(model: TtsModel, action: TtsModelAction): Promise<void> {
   if (ttsModelBusy.value) return;
   ttsModelAction.value = { id: model.id, action };
-  const verb = { load: model.loaded ? '重新加载' : '加载', release: '释放', delete: '删除' }[action];
+  const verb = { load: model.loaded ? '重新加载' : '加载', release: '释放', delete: '删除', installGpu: '安装 GPU 环境', removeGpu: '删除 GPU 环境' }[action];
   let job: TtsJob | null = null;
   let unlisten: (() => void) | null = null;
   try {
-    if (action === 'load') {
+    if (action === 'load' || action === 'installGpu') {
       job = { id: crypto.randomUUID(), cancelled: false, finished: false };
       activeLoad.value = { job, modelId: model.id };
-      ttsLoadProgress.value = { jobId: job.id, stage: '正在准备模型加载…' };
+      ttsLoadProgress.value = { jobId: job.id, stage: action === 'installGpu' ? '正在准备 GPU 环境安装…' : '正在准备模型加载…' };
       unlisten = await listen<TtsLoadProgress>(EVENTS.ttsLoadProgress, (progress) => {
         if (job && !job.cancelled && !job.finished && progress.jobId === job.id) ttsLoadProgress.value = progress;
       });
       if (job.cancelled) return;
-      await invoke(COMMANDS.loadTtsModel, { id: model.id, jobId: job.id });
+      if (action === 'installGpu') await invoke(COMMANDS.installTtsGpu, { jobId: job.id });
+      else await invoke(COMMANDS.loadTtsModel, { id: model.id, jobId: job.id });
+    } else if (action === 'removeGpu') {
+      await invoke(COMMANDS.removeTtsGpu);
     } else {
       await invoke(COMMANDS.removeTtsModel, { id: model.id, deleteFiles: action === 'delete' });
     }
-    if (!job?.cancelled) toast(`${verb}成功：${model.name}`, 'success');
+    if (!job?.cancelled) {
+      const message = action === 'installGpu' ? 'GPU 环境已就绪，重新加载 CosyVoice3 即可尝试用 GPU 推理'
+        : action === 'removeGpu' ? '已删除托管 GPU 环境' : `${verb}成功：${model.name}`;
+      toast(message, 'success');
+    }
   } catch (error) {
-    if (!job?.cancelled) toast(`${verb} TTS 模型失败：${normalizeError(error)}`, 'error');
+    if (!job?.cancelled) toast(`${verb}${action === 'installGpu' || action === 'removeGpu' ? '' : ' TTS 模型'}失败：${normalizeError(error)}`, 'error');
   } finally {
     if (job) job.finished = true;
     unlisten?.();

@@ -22,6 +22,7 @@ export const modelsInfo = ref<ModelsInfo | null>(null);
 export const modelsLoading = ref(false);
 export const downloading = ref(false);
 export const loadTarget = ref<string | null>(null);
+export const asrLoadCancelling = ref(false);
 export const deletingModelId = ref<string | null>(null);
 export const downloadProgress = ref<ModelDownloadProgress | null>(null);
 
@@ -55,23 +56,23 @@ export const downloadPercent = computed(() => {
   return Math.min(100, Math.round((progress.overallReceived / progress.overallBytes) * 100));
 });
 
-let listening = false;
+let progressListener: Promise<unknown> | undefined;
 let refreshQueued = false;
 
-/** 下载进度与模型加载状态都是长任务事件，只需订阅一次。 */
-async function ensureProgressListener(): Promise<void> {
-  if (listening) return;
-  listening = true;
-  await listen<ModelDownloadProgress>(EVENTS.modelDownload, (progress) => {
-    downloadProgress.value = progress;
-  });
-  await listen<ModelLoadStatus>(EVENTS.modelLoadStatus, (status) => {
-    const previous = loadStatus.value.phase;
-    loadStatus.value = status;
-    // 启动自动恢复 / 下载后自动加载只推送状态事件，快照里的 loaded 仍是旧值；
-    // 成功时刷新一次，桌面歌词与字幕页才能及时判定模型可用。
-    if (status.phase === 'success' && previous !== 'success') void refreshModels();
-  });
+function ensureProgressListener(): Promise<unknown> {
+  return (progressListener ??= Promise.all([
+    listen<ModelDownloadProgress>(EVENTS.modelDownload, (progress) => {
+      downloadProgress.value = progress;
+    }),
+    listen<ModelLoadStatus>(EVENTS.modelLoadStatus, (status) => {
+      const previous = loadStatus.value.phase;
+      loadStatus.value = status;
+      if (status.phase !== 'loading') asrLoadCancelling.value = false;
+      if (status.phase === 'failed' || (status.phase === 'success' && previous !== 'success')) {
+        void refreshModels();
+      }
+    }),
+  ]));
 }
 
 function apply(info: ModelsInfo | null | undefined): void {
@@ -79,6 +80,7 @@ function apply(info: ModelsInfo | null | undefined): void {
   modelsInfo.value = info;
   // 后端是权威状态源；命令返回时自动加载已结束，刷新界面也不会丢失失败原因。
   loadStatus.value = info.loadStatus;
+  if (info.loadStatus.phase !== 'loading') asrLoadCancelling.value = false;
 }
 
 /** 读取模型分组快照：同时触发一次后端扫描。 */
@@ -89,8 +91,8 @@ export async function refreshModels(): Promise<void> {
     return;
   }
   modelsLoading.value = true;
-  void ensureProgressListener();
   try {
+    await ensureProgressListener();
     apply(await invoke<ModelsInfo>(COMMANDS.modelsInfo));
   } catch (error) {
     toast(`读取模型列表失败：${normalizeError(error)}`, 'error');
@@ -140,7 +142,6 @@ let cancelRequested = false;
 /** 下载默认 ASR 模型（后端固定为 0.6B-int8 清单）。 */
 export async function downloadDefaultModel(): Promise<void> {
   if (downloading.value) return;
-  void ensureProgressListener();
   downloading.value = true;
   cancelRequested = false;
   downloadProgress.value = {
@@ -155,14 +156,14 @@ export async function downloadDefaultModel(): Promise<void> {
     error: null,
   };
   try {
-    apply(await invoke<ModelsInfo>(COMMANDS.downloadAsrModel));
-    if (loadStatus.value.phase === 'failed') {
-      // 下载成功但自动加载失败：保留下载成功的事实，把失败原因交给状态条与重试入口。
-      toast(
-        `模型已下载完成，但自动加载失败：${loadStatus.value.error ?? '未知原因'}`,
-        'error',
-      );
-    } else if (loadStatus.value.phase === 'success') {
+    await ensureProgressListener();
+    const info = await invoke<ModelsInfo & { autoLoadCancelled: boolean }>(COMMANDS.downloadAsrModel);
+    apply(info);
+    if (info.autoLoadCancelled) {
+      toast('默认 ASR 模型已下载，已取消自动加载', 'info');
+    } else if (info.loadStatus.phase === 'failed' && info.loadStatus.path === info.defaultModel.path) {
+      toast(`模型已下载完成，但自动加载失败：${info.loadStatus.error ?? '未知原因'}`, 'error');
+    } else if (info.loadStatus.phase === 'success' && info.loaded?.path === info.defaultModel.path) {
       toast('默认 ASR 模型已下载并自动加载完成', 'success');
     } else {
       toast('默认 ASR 模型已下载完成', 'success');
@@ -190,13 +191,34 @@ export async function cancelDownload(): Promise<void> {
   }
 }
 
+export async function cancelAsrLoad(): Promise<void> {
+  const { phase, path } = loadStatus.value;
+  if (asrLoadCancelling.value || phase !== 'loading' || !path) return;
+  asrLoadCancelling.value = true;
+  try {
+    if (!(await invoke<boolean>(COMMANDS.cancelAsrLoad, { path }))) {
+      asrLoadCancelling.value = false;
+      void refreshModels();
+    }
+  } catch (error) {
+    asrLoadCancelling.value = false;
+    toast(`取消加载失败：${normalizeError(error)}`, 'error');
+  }
+}
+
 /** 用 sherpa-onnx 加载模型；加载 1GB 左右的模型需要数秒。 */
 export async function loadAsrModel(model: AsrModel): Promise<void> {
   if (loadTarget.value) return;
   loadTarget.value = model.path;
   try {
-    apply(await invoke<ModelsInfo>(COMMANDS.loadAsrModel, { path: model.path }));
-    toast(`已加载 ${model.name}（sherpa-onnx）`, 'success');
+    await ensureProgressListener();
+    const info = await invoke<ModelsInfo | null>(COMMANDS.loadAsrModel, { path: model.path });
+    if (info) {
+      apply(info);
+      toast(`已加载 ${model.name}（sherpa-onnx）`, 'success');
+    } else {
+      toast('已取消加载 ASR 模型', 'info');
+    }
   } catch (error) {
     toast(`加载 ASR 模型失败：${normalizeError(error)}`, 'error');
   } finally {
@@ -214,9 +236,13 @@ export async function retryModelLoad(): Promise<void> {
   }
   loadTarget.value = path;
   try {
-    apply(await invoke<ModelsInfo>(COMMANDS.loadAsrModel, { path }));
-    if (loadStatus.value.phase === 'success') {
+    await ensureProgressListener();
+    const info = await invoke<ModelsInfo | null>(COMMANDS.loadAsrModel, { path });
+    if (info) {
+      apply(info);
       toast('模型重试加载成功', 'success');
+    } else {
+      toast('已取消加载 ASR 模型', 'info');
     }
   } catch (error) {
     toast(`重试加载失败：${normalizeError(error)}`, 'error');

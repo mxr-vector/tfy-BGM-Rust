@@ -33,7 +33,13 @@ import { setView, state } from './state';
 export const subtitleQuery = ref('');
 export const selectedKey = ref<string | null>(null);
 export const generating = ref(false);
+export const subtitleCancelling = ref(false);
 export const progress = ref<SubtitleProgress | null>(null);
+export const canCancelSubtitleRecognition = computed(
+  () => generating.value && progress.value?.stage === 'transcribing'
+    && (progress.value.total === 0 || progress.value.current < progress.value.total),
+);
+let subtitleJobId: string | null = null;
 export const result = ref<SubtitleResult | null>(null);
 export const error = ref<string | null>(null);
 export const exportingFormat = ref<SubtitleFormat | null>(null);
@@ -433,7 +439,8 @@ export async function generateSubtitles(
     state.prefs = { ...state.prefs, separationModel };
     persistPrefs();
   }
-  await ensureProgressListener();
+  const jobId = crypto.randomUUID();
+  subtitleJobId = jobId;
   generating.value = true;
   error.value = null;
   result.value = null;
@@ -445,11 +452,18 @@ export async function generateSubtitles(
     error: null,
   };
   try {
-    const generated = await invoke<SubtitleResult>(COMMANDS.generateSubtitles, {
+    await ensureProgressListener();
+    const generated = await invoke<SubtitleResult | null>(COMMANDS.generateSubtitles, {
       key,
       separationModel,
       separationTarget,
+      jobId,
     });
+    if (!generated) {
+      progress.value = null;
+      toast('已取消字幕识别', 'info');
+      return;
+    }
     result.value = generated;
     const song = selectedSong.value;
     const stored: StoredSubtitle = {
@@ -485,6 +499,22 @@ export async function generateSubtitles(
     toast(`字幕生成失败：${error.value}`, 'error');
   } finally {
     generating.value = false;
+    subtitleCancelling.value = false;
+    subtitleJobId = null;
+  }
+}
+
+export async function cancelSubtitleRecognition(): Promise<void> {
+  const jobId = subtitleJobId;
+  if (!jobId || !canCancelSubtitleRecognition.value || subtitleCancelling.value) return;
+  subtitleCancelling.value = true;
+  try {
+    await invoke(COMMANDS.cancelSubtitleGeneration, { jobId });
+  } catch (error) {
+    if (subtitleJobId === jobId) {
+      subtitleCancelling.value = false;
+      toast(`取消识别失败：${normalizeError(error)}`, 'error');
+    }
   }
 }
 

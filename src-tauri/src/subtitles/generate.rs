@@ -7,11 +7,13 @@ use anyhow::{Result, anyhow, bail};
 use bgm_core::Song;
 use bgm_core::library::{AUDIO_EXTENSIONS, audio_extension};
 use tauri::{AppHandle, Emitter};
+use tokio_util::sync::CancellationToken;
 
 use super::format::{format_lrc, format_srt, write_subtitle};
 use super::store::{Delivery, emit_progress, normalize_to_wav, save_stored};
 use super::{SUBTITLE_PROGRESS_EVENT, SubtitleProgress, SubtitleResult, SubtitleStage};
 use crate::models::ModelRuntime;
+use crate::tts::check_cancelled;
 
 /// 生成字幕主流程：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
 ///
@@ -25,6 +27,7 @@ pub fn generate(
     separation_model: &str,
     separation_target: Option<&str>,
     models_root: &Path,
+    token: &CancellationToken,
 ) -> Result<SubtitleResult> {
     generate_with_progress(
         app,
@@ -33,6 +36,7 @@ pub fn generate(
         separation_model,
         separation_target,
         models_root,
+        token,
         |progress| {
             let _ = app.emit(SUBTITLE_PROGRESS_EVENT, progress);
         },
@@ -50,11 +54,13 @@ pub fn generate_with_progress<F>(
     separation_model: &str,
     separation_target: Option<&str>,
     models_root: &Path,
+    token: &CancellationToken,
     mut on_progress: F,
 ) -> Result<SubtitleResult>
 where
     F: FnMut(&SubtitleProgress),
 {
+    check_cancelled(token)?;
     // 整条链路（分离 → 归一化 → ASR → 写 SRT / LRC）都写同一个交付目录，
     // 因此 key 锁要覆盖全程；与 HTTP 任务、UI 命令共用同一把锁。
     let _key_guard = crate::key_lock::claim(&song.key)?;
@@ -103,6 +109,7 @@ where
         }
     }
 
+    check_cancelled(token)?;
     emit_progress(
         &mut sink,
         SubtitleStage::Normalizing,
@@ -124,6 +131,8 @@ where
     let transcribed = runtime.transcribe_segments(
         &normalized,
         crate::models::SEGMENT_TARGET_SECS,
+        token,
+        |status| crate::models::emit_load_status(app, status),
         &mut |current, total| {
             emit_progress(
                 &mut sink,
@@ -138,6 +147,7 @@ where
     // 归一化 WAV 只服务于本次识别；临时文件用完即删，避免在配置目录长期累积。
     let _ = fs::remove_file(&normalized);
     let segments = transcribed?;
+    check_cancelled(token)?;
 
     let srt = format_srt(&segments);
     let lrc = format_lrc(&song.title, &segments);

@@ -25,7 +25,7 @@ const referenceModeOptions = [
   { value: 'custom', label: '麦克风录制' },
 ];
 const RECORDING_PROMPT = '心之所向，素履所往，生如逆旅，一苇以航。';
-interface SynthesisProgress { jobId: string; current: number; total: number }
+interface SynthesisProgress { jobId: string; current: number; total: number; device: 'cpu' | 'cuda' }
 
 const families = ['CosyVoice3', 'Kokoro', 'ZipVoice'] as const;
 const familyDescriptions: Record<TtsFamily, string> = {
@@ -46,6 +46,7 @@ const defaultModel = computed(() => {
 });
 const family = computed(() => ttsPreferredFamily.value ?? defaultModel.value?.family ?? 'CosyVoice3');
 const synthesisProgress = ref<SynthesisProgress | null>(null);
+const synthesisModelId = ref('');
 const synthesisCancelling = ref(false);
 let synthesisJob: TtsJob | null = null;
 let disposed = false;
@@ -73,6 +74,12 @@ const selectedModel = computed(() => {
   return installedModels.value.find(model => model.id === preferredId) ?? installedModels.value[0];
 });
 const modelId = computed(() => selectedModel.value?.id ?? '');
+const modelDeviceLabel = computed(() => {
+  if (generating.value && synthesisModelId.value === modelId.value) {
+    return synthesisProgress.value?.device?.toUpperCase() ?? '正在选择…';
+  }
+  return selectedModel.value?.device?.toUpperCase() ?? '未加载';
+});
 const isReady = computed(() => Boolean(selectedModel.value));
 const modelOptions = computed(() => installedModels.value
   .map(model => ({ value: model.id, label: model.recommended ? `${model.name} · 推荐` : model.name })));
@@ -237,6 +244,7 @@ async function generate(): Promise<void> {
   generating.value = true;
   ttsSynthesizing.value = true;
   synthesisProgress.value = null;
+  synthesisModelId.value = modelId.value;
   outputPlayer.value?.pause();
   const selectedFamily = family.value;
   const request = {
@@ -268,6 +276,7 @@ async function generate(): Promise<void> {
     unlisten?.();
     await refreshTtsModels();
     ttsSynthesizing.value = false;
+    synthesisModelId.value = '';
     synthesisJob = null;
     generating.value = false;
     synthesisCancelling.value = false;
@@ -343,6 +352,7 @@ onBeforeUnmount(() => {
           <div v-if="isReady" class="tts-field">
             <span>本地模型</span>
             <AppSelect :model-value="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择已安装的 TTS 模型" @update:model-value="selectModel" />
+            <span class="tts-native tts-device" role="status">推理设备 · {{ modelDeviceLabel }}</span>
           </div>
           <template v-if="!isReady">
             <div class="tts-model-empty">
@@ -421,7 +431,7 @@ onBeforeUnmount(() => {
           <p>在本机离线合成语音，可试听并导出 WAV。</p>
           <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating || parsingForGeneration ? 'refresh' : 'play'"/>{{ generating ? '正在本地合成…' : parsingForGeneration ? '正在解析文本…' : '生成声音' }}</button>
           <p v-if="!generating && !parsingForGeneration && generationBlocker" class="tts-reference-status" aria-live="polite">{{ generationBlocker }}</p>
-          <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段</p>
+          <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段 · {{ synthesisProgress.device === 'cuda' ? 'CUDA' : 'CPU' }}</p>
           <button v-if="generating" type="button" class="tts-action" :disabled="synthesisCancelling" @click="cancelSynthesis">{{ synthesisCancelling ? '正在取消…' : '取消合成' }}</button>
           <div v-if="outputUrl" class="tts-output">
             <span class="tts-output-meta">{{ outputFamily }} · {{ outputRate.toLocaleString() }} Hz · {{ outputDuration.toFixed(1) }} 秒 · {{ outputName }}</span>
@@ -489,6 +499,7 @@ onBeforeUnmount(() => {
 .tts-output audio{width:100%;height:34px}
 .tts-field,.tts-voice-picker{display:grid;align-items:center;gap:6px;margin-top:6px}
 .tts-field{grid-template-columns:4.5em minmax(0,1fr);color:var(--text-2);font-size:12px}
+.tts-device{grid-column:2;justify-self:start}
 .tts-voice-picker{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .tts-search{width:100%;min-width:0;min-height:32px;padding:0 9px;border:1px solid var(--line);border-radius:var(--radius-btn);background:rgba(255,255,255,.035);color:var(--text);font-size:12px}
 .tts-page :deep(.app-select-trigger){min-height:32px;font-size:12px}

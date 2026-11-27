@@ -128,10 +128,16 @@ fn spleeter_then_asr_only_on_vocals() {
     }
     let runtime = crate::models::ModelRuntime::default();
     runtime
-        .load(model_dir.parent().unwrap(), &model_dir)
+        .load(model_dir.parent().unwrap(), &model_dir, |_| {})
         .unwrap();
     let segments = runtime
-        .transcribe_segments(&asr_wav, 10.0, &mut |_, _| {})
+        .transcribe_segments(
+            &asr_wav,
+            10.0,
+            &tokio_util::sync::CancellationToken::new(),
+            |_| {},
+            &mut |_, _| {},
+        )
         .unwrap();
     assert!(!segments.is_empty(), "人声轨应能识别出歌词");
     let text = segments

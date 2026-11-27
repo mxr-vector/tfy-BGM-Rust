@@ -19,6 +19,8 @@ import type { SubtitleRecordFilter } from '@/stores/subtitles';
 import {
   addSubtitleRecord,
   cancelEditing,
+  cancelSubtitleRecognition,
+  canCancelSubtitleRecognition,
   changePreviewFormat,
   clearSubtitleResult,
   deleteSubtitleRecord,
@@ -61,6 +63,7 @@ import {
   selectedSong,
   setEditMode,
   startEditing,
+  subtitleCancelling,
   subtitleQuery,
   subtitleRecords,
   updateDraftText,
@@ -586,6 +589,15 @@ function onDraftTextInput(event: Event): void {
             @click="clearSubtitleResult"
           >
             清空结果
+          </button>
+          <button
+            v-if="canCancelSubtitleRecognition || subtitleCancelling"
+            type="button"
+            class="subtitle-btn"
+            :disabled="subtitleCancelling"
+            @click="cancelSubtitleRecognition"
+          >
+            {{ subtitleCancelling ? '正在取消…' : '取消识别' }}
           </button>
         </div>
 

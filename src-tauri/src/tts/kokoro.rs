@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig};
+use sherpa_onnx::{GenerationConfig, OfflineTtsConfig};
 
 use crate::tts_models::TtsModel;
 
@@ -16,8 +16,8 @@ pub fn configure(config: &mut OfflineTtsConfig, model: &TtsModel) {
     ));
 }
 
-pub fn generation(voice_id: i32, engine: &OfflineTts) -> Result<GenerationConfig> {
-    if !(0..engine.num_speakers()).contains(&voice_id) {
+pub fn generation(voice_id: i32, speakers: i32) -> Result<GenerationConfig> {
+    if !(0..speakers).contains(&voice_id) {
         bail!("所选 Kokoro 语音不可用");
     }
     Ok(GenerationConfig {

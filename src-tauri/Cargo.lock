@@ -4739,6 +4739,7 @@ dependencies = [
  "dirs",
  "flate2",
  "getrandom 0.3.4",
+ "libloading",
  "notify",
  "parking_lot",
  "reqwest",
