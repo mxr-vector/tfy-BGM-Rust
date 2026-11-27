@@ -6566,6 +6566,10 @@ input[type="checkbox"]:indeterminate::after {
   color: var(--text-3);
 }
 
+.settings-mirror-hint {
+  overflow-wrap: anywhere;
+}
+
 .settings-hint.is-warn {
   color: #e6b566;
 }

@@ -80,7 +80,7 @@ export async function manageTtsModel(model: TtsModel, action: TtsModelAction): P
       await invoke(COMMANDS.removeTtsModel, { id: model.id, deleteFiles: action === 'delete' });
     }
     if (!job?.cancelled) {
-      const message = action === 'installGpu' ? 'GPU 环境已就绪，重新加载 CosyVoice3 即可尝试用 GPU 推理'
+      const message = action === 'installGpu' ? 'GPU 环境已就绪，重新加载模型即可尝试用 GPU 推理'
         : action === 'removeGpu' ? '已删除托管 GPU 环境' : `${verb}成功：${model.name}`;
       toast(message, 'success');
     }

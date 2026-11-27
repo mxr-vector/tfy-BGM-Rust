@@ -59,6 +59,9 @@ export const COMMANDS = {
   installTtsModel: 'install_tts_model',
   openModelDownloadSource: 'open_model_download_source',
   saveModelDownloadSource: 'save_model_download_source',
+  /** CUDA 环境安装镜像源：读取当前值与默认值 / 保存自定义值。 */
+  cudaMirrors: 'cuda_mirrors',
+  saveCudaMirrors: 'save_cuda_mirrors',
   loadTtsModel: 'load_tts_model',
   installTtsGpu: 'install_tts_gpu',
   removeTtsGpu: 'remove_tts_gpu',

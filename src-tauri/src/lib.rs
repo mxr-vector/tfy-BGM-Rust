@@ -146,6 +146,8 @@ pub fn run() {
             tts::install_tts_model,
             tts::open_model_download_source,
             tts::save_model_download_source,
+            tts::cuda_mirrors,
+            tts::save_cuda_mirrors,
             tts::load_tts_model,
             tts::install_tts_gpu,
             tts::remove_tts_gpu,

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig};
 
@@ -376,7 +376,9 @@ pub async fn install_tts_gpu(app: AppHandle, job_id: uuid::Uuid) -> CommandResul
     worker(move || {
         let job = LOAD.start(job_id, "已有 TTS 加载或 GPU 环境安装任务正在进行")?;
         with_idle_models(|engine| {
-            let root = app.state::<AppState>().models_root();
+            let state = app.state::<AppState>();
+            let root = state.models_root();
+            let (pypi_mirror, pytorch_mirror) = state.cuda_mirrors();
             let model = tts_models::model(&root, tts_models::COSYVOICE_ID)?;
             if !model.installed {
                 bail!("请先下载 CosyVoice3 模型，再安装 GPU 环境");
@@ -391,6 +393,8 @@ pub async fn install_tts_gpu(app: AppHandle, job_id: uuid::Uuid) -> CommandResul
             cosyvoice::install_managed_cuda(
                 Path::new(&model.path),
                 &app_cache,
+                &pypi_mirror,
+                &pytorch_mirror,
                 &job.token,
                 &|stage| {
                     emit_load_progress(&app, job_id, stage);
@@ -482,6 +486,63 @@ pub fn save_model_download_source(
     state
         .save_model_download_url(tts, id.as_deref(), source)
         .map_err(|error| format!("{error:#}"))
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CudaMirrorInfo {
+    pypi: String,
+    pytorch: String,
+    default_pypi: String,
+    default_pytorch: String,
+}
+
+fn cuda_mirror_info(state: &AppState) -> CudaMirrorInfo {
+    let (pypi, pytorch) = state.cuda_mirrors();
+    CudaMirrorInfo {
+        pypi,
+        pytorch,
+        default_pypi: bgm_core::prefs::DEFAULT_CUDA_PYPI_MIRROR.to_owned(),
+        default_pytorch: bgm_core::prefs::DEFAULT_CUDA_PYTORCH_MIRROR.to_owned(),
+    }
+}
+
+/// CUDA 环境安装使用的镜像源；界面据此展示并回填编辑框。
+#[tauri::command]
+pub fn cuda_mirrors(state: State<'_, AppState>) -> CudaMirrorInfo {
+    cuda_mirror_info(&state)
+}
+
+#[tauri::command]
+pub fn save_cuda_mirrors(
+    state: State<'_, AppState>,
+    pypi: String,
+    pytorch: String,
+) -> CommandResult<CudaMirrorInfo> {
+    let pypi = validate_mirror(&pypi, "PyPI 镜像源").map_err(|error| format!("{error:#}"))?;
+    let pytorch =
+        validate_mirror(&pytorch, "PyTorch 镜像源").map_err(|error| format!("{error:#}"))?;
+    state
+        .save_cuda_mirrors(pypi, pytorch)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(cuda_mirror_info(&state))
+}
+
+/// 镜像源必须是可解析的 http(s) 地址；pip 索引不需要查询参数或片段。
+fn validate_mirror(source: &str, label: &str) -> Result<String> {
+    let source = source.trim();
+    ensure!(!source.is_empty(), "{label}不能为空");
+    let url = reqwest::Url::parse(source)
+        .with_context(|| format!("{label}不是有效的 HTTP 或 HTTPS 地址"))?;
+    ensure!(
+        bgm_core::prefs::is_download_url(source) && url.host_str().is_some(),
+        "{label}不是有效的 HTTP 或 HTTPS 地址"
+    );
+    ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{label}不能包含查询参数或片段"
+    );
+    Ok(source.to_owned())
 }
 
 #[tauri::command]

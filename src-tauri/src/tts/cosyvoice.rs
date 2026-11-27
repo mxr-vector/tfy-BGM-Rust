@@ -469,6 +469,8 @@ const CUDA_PACKAGES: &[&str] = &[
 pub(super) fn install_managed_cuda(
     model: &Path,
     app_cache: &Path,
+    pypi_mirror: &str,
+    pytorch_mirror: &str,
     token: &CancellationToken,
     progress: &dyn Fn(&str),
 ) -> Result<()> {
@@ -510,6 +512,7 @@ pub(super) fn install_managed_cuda(
     command
         .args(["pip", "install", "--python"])
         .arg(&python)
+        .args(["--default-index", pypi_mirror, "--index", pytorch_mirror])
         .args(["torch==2.3.1", "torchaudio==2.3.1"])
         .args(COSYVOICE_COMMON_PACKAGES)
         .args(CUDA_PACKAGES)

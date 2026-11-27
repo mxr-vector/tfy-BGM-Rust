@@ -126,6 +126,10 @@ export interface Prefs {
   asrDownloadUrl: string;
   /** 按模型 id 覆盖的 TTS 下载源；缺失表示使用该模型内置默认源。 */
   ttsDownloadUrls: Record<string, string>;
+  /** 安装 CUDA 环境使用的 PyPI 镜像源。 */
+  cudaPypiMirror: string;
+  /** 安装 CUDA 环境使用的 PyTorch 轮子镜像源。 */
+  cudaPytorchMirror: string;
   /** 上次加载成功的模型 id（相对模型目录）；由后端维护，启动时自动恢复。 */
   lastAsrModel: string | null;
   /** 上次确认的人声分离模型 id；每次生成前仍会再次确认。 */
@@ -137,6 +141,14 @@ export interface Prefs {
 }
 
 export type SubtitleFormat = 'srt' | 'lrc';
+
+/** CUDA 环境安装镜像源：当前值与内置默认值（用于占位与恢复默认）。 */
+export interface CudaMirrorInfo {
+  pypi: string;
+  pytorch: string;
+  defaultPypi: string;
+  defaultPytorch: string;
+}
 
 export interface BrandInfo {
   title: string;

@@ -16,7 +16,7 @@ import { showModal } from '@/lib/modal';
 import { invoke } from '@/lib/tauri';
 import { toast } from '@/lib/toast';
 import { wakeLockSupported } from '@/composables/useSystemIntegration';
-import type { AsrModel, CorsConfig, CorsMode, OutputRoute } from '@/lib/types';
+import type { AsrModel, CorsConfig, CorsMode, CudaMirrorInfo, OutputRoute } from '@/lib/types';
 import { apiStatus, refreshApiInfo } from '@/stores/api';
 import {
   asrLoadCancelling,
@@ -229,6 +229,60 @@ async function editDownloadSource(target: DownloadSourceTarget): Promise<void> {
 
 const gpuEnvironmentModel = computed(() => ttsModels.value.find(model => model.family === 'CosyVoice3'));
 
+const cudaMirrorInfo = ref<CudaMirrorInfo | null>(null);
+const savingCudaMirror = ref(false);
+
+async function refreshCudaMirrors(): Promise<void> {
+  try {
+    cudaMirrorInfo.value = await invoke<CudaMirrorInfo>(COMMANDS.cudaMirrors);
+  } catch (error) {
+    toast(`读取 CUDA 镜像源失败：${normalizeError(error)}`, 'error');
+  }
+}
+
+function validateMirrorUrl(value: string, label: string): string | null {
+  const source = value.trim();
+  if (!source) return `${label}不能为空`;
+  if (
+    !/^https?:\/\//i.test(source) || !URL.canParse(source)
+    || /[\s\x00-\x1f\x7f]/.test(source) || Array.from(source).length > 1024
+  ) {
+    return `${label}不是有效的 HTTP 或 HTTPS 地址`;
+  }
+  const url = new URL(source);
+  if (url.search || url.hash) return `${label}不能包含查询参数或片段`;
+  return null;
+}
+
+async function editCudaMirrors(): Promise<void> {
+  const info = cudaMirrorInfo.value;
+  if (!info) return;
+  const result = await showModal({
+    title: '修改 CUDA 镜像源',
+    description: `安装 GPU 推理环境下载依赖时使用。默认 PyPI 镜像 ${info.defaultPypi}，PyTorch 镜像 ${info.defaultPytorch}。`,
+    fields: [
+      { name: 'pypi', label: 'PyPI 镜像源', value: info.pypi, placeholder: info.defaultPypi },
+      { name: 'pytorch', label: 'PyTorch 镜像源', value: info.pytorch, placeholder: info.defaultPytorch },
+    ],
+    confirmText: '保存',
+    validate: ({ pypi, pytorch }) =>
+      validateMirrorUrl(pypi, 'PyPI 镜像源') ?? validateMirrorUrl(pytorch, 'PyTorch 镜像源'),
+  });
+  if (!result) return;
+  savingCudaMirror.value = true;
+  try {
+    cudaMirrorInfo.value = await invoke<CudaMirrorInfo>(COMMANDS.saveCudaMirrors, {
+      pypi: result.pypi.trim(),
+      pytorch: result.pytorch.trim(),
+    });
+    toast('CUDA 镜像源已保存，下次安装 GPU 环境时生效', 'success');
+  } catch (error) {
+    toast(`保存 CUDA 镜像源失败：${normalizeError(error)}`, 'error');
+  } finally {
+    savingCudaMirror.value = false;
+  }
+}
+
 async function confirmInstallGpu(model: TtsModel): Promise<void> {
   const confirmed = await showModal({
     title: '安装 GPU 环境',
@@ -241,7 +295,7 @@ async function confirmInstallGpu(model: TtsModel): Promise<void> {
 async function confirmRemoveGpu(model: TtsModel): Promise<void> {
   const confirmed = await showModal({
     title: '删除 GPU 环境',
-    description: '只删除应用托管的 CosyVoice3 GPU 环境和专用下载缓存。如果模型正在使用该环境，会先释放模型。模型文件、CPU 环境和 NVIDIA 驱动不受影响。',
+    description: '只删除应用托管的 GPU 环境和专用下载缓存。如果模型正在使用该环境，会先释放模型。模型文件、CPU 环境和 NVIDIA 驱动不受影响。',
     confirmText: '删除',
     danger: true,
   });
@@ -293,6 +347,7 @@ function selectTab(tab: SettingsTab): void {
   if (tab === 'models') {
     void refreshModels();
     void refreshTtsModels();
+    void refreshCudaMirrors();
   }
   if (tab === 'integrations') void syncIntegrationForm();
 }
@@ -405,8 +460,11 @@ watch(settingsOpen, async (open) => {
   if (!open) return;
   if (settingsTab.value === 'general') void ensureFonts();
   if (settingsTab.value === 'playback') void refreshOutputs();
-  if (settingsTab.value === 'models') { void refreshModels(); void refreshTtsModels(); }
-  else if (ttsModels.value.length === 0) void refreshTtsModels();
+  if (settingsTab.value === 'models') {
+    void refreshModels();
+    void refreshTtsModels();
+    void refreshCudaMirrors();
+  } else if (ttsModels.value.length === 0) void refreshTtsModels();
   if (settingsTab.value === 'integrations') void syncIntegrationForm();
   await nextTick();
   panel.value?.focus();
@@ -747,8 +805,11 @@ watch(settingsOpen, async (open) => {
               <div class="settings-subgroup">
                 <div class="settings-subgroup-head">
                   <h4>GPU 推理环境</h4>
-                  <span class="settings-muted">目前支持 CosyVoice3</span>
                 </div>
+                <p v-if="cudaMirrorInfo" class="settings-hint settings-mirror-hint">
+                  依赖镜像：PyPI <code>{{ cudaMirrorInfo.pypi }}</code> · PyTorch <code>{{ cudaMirrorInfo.pytorch }}</code>
+                  <button type="button" class="settings-link" :disabled="savingCudaMirror" @click="editCudaMirrors">修改镜像源</button>
+                </p>
                 <template v-if="gpuEnvironmentModel">
                   <div v-if="ttsGpuInstalling && ttsLoadProgress" class="settings-download">
                     <div class="settings-download-bar" role="progressbar" aria-label="GPU 环境安装进度">
@@ -759,11 +820,10 @@ watch(settingsOpen, async (open) => {
                   </div>
                   <p v-else-if="gpuEnvironmentModel.gpuEnvironmentReady === null" class="settings-hint">一键安装需要 Windows x64 和 NVIDIA 显卡。</p>
                   <template v-else-if="gpuEnvironmentModel.gpuEnvironmentReady">
-                    <p class="settings-hint" role="status">GPU 环境已就绪。加载 CosyVoice3 时会在显存充足的情况下尝试使用 GPU。</p>
-                    <button v-if="gpuEnvironmentModel.installed && gpuEnvironmentModel.device !== 'cuda'" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(gpuEnvironmentModel, 'load')">{{ gpuEnvironmentModel.loaded ? '重新加载 CosyVoice3' : '加载 CosyVoice3' }}</button>
+                    <p class="settings-hint" role="status">GPU 环境已就绪，模型加载时会在显存充足的情况下尝试使用 GPU。</p>
                   </template>
                   <template v-else>
-                    <p class="settings-hint">{{ gpuEnvironmentModel.installed ? '需要 NVIDIA 驱动。环境单独安装，不影响 CPU 推理。' : '请先下载 CosyVoice3 模型，用于验证 GPU 环境。' }}</p>
+                    <p class="settings-hint">{{ gpuEnvironmentModel.installed ? '需要 NVIDIA 驱动。环境单独安装，不影响 CPU 推理。' : '请先安装语音模型，用于验证 GPU 环境。' }}</p>
                     <button type="button" class="settings-btn" :disabled="ttsModelBusy || !gpuEnvironmentModel.installed" @click="confirmInstallGpu(gpuEnvironmentModel)">安装 GPU 环境</button>
                   </template>
                   <button v-if="gpuEnvironmentModel.gpuEnvironmentPresent && !ttsGpuInstalling" type="button" class="settings-btn is-danger" :disabled="ttsModelBusy" @click="confirmRemoveGpu(gpuEnvironmentModel)">{{ ttsGpuRemoving ? '正在删除 GPU 环境…' : '删除 GPU 环境' }}</button>

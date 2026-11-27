@@ -260,6 +260,8 @@ impl AppState {
         next.last_asr_model = current.last_asr_model.clone();
         next.asr_download_url = current.asr_download_url.clone();
         next.tts_download_urls = current.tts_download_urls.clone();
+        next.cuda_pypi_mirror = current.cuda_pypi_mirror.clone();
+        next.cuda_pytorch_mirror = current.cuda_pytorch_mirror.clone();
         next.desktop_lyrics_enabled = current.desktop_lyrics_enabled;
         next.save(&self.prefs_path).context("保存偏好设置失败")?;
         *current = next.clone();
@@ -464,6 +466,30 @@ impl AppState {
     /// 按模型保存的 TTS 下载源；没有覆盖项的模型使用各自内置默认源。
     pub fn tts_download_urls(&self) -> BTreeMap<String, String> {
         self.prefs.read().tts_download_urls.clone()
+    }
+
+    /// 安装 CUDA 环境使用的 (PyPI 镜像, PyTorch 镜像)。
+    pub fn cuda_mirrors(&self) -> (String, String) {
+        let prefs = self.prefs.read();
+        (
+            prefs.cuda_pypi_mirror.clone(),
+            prefs.cuda_pytorch_mirror.clone(),
+        )
+    }
+
+    /// 保存 CUDA 镜像源；调用方需已完成地址校验。
+    pub fn save_cuda_mirrors(&self, pypi: String, pytorch: String) -> Result<()> {
+        let mut current = self.prefs.write();
+        let mut next = current.clone();
+        next.cuda_pypi_mirror = pypi;
+        next.cuda_pytorch_mirror = pytorch;
+        if *current == next {
+            return Ok(());
+        }
+        next.save(&self.prefs_path)
+            .context("保存 CUDA 镜像源失败")?;
+        *current = next;
+        Ok(())
     }
 
     /// 保存下载源。ASR 只有一个可下载模型，沿用单一字段；TTS 按模型 id 写入 map，

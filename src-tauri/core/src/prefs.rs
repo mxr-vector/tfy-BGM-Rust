@@ -52,6 +52,10 @@ pub const DEFAULT_TTS_RELEASE_URL: &str =
 /// Kokoro / ZipVoice 默认下载基址；自定义镜像需保持同样的「目录 + 文件名」结构。
 pub const DEFAULT_TTS_MIRROR_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
+/// CUDA 环境安装默认使用的 PyPI 镜像源（清华）。
+pub const DEFAULT_CUDA_PYPI_MIRROR: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
+/// CUDA 环境安装默认使用的 PyTorch 轮子镜像源（南京大学）。
+pub const DEFAULT_CUDA_PYTORCH_MIRROR: &str = "https://mirrors.nju.edu.cn/pytorch/";
 /// CosyVoice3 的稳定模型 id，与运行时 `tts_models::SPECS` 保持一致。
 pub const TTS_COSYVOICE_MODEL_ID: &str = "cosyvoice3-0.5b-2512";
 /// 走 sherpa-onnx release（压缩包 + 平铺镜像）的 TTS 模型 id。
@@ -240,6 +244,10 @@ pub struct Prefs {
     pub asr_download_url: String,
     /// 按模型 id 覆盖的 TTS 下载源；缺失表示使用该模型内置默认源。
     pub tts_download_urls: BTreeMap<String, String>,
+    /// 安装 CUDA 环境时使用的 PyPI 镜像源；空或非法时回退 `DEFAULT_CUDA_PYPI_MIRROR`。
+    pub cuda_pypi_mirror: String,
+    /// 安装 CUDA 环境时使用的 PyTorch 轮子镜像源；空或非法时回退 `DEFAULT_CUDA_PYTORCH_MIRROR`。
+    pub cuda_pytorch_mirror: String,
     /// 上次加载成功的模型 id（相对模型目录，`/` 分隔）；应用启动时据此后台自动恢复。
     /// 由加载 / 释放命令维护，界面偏好保存不会覆盖它。
     pub last_asr_model: Option<String>,
@@ -293,6 +301,8 @@ impl Default for Prefs {
             models_dir: None,
             asr_download_url: DEFAULT_ASR_DOWNLOAD_URL.to_owned(),
             tts_download_urls: BTreeMap::new(),
+            cuda_pypi_mirror: DEFAULT_CUDA_PYPI_MIRROR.to_owned(),
+            cuda_pytorch_mirror: DEFAULT_CUDA_PYTORCH_MIRROR.to_owned(),
             last_asr_model: None,
             separation_model: None,
             desktop_lyrics_enabled: false,
@@ -468,6 +478,20 @@ impl Prefs {
             })
             .take(MAX_TTS_DOWNLOAD_SOURCES)
             .collect();
+
+        // CUDA 镜像源同样只允许 http(s) 地址，非法值回退内置默认，保证安装命令始终可用。
+        let pypi_mirror = self.cuda_pypi_mirror.trim();
+        self.cuda_pypi_mirror = if is_download_url(pypi_mirror) {
+            pypi_mirror.to_owned()
+        } else {
+            DEFAULT_CUDA_PYPI_MIRROR.to_owned()
+        };
+        let pytorch_mirror = self.cuda_pytorch_mirror.trim();
+        self.cuda_pytorch_mirror = if is_download_url(pytorch_mirror) {
+            pytorch_mirror.to_owned()
+        } else {
+            DEFAULT_CUDA_PYTORCH_MIRROR.to_owned()
+        };
 
         // 自动恢复目标必须是模型根目录内的相对 id：绝对路径与 `..` 一律丢弃，
         // 避免手改配置后启动时去加载模型目录以外的文件。
