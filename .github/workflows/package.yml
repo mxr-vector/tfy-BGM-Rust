@@ -357,3 +357,8 @@ jobs:
           files: artifacts/*
           fail_on_unmatched_files: true
           generate_release_notes: true
+          # Gitee 镜像只同步分支、标签和提交，不负责发布状态；这里显式覆盖
+          # 已有草稿/预发布标志，确保 tag 构建完成后直接发布正式最新版。
+          draft: false
+          prerelease: false
+          make_latest: true
