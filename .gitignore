@@ -7,6 +7,9 @@
 # 绿色版打包产物
 /dist/
 
+# 打包时预取的第三方原生库（sherpa-onnx 静态库，见 scripts/fetch-sherpa-libs.mjs）
+/.cache/
+
 # Generated Tauri schema
 /src-tauri/gen/
 

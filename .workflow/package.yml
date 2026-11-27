@@ -86,6 +86,13 @@ stages:
 
             pnpm install --frozen-lockfile
             pnpm run build
+
+            # sherpa-onnx 的原生库在构建脚本里直连 GitHub 下载，这里先预取并校验
+            # （带镜像兜底）：交叉编译目标是 Windows，所以显式指定 windows/x64。
+            SHERPA_ONNX_LIB_DIR="$(node scripts/fetch-sherpa-libs.mjs --target-os windows --target-arch x64)"
+            export SHERPA_ONNX_LIB_DIR
+            echo "sherpa-onnx libs: $SHERPA_ONNX_LIB_DIR"
+
             (
               cd src-tauri
               cargo build --release \

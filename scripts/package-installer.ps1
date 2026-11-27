@@ -31,6 +31,7 @@ $targetPath = Join-Path $dist $targetName
 if (-not $SkipBuild) {
     $cargo = Resolve-CargoExe
     Write-Host "[1/3] cargo tauri build --bundles nsis"
+    Initialize-SherpaNativeLibs -RepoRoot $repo | Out-Null
     Push-Location $srcTauri
     try {
         & $cargo tauri --version | Out-Null

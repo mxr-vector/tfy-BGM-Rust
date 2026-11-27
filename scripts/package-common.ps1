@@ -123,3 +123,43 @@ function Format-FileSize {
     param([Parameter(Mandatory)][long]$Bytes)
     return ("{0:N1} MB" -f ($Bytes / 1MB))
 }
+
+# sherpa-onnx-sys downloads a ~127 MB native archive from GitHub Releases inside
+# its build script (no retry, no mirror) and accepts any existing lib/ directory
+# without checking the contents. On CI that ends in a late, confusing
+# "could not find native static library `sherpa-onnx-c-api`".
+#
+# scripts/fetch-sherpa-libs.mjs prefetches the archive (retries + content
+# check), extracts it outside target/, verifies all 13 libraries and prints the
+# directory. Passing it via SHERPA_ONNX_LIB_DIR skips the download entirely
+# and makes the build script re-run (it watches that variable), so a stale
+# fingerprint can no longer point at an empty directory.
+function Initialize-SherpaNativeLibs {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [ValidateSet("windows", "linux")][string]$TargetOs = "windows",
+        [string]$TargetArch = ""
+    )
+
+    if (-not $TargetArch) { $TargetArch = Get-WindowsArch }
+
+    $fetcher = Join-Path $RepoRoot "scripts\fetch-sherpa-libs.mjs"
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCmd -or -not (Test-Path $fetcher)) {
+        Write-Warning "node or scripts/fetch-sherpa-libs.mjs missing; sherpa-onnx will download its native libs itself (unverified)"
+        return $null
+    }
+
+    # Progress goes to the helper's stderr (shown as-is); only the verified lib
+    # directory lands on stdout, so the last non-empty line is the path.
+    $output = & $nodeCmd.Source $fetcher --target-os $TargetOs --target-arch $TargetArch
+    $exit = $LASTEXITCODE
+    if ($exit -ne 0) { throw "failed to prepare sherpa-onnx native libs (exit $exit)" }
+
+    $libDir = @($output | Where-Object { $_ -and "$_".Trim() }) | Select-Object -Last 1
+    if (-not $libDir) { throw "scripts/fetch-sherpa-libs.mjs returned no lib directory" }
+
+    $env:SHERPA_ONNX_LIB_DIR = "$libDir".Trim()
+    Write-Host "sherpa-onnx libs: $env:SHERPA_ONNX_LIB_DIR"
+    return $env:SHERPA_ONNX_LIB_DIR
+}

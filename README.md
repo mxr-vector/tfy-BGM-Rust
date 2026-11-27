@@ -636,6 +636,12 @@ cd src-tauri && cargo tauri dev
 - **模型进安装包**：人声分离模型（约 174 MB）与内置壁纸经 `bundle.resources` 打入 NSIS / deb / rpm；绿色版脚本只复制 `assets/bg`，**不含 `models/`**，需要字幕生成时把仓库 `models/` 复制到 exe 同级。
 - **版本唯一来源**：`src-tauri/tauri.conf.json` 的 `version`；脚本会校验 `Cargo.toml` 的 `[package].version`，不一致直接报错。
 - **构建顺序**：前端必须先 `pnpm run build`。绿色版直接用 cargo 构建时**必须带 `--features custom-protocol`**，否则 Tauri 按开发模式加载 `devUrl`，exe 启动后白屏。
+- **原生库预取**：`sherpa-onnx-sys` 的静态库（约 127 MB，解压后 1 GB）本来由它自己的构建脚本从 GitHub Releases 下载，失败时会以 `could not find native static library` 的形式在链接阶段报错。打包脚本改为先用 `scripts/fetch-sherpa-libs.mjs` 下载、解压到 `.cache/sherpa-onnx/`（不进 `target/`，避免被 rust-cache 裁剪）并校验 13 个库，再通过 `SHERPA_ONNX_LIB_DIR` 交给 cargo。手动触发/排查：
+
+  ```powershell
+  node scripts/fetch-sherpa-libs.mjs --dry-run   # 只打印解析出的归档地址与缓存目录
+  node scripts/fetch-sherpa-libs.mjs --force     # 强制重新解压
+  ```
 
 ### 方式一：Windows 绿色版
 

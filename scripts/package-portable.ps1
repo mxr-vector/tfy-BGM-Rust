@@ -51,6 +51,7 @@ if (-not $SkipBuild) {
     }
     $cargo = Resolve-CargoExe
     Write-Host "[1/4] pnpm run build + cargo build --release"
+    Initialize-SherpaNativeLibs -RepoRoot $repo | Out-Null
     Push-Location $repo
     try {
         & pnpm run build

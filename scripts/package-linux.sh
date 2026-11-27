@@ -66,6 +66,25 @@ if [ "${SKIP_BUILD:-0}" = "1" ]; then
 else
     command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust from https://rustup.rs"
     echo "[1/3] cargo tauri build --bundles $bundle_arg"
+
+    # sherpa-onnx-sys downloads its native archive in the build script without
+    # retry and without checking the result; prefetch + verify it here instead
+    # (see the .mjs header).
+    case "$(uname -m)" in
+        x86_64|amd64)  sherpa_arch=x64   ;;
+        aarch64|arm64) sherpa_arch=arm64 ;;
+        *) die "unsupported architecture: $(uname -m)" ;;
+    esac
+    if command -v node >/dev/null 2>&1; then
+        SHERPA_ONNX_LIB_DIR="$(node "$repo/scripts/fetch-sherpa-libs.mjs" \
+            --target-os linux --target-arch "$sherpa_arch")" \
+            || die "failed to prepare sherpa-onnx native libs"
+        export SHERPA_ONNX_LIB_DIR
+        echo "sherpa-onnx libs: $SHERPA_ONNX_LIB_DIR"
+    else
+        echo "warning: node not found; sherpa-onnx downloads its native libs itself (unverified)" >&2
+    fi
+
     ( cd "$repo/src-tauri" && cargo tauri --version >/dev/null 2>&1 ) \
         || die "tauri-cli not found. Run: cargo install tauri-cli --version \"^2\" --locked"
     ( cd "$repo/src-tauri" && cargo tauri build --bundles "$bundle_arg" )

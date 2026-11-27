@@ -193,6 +193,16 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.arch }}
 
+      # sherpa-onnx 的静态库约 127 MB（解压后 1 GB），由打包脚本预取并校验；
+      # 只缓存压缩包，解压后放在 .cache/ 而不是 target/ —— rust-cache 会裁剪
+      # target/，把解压目录留在里面就会出现「有 -L 但没有 .lib」的链接错误。
+      - uses: actions/cache@v6
+        with:
+          path: .cache/sherpa-onnx/archives
+          key: sherpa-libs-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            sherpa-libs-${{ runner.os }}-${{ matrix.arch }}-
+
       # tauri-cli 编译一次要几分钟；带上 .crates.toml，命中缓存时 cargo install 会直接跳过。
       # 只有打 NSIS 才需要，绿色版直接 cargo build。
       - uses: actions/cache@v6
@@ -261,6 +271,14 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.arch }}
+
+      # 同上：sherpa-onnx 原生库走独立缓存，与 target/ 的裁剪互不影响。
+      - uses: actions/cache@v6
+        with:
+          path: .cache/sherpa-onnx/archives
+          key: sherpa-libs-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            sherpa-libs-${{ runner.os }}-${{ matrix.arch }}-
 
       # bgm-core 不依赖 Tauri，不用装 WebKitGTK；链接测试二进制需要 gcc（镜像自带）。
       # 仓库根目录没有 Cargo.toml，workspace 在 src-tauri/。
