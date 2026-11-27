@@ -76,14 +76,25 @@ pub const DEFAULT_WALLPAPER_OPACITY: f32 = 0.35;
 pub const DEFAULT_WALLPAPER_BLUR: u32 = 0;
 /// 壁纸填充方式：`cover` 铺满裁剪，`contain` 完整展示。
 pub const DEFAULT_WALLPAPER_FIT: &str = "cover";
-/// 内置壁纸选项的合法 id；`custom` 需要搭配自定义文件路径才生效。
-pub const BUILTIN_WALLPAPER_IDS: [&str; 5] = [
-    "gradient-blue",
-    "gradient-green",
-    "gradient-red",
-    "builtin-1",
-    "builtin-2",
-];
+/// 渐变底色壁纸的合法 id；图片 / 视频壁纸由资源目录自动发现，
+/// id 形如 `builtin-<文件名>`，无需在此维护固定清单。
+pub const GRADIENT_WALLPAPER_IDS: [&str; 3] = ["gradient-blue", "gradient-green", "gradient-red"];
+/// 自动发现壁纸 id 中文件名部分的最大长度。
+const MAX_BUILTIN_ID_SUFFIX_LEN: usize = 64;
+
+/// 是否是可识别的内置壁纸 id；`custom` 需要搭配自定义文件路径才生效。
+fn is_builtin_wallpaper_id(id: &str) -> bool {
+    if GRADIENT_WALLPAPER_IDS.contains(&id) {
+        return true;
+    }
+    id.strip_prefix("builtin-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix.chars().count() <= MAX_BUILTIN_ID_SUFFIX_LEN
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    })
+}
 
 /// 自定义壁纸路径是否带受支持的扩展名（不检查文件是否存在，由调用方决定）。
 pub fn is_wallpaper_path(path: &str) -> bool {
@@ -408,9 +419,8 @@ impl Prefs {
             .filter(|path| is_wallpaper_path(path));
 
         let wallpaper = self.wallpaper.trim().to_ascii_lowercase();
-        let is_builtin = BUILTIN_WALLPAPER_IDS.contains(&wallpaper.as_str());
         let is_custom = wallpaper == "custom" && self.custom_wallpaper.is_some();
-        self.wallpaper = if is_builtin || is_custom {
+        self.wallpaper = if is_custom || is_builtin_wallpaper_id(&wallpaper) {
             wallpaper
         } else {
             DEFAULT_WALLPAPER.to_owned()
@@ -824,6 +834,28 @@ mod tests {
         }
         .normalize();
         assert_eq!(broken.wallpaper, DEFAULT_WALLPAPER);
+    }
+
+    #[test]
+    fn discovered_builtin_wallpaper_ids_are_kept() {
+        // 自动发现的壁纸 id 由文件名生成，归一化不能再按固定清单拦截。
+        for id in ["builtin-1", "builtin-3", "builtin-night_view"] {
+            let prefs = Prefs {
+                wallpaper: id.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(prefs.wallpaper, id);
+        }
+
+        for bad in ["builtin-", "builtin-../x", "builtin-夜"] {
+            let prefs = Prefs {
+                wallpaper: bad.into(),
+                ..Prefs::default()
+            }
+            .normalize();
+            assert_eq!(prefs.wallpaper, DEFAULT_WALLPAPER, "{bad} 不应保留");
+        }
     }
 
     #[test]

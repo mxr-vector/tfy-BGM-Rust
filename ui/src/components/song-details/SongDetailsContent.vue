@@ -393,6 +393,7 @@ async function exportCurrentSubtitle(): Promise<void> {
   padding-top: 11px;
   color: var(--text-3);
   font-size: 10.5px;
+  overflow-wrap: anywhere;
 }
 
 .status-dot {
@@ -443,21 +444,10 @@ async function exportCurrentSubtitle(): Promise<void> {
   font-size: 15px;
 }
 
-.details-content :deep(.diag-panel--embedded .diag-kicker) {
-  font-size: 8.5px;
-}
-
 .details-content :deep(.diag-panel--embedded .diag-body) {
   padding: 12px 0 0;
-  overflow-y: auto;
   scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
   scrollbar-width: thin;
-}
-
-@media (max-width: 1180px) {
-  .details-content :deep(.diag-body) {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 760px) {

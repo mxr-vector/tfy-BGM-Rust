@@ -4191,10 +4191,8 @@ input[type="checkbox"]:indeterminate::after {
   transition: opacity 0.2s ease;
 }
 
-/* 内置壁纸与自定义壁纸：底色使用中性深色调，避免墨绿原色盖住壁纸真实色彩。 */
-.app-shell.wall-builtin-1,
-.app-shell.wall-builtin-2,
-.app-shell.wall-custom {
+/* 图片 / 视频壁纸（含自定义）：底色使用中性深色调，避免墨绿原色盖住壁纸真实色彩。 */
+.app-shell.wall-art {
   --panel-rgb: 8, 14, 18;
   background: #04090c;
 }
@@ -4444,7 +4442,8 @@ input[type="checkbox"]:indeterminate::after {
   background: #0a1712;
 }
 
-.wallpaper-preview img {
+.wallpaper-preview img,
+.wallpaper-preview-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -5821,6 +5820,7 @@ input[type="checkbox"]:indeterminate::after {
   height: min(760px, calc(var(--viewport-height, 100dvh) - 56px));
   display: flex;
   flex-direction: column;
+  container: diagnostics / inline-size;
   overflow: hidden;
   border-radius: 22px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -5842,45 +5842,9 @@ input[type="checkbox"]:indeterminate::after {
   background: rgba(255, 255, 255, 0.015);
 }
 
-.diag-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.diag-kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-}
-
-.diag-kicker [data-icon] {
-  width: 14px;
-  height: 14px;
-}
-
 .diag-title {
-  margin-top: 2px;
-  overflow: hidden;
   font-size: 20px;
   font-weight: 700;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.diag-sub {
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-.diag-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 
 .diag-verdict {
@@ -5918,42 +5882,35 @@ input[type="checkbox"]:indeterminate::after {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.95fr);
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  align-items: start;
   gap: 16px;
   padding: 16px 18px 18px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .diag-visuals {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
 }
 
 .diag-canvas-block {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
   padding: 10px 12px;
   border-radius: 14px;
   border: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.22);
 }
 
-.diag-canvas-block:first-child {
-  flex: 1.2;
-}
-
-.diag-canvas-block:nth-child(2) {
-  flex: 0.8;
-}
-
 .diag-block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 3px 10px;
   margin-bottom: 6px;
   font-size: 11.5px;
   font-weight: 600;
@@ -5966,14 +5923,14 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .diag-canvas {
-  flex: 1;
-  width: 100%;
-  min-height: 64px;
   display: block;
+  width: 100%;
+  height: clamp(64px, 12vh, 128px);
   border-radius: 8px;
 }
 
 .diag-wave {
+  height: clamp(80px, 16vh, 176px);
   cursor: crosshair;
 }
 
@@ -6024,9 +5981,6 @@ input[type="checkbox"]:indeterminate::after {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
-  padding-right: 2px;
-  overflow-y: auto;
 }
 
 .diag-loading,
@@ -6187,7 +6141,7 @@ input[type="checkbox"]:indeterminate::after {
 
 .diag-loop-values {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -6200,6 +6154,8 @@ input[type="checkbox"]:indeterminate::after {
 }
 
 .diag-loop-values input {
+  width: 100%;
+  min-width: 0;
   height: 32px;
   padding: 0 8px;
   border-radius: 8px;
@@ -6256,16 +6212,31 @@ input[type="checkbox"]:indeterminate::after {
   color: var(--text-2);
 }
 
-@media (max-width: 980px) {
+@container diagnostics (min-width: 640px) {
   .diag-body {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  }
+}
+
+@container diagnostics (min-width: 820px) {
+  .diag-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container diagnostics (min-width: 1180px) {
+  .diag-side {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
   }
 
-  .diag-panel {
-    height: min(760px, calc(var(--viewport-height, 100dvh) - 56px));
+  .diag-side > :not(.diag-issues, .diag-loop) {
+    grid-column: 1 / -1;
   }
+}
 
+@media (max-width: 980px) {
   .editor-grid {
     grid-template-columns: 1fr 1fr;
   }

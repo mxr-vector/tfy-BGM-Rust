@@ -66,12 +66,6 @@ const verdict = computed(() => {
   if (result.verdict === 'warning') return { label: '可用，建议留意', tone: 'warn' };
   return { label: '可直接使用', tone: 'good' };
 });
-const subtitle = computed(() => {
-  const current = song.value;
-  if (!current) return '';
-  const tags = [current.artist, current.album].filter(Boolean);
-  return tags.length > 0 ? tags.join(' · ') : category.value?.labelEn ?? current.category;
-});
 
 function formatValue(value: number | null | undefined, digits = 1, unit = ''): string {
   return value === null || value === undefined || !Number.isFinite(value)
@@ -406,16 +400,8 @@ onBeforeUnmount(() => {
   <div class="diag-embedded">
     <section class="diag-panel diag-panel--embedded" role="dialog" aria-label="音频诊断">
       <header class="diag-header">
-        <div class="diag-heading">
-          <span class="diag-kicker" :style="{ color: accent }">
-            <Icon name="sparkles" /> TRACK DIAGNOSTICS
-          </span>
-          <h2 class="diag-title">{{ song?.title ?? '未在播放' }}</h2>
-          <span class="diag-sub">{{ subtitle }}</span>
-        </div>
-        <div class="diag-header-actions">
-          <span class="diag-verdict" :class="`is-${verdict.tone}`">{{ verdict.label }}</span>
-        </div>
+        <h2 class="diag-title">音频诊断</h2>
+        <span class="diag-verdict" :class="`is-${verdict.tone}`">{{ verdict.label }}</span>
       </header>
 
       <div class="diag-body">

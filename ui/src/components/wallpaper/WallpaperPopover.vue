@@ -17,6 +17,7 @@ import { state } from '@/stores/state';
 import type { WallpaperAsset } from '@/lib/types';
 import AppDropdown from '@/components/AppDropdown.vue';
 import Icon from '@/components/Icon.vue';
+import WallpaperVideoFrame from '@/components/wallpaper/WallpaperVideoFrame.vue';
 
 const customImageFailed = ref(false);
 
@@ -99,14 +100,11 @@ watch(popoverOpen, (open) => {
             aria-hidden="true"
           >
             <template v-if="assetFor(option.id)">
-              <img
-                v-if="assetFor(option.id)!.thumb"
-                :src="assetUrl(assetFor(option.id)!.thumb)"
-                alt=""
+              <WallpaperVideoFrame
+                v-if="assetFor(option.id)!.kind === 'video'"
+                :path="assetFor(option.id)!.path"
               />
-              <span v-else class="preview-icon">
-                <Icon :name="assetFor(option.id)!.kind === 'video' ? 'film' : 'image'" />
-              </span>
+              <img v-else :src="assetUrl(assetFor(option.id)!.path)" alt="" />
               <span v-if="assetFor(option.id)!.kind === 'video'" class="wallpaper-badge">
                 <Icon name="play-fill" />
               </span>
@@ -140,14 +138,18 @@ watch(popoverOpen, (open) => {
             }"
             aria-hidden="true"
           >
+            <WallpaperVideoFrame
+              v-if="savedCustom && savedKind === 'video'"
+              :path="savedCustom"
+            />
             <img
-              v-if="savedCustom && savedKind === 'image' && !customImageFailed"
+              v-else-if="savedCustom && savedKind === 'image' && !customImageFailed"
               :src="assetUrl(savedCustom)"
               alt=""
               @error="customImageFailed = true"
             />
             <span v-else class="preview-icon">
-              <Icon :name="savedKind === 'video' ? 'play-fill' : 'image'" />
+              <Icon name="image" />
             </span>
           </span>
           <span class="wallpaper-meta">

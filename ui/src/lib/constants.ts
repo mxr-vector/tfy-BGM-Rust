@@ -186,11 +186,10 @@ export const LEGACY_UI_FONT_FAMILIES: Readonly<Record<string, string>> = {
 /** 打开「音乐淡入淡出」且此前为硬切时使用的默认时长（秒），与 Rust 默认值一致。 */
 export const DEFAULT_CROSSFADE_SECONDS = 2;
 
+/** 内置渐变壁纸；图片 / 视频壁纸由后端扫描 `assets/bg/` 自动发现后合并。 */
 export const WALLPAPER_OPTIONS = [
   { id: 'default', label: '默认样式', hint: '当前配色', preview: 'default' },
   { id: 'gradient-blue', label: '渐变蓝', hint: '深邃静谧', preview: 'blue' },
   { id: 'gradient-green', label: '渐变绿', hint: '翡翠流光', preview: 'green' },
   { id: 'gradient-red', label: '渐变红', hint: '暖色余晖', preview: 'red' },
-  { id: 'builtin-1', label: '幻彩流光', hint: 'MP4 动态', preview: 'builtin-1' },
-  { id: 'builtin-2', label: '雪山云海', hint: 'JPG 静态', preview: 'builtin-2' },
 ] as const;

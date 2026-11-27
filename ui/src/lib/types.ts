@@ -373,7 +373,6 @@ export interface WallpaperAsset {
   label: string;
   kind: WallpaperKind;
   path: string;
-  thumb: string;
 }
 
 export interface WallpaperPick {

@@ -31,7 +31,7 @@ export function fileName(path: string | null | undefined): string {
 
 export const wallpaperView = computed(() => {
   const prefs = state.prefs;
-  const id = prefs?.wallpaper || DEFAULT_WALLPAPER;
+  const storedId = prefs?.wallpaper || DEFAULT_WALLPAPER;
   const customPath = prefs?.customWallpaper ?? null;
   const opacity = clamp(
     Number(prefs?.wallpaperOpacity ?? DEFAULT_WALLPAPER_OPACITY) || 0,
@@ -43,14 +43,20 @@ export const wallpaperView = computed(() => {
   );
   const fit = prefs?.wallpaperFit ?? DEFAULT_WALLPAPER_FIT;
 
-  const builtin = builtins.value.find((item) => item.id === id) ?? null;
+  const builtin = builtins.value.find((item) => item.id === storedId) ?? null;
+  // 壁纸文件被移出资源目录后，旧 id 回退默认样式，避免停留在无画面的状态。
+  const id =
+    storedId.startsWith('builtin-') && builtinsLoaded.value && !builtin
+      ? DEFAULT_WALLPAPER
+      : storedId;
+  const asset = id === storedId ? builtin : null;
   const source =
     id === 'custom'
       ? customPath
         ? { path: customPath, kind: kindOf(customPath) }
         : null
-      : builtin
-        ? { path: builtin.path, kind: builtin.kind }
+      : asset
+        ? { path: asset.path, kind: asset.kind }
         : null;
 
   const panelOpacity = Math.max(0.04, 1 - opacity * 0.92);
@@ -69,24 +75,29 @@ export const wallpaperView = computed(() => {
     hasWallpaper: id !== DEFAULT_WALLPAPER,
     shellClass: [
       `wall-${id}`,
+      ...(source ? ['wall-art'] : []),
       ...(id !== DEFAULT_WALLPAPER ? ['has-wallpaper'] : []),
       ...(source?.kind === 'video' ? ['has-video'] : []),
     ],
   };
 });
 
-export const availableWallpaperOptions = computed(() =>
-  WALLPAPER_OPTIONS.filter(
-    (option) =>
-      !option.id.startsWith('builtin-') ||
-      !builtinsLoaded.value ||
-      builtins.value.some((item) => item.id === option.id),
-  ),
-);
+/** 渐变底色始终可用；图片 / 视频壁纸由后端扫描资源目录后动态补进列表。 */
+export const availableWallpaperOptions = computed(() => [
+  ...WALLPAPER_OPTIONS,
+  ...builtins.value.map((item) => ({
+    id: item.id,
+    label: item.label,
+    hint: item.kind === 'video' ? 'MP4 动态' : '静态图片',
+    preview: 'auto',
+  })),
+]);
 
 export function openWallpaperPopover(anchor: HTMLElement): void {
   popoverAnchor.value = anchor;
   popoverOpen.value = true;
+  // 每次打开时重新扫描资源目录，新放进 assets/bg 的壁纸无需重启即可出现。
+  void loadBuiltins();
 }
 
 export function closeWallpaperPopover(): void {

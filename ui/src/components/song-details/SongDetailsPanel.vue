@@ -228,12 +228,12 @@ watch(
 
 .song-details-main {
   display: grid;
-  grid-template-columns: minmax(300px, 0.9fr) minmax(440px, 1.1fr);
-  align-items: center;
-  gap: clamp(34px, 5vw, 78px);
+  grid-template-columns: clamp(160px, 22vw, 320px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: clamp(20px, 3vw, 48px);
   flex: 1;
   min-height: 0;
-  width: min(1240px, calc(100% - 100px));
+  width: calc(100% - clamp(40px, 6vw, 120px));
   margin: 0 auto;
   padding: 18px 0 22px;
 }
@@ -242,15 +242,14 @@ watch(
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  align-self: center;
   min-width: 0;
 }
 
 .details-vinyl-wrap {
   --details-vinyl-limit: max(160px, calc(var(--details-viewport-height, 100dvh) - 250px));
   position: relative;
-  width: min(35vw, 420px, var(--details-vinyl-limit));
-  max-width: 100%;
+  width: min(100%, var(--details-vinyl-limit));
   aspect-ratio: 1;
 }
 
@@ -349,9 +348,11 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
   margin-top: 25px;
   color: rgba(255, 255, 255, 0.38);
   font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .details-playing-indicator {
@@ -396,12 +397,11 @@ watch(
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  height: min(720px, calc(var(--details-viewport-height, 100dvh) - 210px));
 }
 
 .details-track-heading {
   flex: none;
-  margin-bottom: 24px;
+  margin-bottom: clamp(14px, 2vh, 24px);
 }
 
 .details-kicker {
@@ -458,33 +458,7 @@ watch(
   }
 }
 
-@media (max-width: 1050px) {
-  .song-details-main {
-    grid-template-columns: minmax(240px, 0.75fr) minmax(390px, 1.25fr);
-    gap: 30px;
-    width: calc(100% - 56px);
-  }
-
-  .details-vinyl-wrap {
-    width: min(32vw, 340px, var(--details-vinyl-limit));
-  }
-
-  .details-info-stage {
-    height: min(620px, calc(var(--details-viewport-height, 100dvh) - 200px));
-  }
-}
-
 @media (max-width: 820px) {
-  .song-details-main {
-    grid-template-columns: 210px minmax(0, 1fr);
-    gap: 24px;
-    width: calc(100% - 40px);
-  }
-
-  .details-vinyl-wrap {
-    width: min(210px, var(--details-vinyl-limit));
-  }
-
   .details-track-heading h1 {
     font-size: 34px;
   }
@@ -514,7 +488,7 @@ watch(
   }
 
   .details-vinyl-wrap {
-    width: min(54vw, 250px);
+    width: clamp(144px, 42vw, 180px);
   }
 
   .details-vinyl-caption {

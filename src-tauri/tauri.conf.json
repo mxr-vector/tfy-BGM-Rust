@@ -39,9 +39,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../assets/bg/1.mp4": "assets/bg/1.mp4",
-      "../assets/bg/1.thumb.jpg": "assets/bg/1.thumb.jpg",
-      "../assets/bg/2.jpg": "assets/bg/2.jpg",
+      "../assets/bg/*": "assets/bg",
       "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
       "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",
       "../models/UVR-MDX-NET-Voc_FT.onnx": "models/UVR-MDX-NET-Voc_FT.onnx",

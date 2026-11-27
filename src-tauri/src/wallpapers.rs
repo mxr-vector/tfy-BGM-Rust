@@ -2,12 +2,15 @@
 //!
 //! 打包后壁纸位于 `$RESOURCE/assets/bg/`，开发模式由 `tauri-build` 复制到
 //! `target/<profile>/assets/bg/`，两者都通过 `resource_dir` 命中；仓库路径作为
-//! 最后兜底，方便直接 `cargo run` 调试。
+//! 最后兜底，方便直接 `cargo run` 调试。内置壁纸不维护固定清单，而是扫描目录
+//! 自动发现支持的图片 / 视频，新增文件无需改代码。
 //! 图片使用 asset 协议；Linux 视频改用本机 HTTP Range 流，以规避 WebKitGTK
 //! 无法通过 `asset://` 打开 `<video>` 的限制。媒体服务本身是平台专有实现，
 //! 位于 `platform/linux/media.rs`，其余平台由 `platform/asset_media.rs` 兜底，
 //! 本文件只保留跨平台的资源定位与授权。
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -17,11 +20,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::platform::WallpaperMediaServer;
 
-/// (id, 名称, 类型, 壁纸文件, 缩略图文件)
-pub const BUILTIN_WALLPAPERS: [(&str, &str, &str, &str, &str); 2] = [
-    ("builtin-1", "幻彩流光", "video", "1.mp4", "1.thumb.jpg"),
-    ("builtin-2", "雪山云海", "image", "2.jpg", "2.jpg"),
-];
+/// 旧版缩略图文件名形如 `1.thumb.jpg`，扫描壁纸时需要跳过。
+const THUMBNAIL_MARKER: &str = ".thumb.";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +31,6 @@ pub struct WallpaperAsset {
     pub kind: String,
     /// 传给前端 `convertFileSrc` 的本地路径。
     pub path: String,
-    pub thumb: String,
 }
 
 /// 自定义壁纸选择结果；`label` 只用于界面提示，不参与持久化。
@@ -69,51 +68,139 @@ pub fn allow_wallpaper_file(app: &AppHandle, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn candidates(app: &AppHandle, file_name: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        paths.push(resource_dir.join("assets").join("bg").join(file_name));
+/// 内置壁纸目录候选：发布包读资源目录，调试构建直接读仓库目录。
+/// 调试时 `target/<profile>/assets/bg` 会累积历次构建的旧副本，
+/// 文件改名或删除后仍会被扫描到，因此 debug 构建跳过该目录。
+fn bg_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if !cfg!(debug_assertions) {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            dirs.push(resource_dir.join("assets").join("bg"));
+        }
     }
-    // 开发模式兜底：资源尚未复制进 target 时直接读仓库文件。
-    paths.push(
+    dirs.push(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("assets")
-            .join("bg")
-            .join(file_name),
+            .join("bg"),
     );
-    paths
+    dirs
 }
 
-pub fn resolve_asset(app: &AppHandle, file_name: &str) -> Option<PathBuf> {
-    candidates(app, file_name)
-        .into_iter()
-        .find(|path| path.is_file())
+/// 文件名主干转成可持久化的壁纸 id：`3.jpg` → `builtin-3`。
+/// 纯中文等无法转写的名称退化为名称哈希，保证重启后 id 稳定。
+fn builtin_id(stem: &str) -> String {
+    let mut suffix = String::new();
+    for ch in stem.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            suffix.push(ch);
+        } else if !suffix.ends_with('-') {
+            suffix.push('-');
+        }
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        format!("builtin-{:016x}", fnv1a(stem.as_bytes()))
+    } else {
+        format!("builtin-{suffix}")
+    }
 }
 
-/// 返回仓库内置的图片 / 视频壁纸，并顺带授权资源文件访问。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+fn is_thumbnail(name: &str) -> bool {
+    name.to_ascii_lowercase().contains(THUMBNAIL_MARKER)
+}
+
+/// 扫描一个目录顶层的壁纸文件；子目录、旧版缩略图与不支持的格式会被跳过。
+/// 返回顺序按文件名排序，保证界面列表稳定。
+fn discover(dir: &Path) -> Vec<(String, String, PathBuf)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+
+    let mut found = Vec::new();
+    let mut seen_ids = HashSet::new();
+    // 同名不同后缀（如 2.jpg 与 2.mp4）会撞 id，标签改用完整文件名以便区分。
+    let mut stem_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for path in &files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || is_thumbnail(name) || !is_supported(path) {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            *stem_counts.entry(stem).or_insert(0) += 1;
+        }
+    }
+
+    for path in &files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || is_thumbnail(name) || !is_supported(path) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let base = builtin_id(stem);
+        let mut id = base.clone();
+        let mut suffix = 2;
+        while seen_ids.contains(&id) {
+            id = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        seen_ids.insert(id.clone());
+
+        let label = if stem_counts.get(stem).copied().unwrap_or(0) > 1 {
+            name.to_owned()
+        } else {
+            stem.to_owned()
+        };
+        found.push((id, label, path.clone()));
+    }
+    found
+}
+
+/// 返回自动发现的内置图片 / 视频壁纸，并顺带授权资源文件访问。
+/// 资源目录优先，开发目录仅补齐未命中的 id，避免同一壁纸重复出现。
 pub fn builtin_catalog(app: &AppHandle) -> Vec<WallpaperAsset> {
-    BUILTIN_WALLPAPERS
-        .iter()
-        .filter_map(|(id, label, kind, file, thumb_file)| {
-            let path = resolve_asset(app, file)?;
-            // 缩略图缺失时留空，前端会退回类型图标而不是显示破图。
-            let thumb = resolve_asset(app, thumb_file);
-            allow_wallpaper_file(app, &path).ok()?;
-            if let Some(thumb) = &thumb {
-                allow_wallpaper_file(app, thumb).ok()?;
+    let mut assets: Vec<WallpaperAsset> = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for dir in bg_dirs(app) {
+        for (id, label, path) in discover(&dir) {
+            if !seen_ids.insert(id.clone()) {
+                continue;
             }
-            Some(WallpaperAsset {
-                id: (*id).to_owned(),
-                label: (*label).to_owned(),
-                kind: (*kind).to_owned(),
+            if allow_wallpaper_file(app, &path).is_err() {
+                continue;
+            }
+            assets.push(WallpaperAsset {
+                id,
+                label,
+                kind: kind_of(&path).to_owned(),
                 path: path.to_string_lossy().into_owned(),
-                thumb: thumb
-                    .map(|thumb| thumb.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    assets
 }
 
 /// 启动时授权上次保存的自定义壁纸，避免首屏加载被 asset 协议拦下。
