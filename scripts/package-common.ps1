@@ -17,54 +17,92 @@ function Get-RepoRoot {
     return (Split-Path -Parent $ScriptRoot)
 }
 
-# Version is read from tauri.conf.json (authoritative for the bundler) and
-# cross-checked against Cargo.toml so a stale Cargo version cannot silently
-# produce a mislabelled artifact.
-function Get-AppVersion {
-    param([Parameter(Mandatory)][string]$RepoRoot)
+function Get-WindowsPackageContext {
+    param(
+        [Parameter(Mandatory)][string]$SrcTauri,
+        [Parameter(Mandatory)][string]$Cargo,
+        [string]$Target
+    )
 
-    $conf = Join-Path $RepoRoot "src-tauri\tauri.conf.json"
-    if (-not (Test-Path $conf)) { throw "tauri.conf.json not found: $conf" }
-
-    # -Encoding UTF8 is required: Windows PowerShell 5.1 defaults to ANSI and
-    # would mangle the Chinese descriptions in tauri.conf.json.
-    $config = Get-Content $conf -Raw -Encoding UTF8 | ConvertFrom-Json
-    $version = $null
-    if ($config.PSObject.Properties.Match("version").Count -gt 0) { $version = $config.version }
-    if (-not $version) { throw "tauri.conf.json has no version field" }
-
-    # Only the first `version = "..."` in Cargo.toml is [package].version;
-    # `rust-version` and dependency versions do not match this pattern.
-    $cargoToml = Join-Path $RepoRoot "src-tauri\Cargo.toml"
-    if (Test-Path $cargoToml) {
-        $match = Select-String -Path $cargoToml -Pattern '^version\s*=\s*"([^"]+)"' |
-            Select-Object -First 1
-        if ($match) {
-            $cargoVersion = $match.Matches[0].Groups[1].Value
-            if ($cargoVersion -ne $version) {
-                throw "Version mismatch: tauri.conf.json=$version, Cargo.toml=$cargoVersion. Align them before packaging."
-            }
+    Push-Location -LiteralPath $SrcTauri
+    try {
+        if (-not $Target) {
+            $rustc = Get-Command rustc -ErrorAction SilentlyContinue
+            if ($rustc) { $rustcPath = $rustc.Source }
+            else { $rustcPath = Join-Path (Split-Path -Parent $Cargo) "rustc.exe" }
+            if (-not (Test-Path -LiteralPath $rustcPath -PathType Leaf)) { throw "rustc not found" }
+            $rustInfo = & $rustcPath -vV
+            if ($LASTEXITCODE -ne 0) { throw "rustc -vV failed (exit $LASTEXITCODE)" }
+            $hostLine = $rustInfo | Where-Object { $_ -cmatch '^host: ' } | Select-Object -First 1
+            if (-not $hostLine) { throw "Cannot read host target from rustc -vV" }
+            $Target = $hostLine.Substring(6).Trim()
         }
+
+        switch -CaseSensitive ($Target) {
+            "x86_64-pc-windows-msvc" { $arch = "x64"; $machine = 0x8664 }
+            "aarch64-pc-windows-msvc" { $arch = "arm64"; $machine = 0xAA64 }
+            default { throw "Unsupported Windows target: $Target (expected x86_64-pc-windows-msvc or aarch64-pc-windows-msvc)" }
+        }
+
+        $metadataJson = & $Cargo metadata --format-version 1 --no-deps
+        if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
+        $metadata = $metadataJson | ConvertFrom-Json
+    } finally {
+        Pop-Location
     }
 
-    return $version
+    $manifest = Join-Path $SrcTauri "Cargo.toml"
+    $app = @($metadata.packages | Where-Object { $_.manifest_path -eq $manifest -and $_.name -ceq "tfy-bgm" })
+    if ($app.Count -ne 1 -or -not $metadata.target_directory) {
+        throw "Cannot resolve the app package or target directory from cargo metadata"
+    }
+    # Windows PowerShell 5.1 defaults to ANSI for files without a BOM.
+    $config = Get-Content -LiteralPath (Join-Path $SrcTauri "tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($config.PSObject.Properties.Match("version").Count -eq 0 -or $config.version -cne $app[0].version) {
+        throw "Version mismatch: tauri.conf.json must specify the Cargo package version ($($app[0].version))"
+    }
+
+    return [pscustomobject]@{
+        Target = $Target
+        Arch = $arch
+        Machine = $machine
+        Version = $config.version
+        ReleaseDir = Join-Path $metadata.target_directory "$Target\release"
+    }
 }
 
-function Get-WindowsArch {
-    $arch = $null
+function Resolve-PackageOutputDir {
+    param([string]$RepoRoot, [string]$OutputDir)
+
+    if (-not [System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir = Join-Path $RepoRoot $OutputDir }
+    return [System.IO.Path]::GetFullPath($OutputDir)
+}
+
+function Assert-PeArchitecture {
+    param([string]$Path, [int]$Machine)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Release executable not found: $Path" }
+    $stream = [System.IO.File]::OpenRead($Path)
     try {
-        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-    } catch {
-        $arch = $env:PROCESSOR_ARCHITECTURE
-    }
-    switch ($arch) {
-        "X64" { return "x64" }
-        "AMD64" { return "x64" }
-        "Arm64" { return "arm64" }
-        "ARM64" { return "arm64" }
-        "X86" { return "x86" }
-        "x86" { return "x86" }
-        default { throw "Unsupported Windows architecture: $arch" }
+        $reader = New-Object System.IO.BinaryReader($stream)
+        try {
+            if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Invalid PE header: $Path"
+            }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadUInt32()
+            if ($peOffset -lt 64 -or $peOffset -gt ($stream.Length - 24)) { throw "Invalid PE offset: $Path" }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x4550) { throw "Invalid PE signature: $Path" }
+            $actual = $reader.ReadUInt16()
+            if ($actual -ne $Machine) {
+                throw ("PE architecture mismatch in {0}: expected 0x{1:X4}, found 0x{2:X4}" -f $Path, $Machine, $actual)
+            }
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
     }
 }
 
@@ -86,8 +124,9 @@ function Resolve-CargoExe {
 function Assert-NotRunning {
     param([Parameter(Mandatory)][string]$Path)
 
+    $exe = Join-Path $Path "tfy-bgm.exe"
     $running = Get-Process "tfy-bgm" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith($Path, [StringComparison]::OrdinalIgnoreCase) }
+        Where-Object { $_.Path -and $_.Path.Equals($exe, [StringComparison]::OrdinalIgnoreCase) }
     if ($running) {
         throw "tfy-bgm.exe is running from $Path. Close it before packaging."
     }
@@ -101,15 +140,27 @@ function Write-Checksums {
         [Parameter(Mandatory)][string]$Version
     )
 
-    $files = @(Get-ChildItem $DistDir -File -Filter "tfy-bgm-$Version-*" | Sort-Object Name)
+    $artifactPattern = '^tfy-bgm-' + [regex]::Escape($Version) + '-(windows-(x64|arm64)-(setup\.exe|portable\.zip)|linux-((amd64|arm64)\.deb|(x86_64|aarch64)\.rpm))$'
+    $files = @(Get-ChildItem -LiteralPath $DistDir -File -Filter "tfy-bgm-$Version-*" |
+        Where-Object { $_.Name -cmatch $artifactPattern } | Sort-Object Name)
     if ($files.Count -eq 0) {
         Write-Host "No artifacts found in $DistDir for version $Version; SHA256SUMS.txt not written."
         return
     }
 
-    $lines = foreach ($file in $files) {
-        $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        "{0}  {1}" -f $hash, $file.Name
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $lines = foreach ($file in $files) {
+            $stream = $file.OpenRead()
+            try {
+                $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+                "{0}  {1}" -f $hash, $file.Name
+            } finally {
+                $stream.Dispose()
+            }
+        }
+    } finally {
+        $sha.Dispose()
     }
 
     $target = Join-Path $DistDir "SHA256SUMS.txt"
@@ -137,11 +188,8 @@ function Format-FileSize {
 function Initialize-SherpaNativeLibs {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
-        [ValidateSet("windows", "linux")][string]$TargetOs = "windows",
-        [string]$TargetArch = ""
+        [Parameter(Mandatory)][string]$TargetArch
     )
-
-    if (-not $TargetArch) { $TargetArch = Get-WindowsArch }
 
     $fetcher = Join-Path $RepoRoot "scripts\fetch-sherpa-libs.mjs"
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
@@ -152,7 +200,7 @@ function Initialize-SherpaNativeLibs {
 
     # Progress goes to the helper's stderr (shown as-is); only the verified lib
     # directory lands on stdout, so the last non-empty line is the path.
-    $output = & $nodeCmd.Source $fetcher --target-os $TargetOs --target-arch $TargetArch
+    $output = & $nodeCmd.Source $fetcher --target-os windows --target-arch $TargetArch
     $exit = $LASTEXITCODE
     if ($exit -ne 0) { throw "failed to prepare sherpa-onnx native libs (exit $exit)" }
 

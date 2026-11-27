@@ -41,7 +41,6 @@
         "active": true,
         "targets": "all",
         "resources": {
-            "../bgm": "bgm",
             "../assets/bg/*": "assets/bg",
             "../models/sherpa-onnx-spleeter-2stems-int8.tar.bz2": "models/sherpa-onnx-spleeter-2stems-int8.tar.bz2",
             "../models/UVR-MDX-NET-Inst_HQ_3.onnx": "models/UVR-MDX-NET-Inst_HQ_3.onnx",

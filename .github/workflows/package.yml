@@ -14,7 +14,7 @@
 #   - 架构：手动触发默认 x64，可选 arm64 / both；推送 v* 标签时固定构建 both（x64 + arm64）。
 #     arm64 用原生 ARM 运行器（windows-11-arm、ubuntu-24.04-arm），不做交叉编译；
 #     首次运行要重新编译依赖，会比 x64 慢。
-#   - 曲库：Windows 绿色版始终不带音频；NSIS / deb / rpm 默认内置仓库 bgm/。
+#   - 程序包不含曲库；独立 bgm.zip 可单独构建，标签发布时全平台共用一份。
 #   - 只勾绿色版时不安装 tauri-cli；同时勾安装版时先出 NSIS 再复用同一份 exe 组装绿色版，
 #     省掉一次前端构建与 Rust 增量检查。
 #
@@ -25,11 +25,10 @@
 #
 # 注意：
 #   - 标签名（去掉 v）必须与 src-tauri/tauri.conf.json 的 version 一致，否则 plan 直接失败。
-#   - 仓库里含 bgm/ 曲库（约 350 MB）：Windows 绿色版始终只带空分类目录（约 34 MB）；
-#     NSIS / deb / rpm 通过 bundle.resources 内置曲库，产物会相应增大。
+#   - NSIS / deb / rpm 随包提供 CPU 分离模型，不包含 GPU 推理环境。
 #   - Linux 用 ubuntu-24.04：只支持 glibc ≥ 2.39 的系统（Ubuntu 24.04+ / Debian 13+ / Fedora 40+），
 #     更老的发行版不在支持范围内，不再做兼容处理。
-#   - deb 与 rpm 都由 tauri 内置的纯 Rust 打包器直出，不需要 dpkg-deb / rpmbuild / Fedora。
+#   - Tauri 直接生成 deb / rpm；dpkg-deb 和 rpm 只用于校验包元数据。
 
 name: Package
 
@@ -55,6 +54,10 @@ on:
         description: "Linux rpm"
         type: boolean
         default: true
+      bgm_library:
+        description: "独立曲库 ZIP"
+        type: boolean
+        default: false
       windows_arch:
         description: "Windows 架构"
         type: choice
@@ -94,6 +97,8 @@ jobs:
       nsis: ${{ steps.plan.outputs.nsis }}
       deb: ${{ steps.plan.outputs.deb }}
       rpm: ${{ steps.plan.outputs.rpm }}
+      library: ${{ steps.plan.outputs.library }}
+      version: ${{ steps.plan.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -104,6 +109,7 @@ jobs:
           INPUT_NSIS: ${{ inputs.windows_installer }}
           INPUT_DEB: ${{ inputs.linux_deb }}
           INPUT_RPM: ${{ inputs.linux_rpm }}
+          INPUT_LIBRARY: ${{ inputs.bgm_library }}
           INPUT_WINDOWS_ARCH: ${{ inputs.windows_arch }}
           INPUT_LINUX_ARCH: ${{ inputs.linux_arch }}
         run: |
@@ -131,19 +137,23 @@ jobs:
                   sys.exit(1)
               return [value]
 
+          def matrix(name, platforms):
+              return json.dumps([{"arch": arch, "runner": platforms[arch][0], "target": platforms[arch][1]}
+                                 for arch in arches(name)])
+
           portable = flag("INPUT_PORTABLE")
           nsis = flag("INPUT_NSIS")
           deb = flag("INPUT_DEB")
           rpm = flag("INPUT_RPM")
+          library = flag("INPUT_LIBRARY")
 
-          if dispatch and not (portable or nsis or deb or rpm):
+          if dispatch and not (portable or nsis or deb or rpm or library):
               print("::error::没有勾选任何产物，至少选择一个包")
               sys.exit(1)
 
+          with open("src-tauri/tauri.conf.json", encoding="utf-8") as conf:
+              version = json.load(conf)["version"]
           if os.environ["GITHUB_REF"].startswith("refs/tags/v"):
-              version = json.load(
-                  open("src-tauri/tauri.conf.json", encoding="utf-8")
-              )["version"]
               tag = os.environ["GITHUB_REF_NAME"][1:]
               print(f"tag={tag} version={version}")
               if tag != version:
@@ -155,8 +165,16 @@ jobs:
               "nsis": str(nsis).lower(),
               "deb": str(deb).lower(),
               "rpm": str(rpm).lower(),
-              "windows_arch": json.dumps(arches("INPUT_WINDOWS_ARCH") if (portable or nsis) else []),
-              "linux_arch": json.dumps(arches("INPUT_LINUX_ARCH") if (deb or rpm) else []),
+              "library": str(library).lower(),
+              "version": version,
+              "windows_arch": matrix("INPUT_WINDOWS_ARCH", {
+                  "x64": ("windows-latest", "x86_64-pc-windows-msvc"),
+                  "arm64": ("windows-11-arm", "aarch64-pc-windows-msvc"),
+              }) if portable or nsis else "[]",
+              "linux_arch": matrix("INPUT_LINUX_ARCH", {
+                  "x64": ("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+                  "arm64": ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
+              }) if deb or rpm else "[]",
           }
           print(values)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
@@ -171,17 +189,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(needs.plan.outputs.windows_arch) }}
-    # arm64 走原生 ARM64 运行器，x64 走完整版 windows-latest；两者都自带 MSVC。
-    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
+        include: ${{ fromJSON(needs.plan.outputs.windows_arch) }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: ${{ matrix.arch }}
+          key: ${{ matrix.target }}
 
       # sherpa-onnx 的静态库约 127 MB（解压后 1 GB），由打包脚本预取并校验；
       # 只缓存压缩包，解压后放在 .cache/ 而不是 target/ —— rust-cache 会裁剪
@@ -223,13 +242,13 @@ jobs:
       # 后面的绿色版用 -SkipBuild 复用，不再跑一遍 pnpm build + cargo build。
       - name: NSIS installer
         if: needs.plan.outputs.nsis == 'true'
-        run: powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1 -Target ${{ matrix.target }}
 
       - name: Portable package
         if: needs.plan.outputs.portable == 'true'
         shell: pwsh
         run: |
-          $cmd = @("-ExecutionPolicy", "Bypass", "-File", "scripts/package-portable.ps1")
+          $cmd = @("-ExecutionPolicy", "Bypass", "-File", "scripts/package-portable.ps1", "-Target", '${{ matrix.target }}')
           if ('${{ needs.plan.outputs.nsis }}' -eq 'true') { $cmd += "-SkipBuild" }
           powershell @cmd
 
@@ -238,8 +257,9 @@ jobs:
         with:
           name: windows-${{ matrix.arch }}
           path: |
-            dist/tfy-bgm-*.zip
-            dist/tfy-bgm-*.exe
+            dist/tfy-bgm-${{ needs.plan.outputs.version }}-windows-${{ matrix.arch }}-portable.zip
+            dist/tfy-bgm-${{ needs.plan.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
+          compression-level: 0
           if-no-files-found: error
           retention-days: 3
 
@@ -250,16 +270,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(needs.plan.outputs.linux_arch) }}
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+        include: ${{ fromJSON(needs.plan.outputs.linux_arch) }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: ${{ matrix.arch }}
+          key: ${{ matrix.target }}
 
       # 同上：sherpa-onnx 原生库走独立缓存，与 target/ 的裁剪互不影响。
       - uses: actions/cache@v6
@@ -290,7 +312,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            pkg-config
+            pkg-config \
+            rpm
 
       - uses: actions/cache@v6
         with:
@@ -323,21 +346,38 @@ jobs:
           formats=()
           if [ "$DEB" = "true" ]; then formats+=(deb); fi
           if [ "$RPM" = "true" ]; then formats+=(rpm); fi
-          bash scripts/package-linux.sh "${formats[@]}"
+          bash scripts/package-linux.sh --target '${{ matrix.target }}' "${formats[@]}"
 
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            dist/tfy-bgm-*.deb
-            dist/tfy-bgm-*.rpm
+            dist/tfy-bgm-${{ needs.plan.outputs.version }}-linux-${{ matrix.arch == 'arm64' && 'arm64' || 'amd64' }}.deb
+            dist/tfy-bgm-${{ needs.plan.outputs.version }}-linux-${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}.rpm
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  library:
+    name: Shared BGM library
+    needs: plan
+    if: needs.plan.outputs.library == 'true'
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/package-library.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bgm-library
+          path: dist/tfy-bgm-${{ needs.plan.outputs.version }}-bgm.zip
+          compression-level: 0
           if-no-files-found: error
           retention-days: 3
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [plan, windows, linux, library]
     runs-on: ubuntu-slim
     steps:
       - uses: actions/download-artifact@v8
@@ -345,12 +385,20 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # 各架构作业只对自己的产物算校验值，这里合成一份覆盖全平台的
-      - name: Write SHA256SUMS.txt
+      - name: Verify release files and write checksums
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           cd artifacts
-          sha256sum tfy-bgm-* > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          prefix="tfy-bgm-$VERSION"
+          expected=("$prefix"-windows-{x64,arm64}-{portable.zip,setup.exe}
+                    "$prefix"-linux-{amd64,arm64}.deb
+                    "$prefix"-linux-{x86_64,aarch64}.rpm
+                    "$prefix"-bgm.zip)
+          diff -u <(printf '%s\n' "${expected[@]}" | sort) \
+            <(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          for asset in "${expected[@]}"; do test -f "$asset"; done
+          sha256sum "${expected[@]}" > SHA256SUMS.txt
 
       # softprops/action-gh-release@v3 会先创建草稿再上传，重跑失败时会把
       # 同一 tag 的发布入口变成草稿。已有 Release 直接更新，保持发布状态。
@@ -381,8 +429,7 @@ jobs:
           fi
 
           release_json="$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG")"
-          jq -e --argjson expected "${#assets[@]}" '
-            .draft == false and .prerelease == false and
-            ([.assets[].name] | unique | length >= $expected)
-          ' <<<"$release_json" >/dev/null
+          jq -e '.draft == false and .prerelease == false' <<<"$release_json" >/dev/null
+          diff -u <(printf '%s\n' "${assets[@]##*/}" | sort) \
+            <(jq -r '.assets[].name' <<<"$release_json" | sort)
           jq -r '"Release ready: \(.html_url)"' <<<"$release_json"

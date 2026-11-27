@@ -162,14 +162,8 @@ impl AppState {
         // 首屏就要显示自定义壁纸，启动阶段先把文件加进 asset 白名单。
         crate::wallpapers::prime_custom(app, prefs.custom_wallpaper.as_deref());
 
-        let (root, source, mut root_warnings) = library_root::resolve(app, &prefs);
-        if source == LibrarySource::External {
-            root_warnings.append(&mut library_root::ensure_category_dirs(
-                &root,
-                &categories.items,
-            ));
-        }
-        warnings.append(&mut root_warnings);
+        let (root, source, root_warnings) = library_root::resolve(app, &prefs, &categories.items)?;
+        warnings.extend(root_warnings);
         let audio_index_path = app
             .path()
             .app_config_dir()?
@@ -362,13 +356,7 @@ impl AppState {
         self.library_revision.fetch_add(1, Ordering::Relaxed);
         self.persist_library_dir(None)?;
         let prefs = self.prefs.read().clone();
-        let (root, source, mut warnings) = library_root::resolve(app, &prefs);
-        if source == LibrarySource::External {
-            warnings.append(&mut library_root::ensure_category_dirs(
-                &root,
-                &self.category_items(),
-            ));
-        }
+        let (root, source, warnings) = library_root::resolve(app, &prefs, &self.category_items())?;
         let library = self.install_root(app, root, source, warnings)?;
         self.queue_audio_index_update(app);
         Ok(library)

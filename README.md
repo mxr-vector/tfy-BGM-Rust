@@ -201,7 +201,7 @@
 
 | 内容 | 位置 | 说明 |
 | :--- | :--- | :--- |
-| 曲库音频 | `bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}` | 文件名即曲名；NSIS / deb / rpm 内置，Windows 绿色版默认不带音频 |
+| 曲库音频 | `bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}` | 文件名即曲名；官方发布使用独立曲库 ZIP |
 | 内置壁纸 | `assets/bg/` | 目录内的 jpg / jpeg / png / webp / mp4 自动发现，视频预览直接取首帧，整个目录经 `bundle.resources` 打包 |
 | 随包分离模型 | `models/` | UVR 人声 / 伴奏 ONNX 与 Spleeter 归档（约 174 MB），经 `bundle.resources` 打进安装包；开发模式直接读该目录 |
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、标签解析与缓存、文件操作、分类、配置、节目单与循环点持久化、导出与响度归一化、音频指纹索引与去重 / 以声搜声；可独立测试 |
@@ -342,13 +342,10 @@ Windows 样本中 Qwen3 和 Kokoro 的 CUDA 总耗时未改善；INT8 模型的�
 1. 环境变量 `TFY_BGM_DIR`（适合开发与可移动硬盘）；
 2. 界面「切换曲库目录」选择并持久化的文件夹；
 3. 开发模式（debug）下的仓库根目录 `bgm/`；
-4. **发布包资源目录的 `bgm/`**（NSIS / deb / rpm 内置曲库，必须含实际音频才命中）；
-5. **exe 同级的 `bgm/`**（绿色版默认曲库位置）；
-6. 当前工作目录下的 `bgm/`；
-7. 应用配置目录下的 `bgm/`（Windows 即 `%APPDATA%\com.yuanjie.tfybgm\bgm`）。
+4. Windows 绿色版使用 exe 同级的 `bgm/`（目录可写时）；
+5. 已有的可写用户曲库或应用数据目录下的 `bgm/`（Linux 默认 `~/.local/share/com.yuanjie.tfybgm/bgm`，受 XDG 配置影响）。
 
-外置目录不存在时，优先在 exe 同级创建 `bgm/` 并补齐分类子目录；若不可写则退到应用配置目录。
-安装版 / Linux 包替换或增删内置音频后「重新扫描」即可；绿色版可直接替换 exe 同级 `bgm/`，无需重新打包。
+应用会补齐默认曲库的分类目录。程序包不再附带曲库音频；将独立曲库 ZIP 解压到可写位置，然后用「切换曲库目录」选择解压得到的 `bgm/`。旧版本系统安装目录下的曲库不会被自动复制。
 
 ### 运行时数据位置
 
@@ -632,9 +629,9 @@ cd src-tauri && cargo tauri dev
 
 ### 通用约定
 
-- **安装版内置曲库**：`bgm/` 经 `bundle.resources` 打入 NSIS / deb / rpm，程序从发布包资源目录读取。
-- **绿色版始终不带音频**：GitHub Actions 的绿色版 zip 只有空的 `bgm/<分类>/`（整体约 34 MB，主要是内置壁纸与语音提示音）；本地脚本仍可显式加 `-WithBgm` 生成自包含绿色版。
-- **模型进安装包**：人声分离模型（约 174 MB）与内置壁纸经 `bundle.resources` 打入 NSIS / deb / rpm；绿色版脚本只复制 `assets/bg`，**不含 `models/`**，需要字幕生成时把仓库 `models/` 复制到 exe 同级。
+- **曲库单独分发**：四种程序包默认不含曲库音频。另有一份跨平台、跨架构的 `tfy-bgm-<版本>-bgm.zip`，只含 `bgm/` 中的曲库音频。
+- **CPU 分离模型随安装版保留**：NSIS / deb / rpm 附带三个 CPU 分离模型（约 174 MiB）、内置壁纸和音色。绿色版不含分离模型；如需字幕生成，把仓库 `models/` 放到 exe 同级，并安装 FFmpeg。
+- **GPU 环境不随包分发**：需要时由用户按需下载。原生 Windows ARM64 不支持当前固定版本的 CosyVoice CPU 自动环境（缺少对应 PyPI wheel）；这不影响随安装版提供的 Sherpa CPU 分离模型。
 - **版本唯一来源**：`src-tauri/tauri.conf.json` 的 `version`；脚本会校验 `Cargo.toml` 的 `[package].version`，不一致直接报错。
 - **构建顺序**：前端必须先 `pnpm run build`。绿色版直接用 cargo 构建时**必须带 `--features custom-protocol`**，否则 Tauri 按开发模式加载 `devUrl`，exe 启动后白屏。
 - **原生库预取**：`sherpa-onnx-sys` 的静态库（约 127 MB，解压后 1 GB）本来由它自己的构建脚本从 GitHub Releases 下载，失败时会以 `could not find native static library` 的形式在链接阶段报错。打包脚本改为先用 `scripts/fetch-sherpa-libs.mjs` 下载、解压到 `.cache/sherpa-onnx/`（不进 `target/`，避免被 rust-cache 裁剪）并校验 13 个库，再通过 `SHERPA_ONNX_LIB_DIR` 交给 cargo。手动触发/排查：
@@ -656,9 +653,10 @@ powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -WithBgm
 
 | 参数 | 作用 |
 | :--- | :--- |
-| 默认（或 `-EmptyBgm`） | 只创建 6 个分类空目录，**不含任何音频**；检测到组装目录已有音频时拒绝执行 |
-| `-WithBgm` | 复制仓库 `bgm/`，解压即带曲库；已有音频时保留不覆盖 |
-| `-SkipBuild` | 复用 `src-tauri/target/release/tfy-bgm.exe`，只组装与压缩 |
+| 默认（或 `-EmptyBgm`） | 只创建分类空目录，不含曲库音频 |
+| `-WithBgm` | 显式把仓库曲库放进本地绿色版，官方发布不使用 |
+| `-Target` | `x86_64-pc-windows-msvc` 或 `aarch64-pc-windows-msvc`，默认当前 Rust 工具链的主机目标 |
+| `-SkipBuild` | 从 Cargo 目标目录的 `<目标三元组>/release/` 复用已构建的 exe |
 | `-NoZip` | 只组装目录，不打 zip |
 | `-OutputDir` | 指定输出目录（默认 `dist`） |
 
@@ -668,12 +666,11 @@ powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -WithBgm
 dist/
   tfy-bgm-1.0.0-windows-x64-portable.zip   ← 对外分发
   SHA256SUMS.txt                           ← SHA-256 校验值
-  tfy-bgm/                                 ← 组装目录（exe + assets/bg + voices + bgm/ + 说明文件）
+  tfy-bgm/                                 ← 仅使用 -NoZip 时输出组装目录
 ```
 
-- 重复打包只更新 exe / 说明文件；`-WithBgm` 时保留 `dist\tfy-bgm\bgm` 里已有的曲库，要从仓库重新同步，先删除该目录。
-- 默认的「无音频」包如果发现 `dist\tfy-bgm\bgm` 里已有音频会直接报错，避免误把曲库打进分发包；确实要带库请加 `-WithBgm`。
-- 检测到组装目录中的程序正在运行时会提示先关闭，避免覆盖失败。
+- ZIP 始终从新建的临时目录组装，不会打入 `dist\tfy-bgm` 中残留的模型、曲库或其他文件。
+- `-NoZip` 不会覆盖现有便携目录里的用户曲库。
 - zip 内为单层 `tfy-bgm/`，条目分隔符统一 `/`，中文名按 UTF-8 存储，跨平台解压不乱码。
 - 手动构建时：
 
@@ -694,9 +691,8 @@ cargo install tauri-cli --version "^2" --locked   # 首次安装
 powershell -ExecutionPolicy Bypass -File scripts/package-installer.ps1
 ```
 
-脚本执行 `cargo tauri build --bundles nsis`，再把产物复制成规范名。安装包**内置 `bgm/`、分离模型与壁纸**，
-按当前用户安装到可写目录；程序优先读取资源目录中的曲库，也可「切换曲库目录」指向任意位置。
-`-SkipBuild` 复用已有产物时要求版本号与 `tauri.conf.json` 一致，避免把旧版本改名当新版本发布。
+脚本以 `-Target` 指定的目标构建 NSIS，再把产物复制成规范名。按当前用户安装，只附带 CPU 分离模型、壁纸和音色，不附带曲库音频。
+`-SkipBuild` 仅复用与目标架构、`tauri.conf.json` 版本匹配的安装包。
 
 > 直接 `cargo tauri build`（不带 `--bundles`）会按 `targets: "all"` 尝试 NSIS 与 MSI；MSI 依赖 WiX，日常分发用 NSIS 即可。
 
@@ -712,7 +708,7 @@ SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
 
 产物：`dist/tfy-bgm-1.0.0-linux-amd64.deb`、`dist/tfy-bgm-1.0.0-linux-x86_64.rpm`。
 
-- 不需要 Fedora，也不需要 `rpmbuild`：deb 与 rpm 都由 Tauri 内置的纯 Rust 打包器直出，只要机器能编译 Tauri。
+- 不需要 Fedora 或 `rpmbuild`：Tauri 直接生成安装包；脚本用 `dpkg-deb` / `rpm` 检查相应产物的架构。可用 `--target <目标三元组>` 显式指定目标。
 - 在 Ubuntu 24.04 上构建，产物要求 **glibc ≥ 2.39**（Ubuntu 24.04+ / Debian 13+ / Fedora 40+）。
 - rpm 文件名去掉 release 段以保持四段统一，包内元数据仍为 `Release: 1`。
 
@@ -726,6 +722,7 @@ SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
 | Windows 安装版 | `tfy-bgm-1.0.0-windows-x64-setup.exe` |
 | Linux DEB | `tfy-bgm-1.0.0-linux-amd64.deb` |
 | Linux RPM | `tfy-bgm-1.0.0-linux-x86_64.rpm` |
+| 独立曲库（全平台共用） | `tfy-bgm-1.0.0-bgm.zip` |
 
 - 架构按平台惯例：Windows `x64` / `arm64`，deb `amd64` / `arm64`，rpm `x86_64` / `aarch64`。
 - `SHA256SUMS.txt` 与 `sha256sum -c` 兼容（小写十六进制、两个空格、LF 换行），Windows 与 Linux 产物可写入同一份。
@@ -740,14 +737,14 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-推 `v*` 标签会构建 **x64 + arm64 全平台**并创建 Release，附上全部产物与合并的 `SHA256SUMS.txt`；
+推 `v*` 标签会构建四种格式各两种架构，共 8 个程序包，另生成 1 个共用曲库 ZIP；Release 附上覆盖这 9 个文件的 `SHA256SUMS.txt`。
 标签名（去掉 `v`）必须等于 `tauri.conf.json` 的 `version`，否则 `plan` 直接失败。
 
 也可在 Actions 页面手动 `Run workflow`，只构建不发布：
 
 | 选项 | 取值 |
 | :--- | :--- |
-| **包** | Windows 绿色版 / 安装版 / Linux deb / rpm，可任意组合 |
+| **包** | Windows 绿色版 / 安装版 / Linux deb / rpm / 独立曲库 ZIP，可任意组合 |
 | **架构** | `x64`（默认）/ `arm64` / `both`，arm64 走原生 ARM 运行器，不做交叉编译 |
 
 几点说明：
@@ -756,7 +753,7 @@ git push origin v1.0.0
 - 缓存按「作业 + 架构」分开，`tauri-cli` 与 Rust 依赖命中后直接跳过编译。
 - artifact 只上传最终安装包，保留 3 天；`dist/tfy-bgm/` 组装目录不进 artifact。
 - Linux 使用 `ubuntu-24.04`，产物只支持 glibc ≥ 2.39 的系统。
-- Windows 绿色版始终不带音频（zip 约 34 MB）；NSIS 与 Linux deb/rpm 默认内置仓库 `bgm/`（约 350 MB），相应产物会增大。
+- 所有官方程序包均不含曲库音频。只构建曲库时，也可在仓库根目录执行 `python3 scripts/package-library.py`。
 
 Gitee 原生流水线位于 `.workflow/package.yml`。推送到 Gitee 的 `v*` 标签会校验版本，使用 `cargo-xwin` 在 Linux 托管环境交叉编译 **Windows x64 绿色版**，再由 `release@gitee` 创建发行版并上传压缩包与 `SHA256SUMS.txt`，无需配置 Token。
 

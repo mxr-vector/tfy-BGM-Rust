@@ -73,7 +73,8 @@ stages:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal --default-toolchain stable
             source "$HOME/.cargo/env"
-            rustup target add x86_64-pc-windows-msvc
+            target=x86_64-pc-windows-msvc
+            rustup target add "$target"
             cargo install --locked cargo-xwin
 
             if [ "$(id -u)" -eq 0 ]; then
@@ -95,14 +96,17 @@ stages:
 
             (
               cd src-tauri
-              cargo build --release \
-                --target x86_64-pc-windows-msvc \
-                --features custom-protocol \
-                --runner cargo-xwin
+              cargo xwin build --release \
+                --target "$target" \
+                --features custom-protocol
             )
 
+            target_directory="$(
+              cd src-tauri && cargo metadata --format-version 1 --no-deps \
+                | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+            )"
             python3 scripts/package-gitee-portable.py \
-              --exe src-tauri/target/x86_64-pc-windows-msvc/release/tfy-bgm.exe \
+              --exe "$target_directory/$target/release/tfy-bgm.exe" \
               --max-mib 100
         artifacts:
           - name: PORTABLE_RELEASE

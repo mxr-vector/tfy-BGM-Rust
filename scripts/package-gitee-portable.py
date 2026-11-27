@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import tempfile
 import zipfile
 
@@ -25,6 +26,30 @@ def app_version() -> str:
     if not match or match.group(1) != version:
         raise RuntimeError("tauri.conf.json 与 Cargo.toml 的版本不一致")
     return version
+
+
+def verify_windows_x64(exe: Path) -> None:
+    with exe.open("rb") as stream:
+        dos_header = stream.read(64)
+        if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+            raise ValueError(f"不是 Windows PE 文件（缺少有效的 DOS 头）：{exe}")
+
+        pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
+        # PE 签名 (4)、COFF 文件头 (20) 与可选头魔数 (2)。
+        if not 64 <= pe_offset <= os.fstat(stream.fileno()).st_size - 26:
+            raise ValueError(f"无效的 Windows PE 头偏移：{exe}")
+        stream.seek(pe_offset)
+        pe_header = stream.read(26)
+        if len(pe_header) != 26 or pe_header[:4] != b"PE\0\0":
+            raise ValueError(f"无效的 Windows PE 签名或文件头：{exe}")
+
+        machine = struct.unpack_from("<H", pe_header, 4)[0]
+        optional_size, flags, magic = struct.unpack_from("<HHH", pe_header, 20)
+        # AMD64、PE32+，并且是可执行映像而非 DLL。
+        if (machine, magic) != (0x8664, 0x20B) or not flags & 0x0002 or flags & 0x2000:
+            raise ValueError(f"不是 Windows x64 PE 可执行文件：{exe}")
+        if optional_size < 112 or len(stream.read(optional_size - 2)) != optional_size - 2:
+            raise ValueError(f"无效或截断的 Windows PE 可选头：{exe}")
 
 
 def write_checksums(output_dir: Path, version: str) -> Path:
@@ -52,8 +77,7 @@ def main() -> None:
     parser.add_argument(
         "--exe",
         type=Path,
-        default=REPO
-        / "src-tauri/target/x86_64-pc-windows-msvc/release/tfy-bgm.exe",
+        required=True,
         help="交叉编译得到的 tfy-bgm.exe",
     )
     parser.add_argument("--output-dir", type=Path, default=REPO / "dist")
@@ -63,7 +87,11 @@ def main() -> None:
     version = app_version()
     exe = args.exe.resolve()
     if not exe.is_file():
-        raise FileNotFoundError(f"找不到 Windows 可执行文件：{exe}")
+        parser.error(f"找不到 Windows 可执行文件：{exe}")
+    try:
+        verify_windows_x64(exe)
+    except ValueError as error:
+        parser.error(str(error))
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -103,13 +131,13 @@ def main() -> None:
                     archive.writestr(f"{archive_path}/", b"")
                 else:
                     archive.write(path, archive_path)
+        size_bytes = temporary_zip.stat().st_size
+        size_mib = size_bytes / (1024 * 1024)
+        if size_bytes > args.max_mib * 1024 * 1024:
+            raise RuntimeError(
+                f"{zip_path.name} 为 {size_mib:.1f} MiB，超过 Gitee 单附件 {args.max_mib} MiB 限制"
+            )
         os.replace(temporary_zip, zip_path)
-
-    size_mib = zip_path.stat().st_size / (1024 * 1024)
-    if size_mib > args.max_mib:
-        raise RuntimeError(
-            f"{zip_path.name} 为 {size_mib:.1f} MiB，超过 Gitee 单附件 {args.max_mib} MiB 限制"
-        )
 
     checksum_path = write_checksums(output_dir, version)
     print(f"Archive: {zip_path} ({size_mib:.1f} MiB)")
