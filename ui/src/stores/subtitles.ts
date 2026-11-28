@@ -212,6 +212,29 @@ export const selectedSong = computed<Song | null>(
 
 export const modelReady = computed(() => Boolean(modelsInfo.value?.loaded));
 
+// ---------------- 人声分离 ----------------
+
+/**
+ * 生成前是否先做人声分离；默认开启并随偏好保存。
+ * 关闭后直接归一化并识别原始音频，适合口播 / 语音素材。
+ */
+export const separationEnabled = ref(true);
+
+watch(
+  () => state.prefs?.subtitleSeparationEnabled,
+  (enabled) => {
+    if (typeof enabled === 'boolean') separationEnabled.value = enabled;
+  },
+  { immediate: true },
+);
+
+export function setSeparationEnabled(enabled: boolean): void {
+  separationEnabled.value = enabled;
+  if (!state.prefs || state.prefs.subtitleSeparationEnabled === enabled) return;
+  state.prefs = { ...state.prefs, subtitleSeparationEnabled: enabled };
+  persistPrefs(true);
+}
+
 // ---------------- 人声分离模型 ----------------
 
 /** 可选的人声分离模型；由后端扫描随包模型与 `<模型目录>/separation/` 得到。 */
@@ -319,6 +342,19 @@ export function addSubtitleRecord(song: Song): void {
   setView('subtitles');
 }
 
+/**
+ * 批量加入「字幕生成记录列表」并选中第一首；供字幕页快速导入音频后调用。
+ * 已在列表中的曲目不会重复加入。
+ */
+export function addSubtitleRecords(songs: Song[]): void {
+  if (songs.length === 0 || generating.value || editing.value) return;
+  const existing = new Set(subtitleRecords.value.map((song) => song.key));
+  const fresh = songs.filter((song) => !existing.has(song.key));
+  if (fresh.length === 0) return;
+  manualRecords.value = [...fresh, ...manualRecords.value];
+  selectSong(fresh[0].key);
+}
+
 export function selectSong(key: string): void {
   // 编辑态禁止切换记录：草稿尚未落盘，切换会丢失未保存的修改。
   if (generating.value || editing.value) return;
@@ -417,17 +453,20 @@ export async function deleteSubtitleRecord(key: string): Promise<void> {
 /**
  * 为选中曲目生成字幕。
  *
- * `separationModel` 是用户在生成前确认的分离模型；为空时拒绝执行。
+ * `separate` 为 `true` 时先分离人声与伴奏，`separationModel` 是用户在生成前确认的
+ * 分离模型，为空时拒绝执行；为 `false` 时跳过分离，直接识别原始音频（口播 / 语音）。
  * `separationTarget` 仅用于自定义 UVR 模型：确认模型主输出是人声还是乐器。
- * 后端同样会再次校验，确保不会跳过人声分离或改用原始音频识别。
+ * 后端同样会再次校验，开启分离时不会改用原始音频识别。
  */
 export async function generateSubtitles(
-  separationModel: string,
+  separate: boolean,
+  separationModel?: string,
   separationTarget?: 'vocals' | 'instrumental',
 ): Promise<void> {
   const key = selectedKey.value;
   if (!key || generating.value || editing.value) return;
-  if (!separationModel) {
+  const model = separationModel?.trim() ?? '';
+  if (separate && !model) {
     toast('请先选择并确认人声分离模型', 'error');
     return;
   }
@@ -435,8 +474,8 @@ export async function generateSubtitles(
     toast('请先完成 ASR 模型加载，再生成字幕', 'error');
     return;
   }
-  if (state.prefs && state.prefs.separationModel !== separationModel) {
-    state.prefs = { ...state.prefs, separationModel };
+  if (separate && state.prefs && state.prefs.separationModel !== model) {
+    state.prefs = { ...state.prefs, separationModel: model };
     persistPrefs();
   }
   const jobId = crypto.randomUUID();
@@ -445,8 +484,8 @@ export async function generateSubtitles(
   error.value = null;
   result.value = null;
   progress.value = {
-    stage: 'separating',
-    message: '准备生成字幕…',
+    stage: separate ? 'separating' : 'normalizing',
+    message: separate ? '准备生成字幕…' : '准备识别原始音频…',
     current: 0,
     total: 0,
     error: null,
@@ -455,8 +494,9 @@ export async function generateSubtitles(
     await ensureProgressListener();
     const generated = await invoke<SubtitleResult | null>(COMMANDS.generateSubtitles, {
       key,
-      separationModel,
-      separationTarget,
+      separate,
+      separationModel: separate ? model : null,
+      separationTarget: separate ? separationTarget : null,
       jobId,
     });
     if (!generated) {
@@ -475,11 +515,11 @@ export async function generateSubtitles(
       durationMs: song?.durationMs,
       srt: generated.srt,
       lrc: generated.lrc,
-      separationModelName: generated.separation.modelName,
-      accompanimentModelName: generated.separation.accompanimentModelName,
-      vocalsPath: generated.separation.vocalsPath,
-      accompanimentPath: generated.separation.accompanimentPath,
-      accompanimentKind: generated.separation.accompanimentKind,
+      separationModelName: generated.separation?.modelName,
+      accompanimentModelName: generated.separation?.accompanimentModelName,
+      vocalsPath: generated.separation?.vocalsPath,
+      accompanimentPath: generated.separation?.accompanimentPath,
+      accompanimentKind: generated.separation?.accompanimentKind,
       srtPath: generated.srtPath,
       lrcPath: generated.lrcPath,
     };

@@ -1,4 +1,4 @@
-//! 字幕生成主流程：人声分离 → 归一化 → 分片 ASR → SRT / LRC。
+//! 字幕生成主流程：人声分离（可选）→ 归一化 → 分片 ASR → SRT / LRC。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,15 +15,18 @@ use super::{SUBTITLE_PROGRESS_EVENT, SubtitleProgress, SubtitleResult, SubtitleS
 use crate::models::ModelRuntime;
 use crate::tts::check_cancelled;
 
-/// 生成字幕主流程：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
+/// 生成字幕主流程：人声分离（可选）→ 识别音频归一化 → 分片 ASR → SRT / LRC。
 ///
-/// 强制顺序：必须先产出并校验人声 / 伴奏文件，随后**只**对分离得到的人声 WAV
-/// 做归一化与识别。分离失败或文件缺失时直接返回错误，不会回退到原始混合音频。
+/// `separate` 为 `true` 时必须先产出并校验人声 / 伴奏文件，随后**只**对分离得到
+/// 的人声 WAV 做归一化与识别；分离失败或文件缺失时直接返回错误，不会回退到原始
+/// 混合音频。为 `false` 时跳过分离，直接归一化并识别原始音频（适合口播 / 语音）。
 /// 进度与错误都通过 `subtitle-progress` 事件推送，命令返回值用于结果展示。
+#[allow(clippy::too_many_arguments)]
 pub fn generate(
     app: &AppHandle,
     runtime: &ModelRuntime,
     song: &Song,
+    separate: bool,
     separation_model: &str,
     separation_target: Option<&str>,
     models_root: &Path,
@@ -33,6 +36,7 @@ pub fn generate(
         app,
         runtime,
         song,
+        separate,
         separation_model,
         separation_target,
         models_root,
@@ -47,10 +51,12 @@ pub fn generate(
 ///
 /// 界面事件由 [`generate`] 在回调里发送；HTTP 任务队列（[`crate::tasks`]）只更新任务快照，
 /// 避免字幕页把后台任务的进度显示成当前曲目。
+#[allow(clippy::too_many_arguments)]
 pub fn generate_with_progress<F>(
     app: &AppHandle,
     runtime: &ModelRuntime,
     song: &Song,
+    separate: bool,
     separation_model: &str,
     separation_target: Option<&str>,
     models_root: &Path,
@@ -81,49 +87,58 @@ where
     if runtime.loaded().is_none() {
         bail!("尚未加载 ASR 模型，请先在「设置 → 模型」中完成模型加载");
     }
-    if separation_model.trim().is_empty() {
+    if separate && separation_model.trim().is_empty() {
         bail!("请先选择并确认人声分离模型；未确认前不会开始分离");
     }
 
-    emit_progress(
-        &mut sink,
-        SubtitleStage::Separating,
-        "正在分离人声与伴奏（模型并行运行）…",
-        0,
-        0,
-        None,
-    );
-    let separation = crate::separation::separate_locked(
-        app,
-        song,
-        separation_model,
-        models_root,
-        separation_target,
-    )?;
-    // 交付物必须真实落盘；这里再次校验，避免任何降级路径进入识别阶段。
-    for path in [&separation.vocals_path, &separation.accompaniment_path] {
-        let path = Path::new(path);
-        let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        if !path.is_file() || size <= 44 {
-            bail!("人声分离未产出有效文件：{}；已停止生成字幕", path.display());
+    let separation = if separate {
+        emit_progress(
+            &mut sink,
+            SubtitleStage::Separating,
+            "正在分离人声与伴奏（模型并行运行）…",
+            0,
+            0,
+            None,
+        );
+        let separation = crate::separation::separate_locked(
+            app,
+            song,
+            separation_model,
+            models_root,
+            separation_target,
+        )?;
+        // 交付物必须真实落盘；这里再次校验，避免任何降级路径进入识别阶段。
+        for path in [&separation.vocals_path, &separation.accompaniment_path] {
+            let path = Path::new(path);
+            let size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            if !path.is_file() || size <= 44 {
+                bail!("人声分离未产出有效文件：{}；已停止生成字幕", path.display());
+            }
         }
-    }
+        Some(separation)
+    } else {
+        None
+    };
 
     check_cancelled(token)?;
-    emit_progress(
-        &mut sink,
-        SubtitleStage::Normalizing,
-        "正在归一化分离后的人声轨…",
-        0,
-        0,
-        None,
-    );
-    let normalized = normalize_to_wav(app, Path::new(&separation.vocals_path), &song.key)?;
+    let (input, message) = match &separation {
+        Some(separation) => (
+            Path::new(&separation.vocals_path),
+            "正在归一化分离后的人声轨…",
+        ),
+        None => (source.as_path(), "正在归一化原始音频…"),
+    };
+    emit_progress(&mut sink, SubtitleStage::Normalizing, message, 0, 0, None);
+    let normalized = normalize_to_wav(app, input, &song.key)?;
 
     emit_progress(
         &mut sink,
         SubtitleStage::Transcribing,
-        "正在识别分离后的人声轨…",
+        if separation.is_some() {
+            "正在识别分离后的人声轨…"
+        } else {
+            "正在识别原始音频…"
+        },
         0,
         0,
         None,
@@ -151,6 +166,11 @@ where
 
     let srt = format_srt(&segments);
     let lrc = format_lrc(&song.title, &segments);
+    if separation.is_none() {
+        // 直接识别模式不应留下上次分离的人声 / 伴奏，避免交付目录与当前记录
+        // （不含分离信息）不一致；随后会重建目录写入字幕文件。
+        crate::separation::cleanup(app, &song.key);
+    }
     // 字幕文件与分离交付物放在同一目录，便于一次性交付 / 核对。
     let delivery = crate::separation::separation_dir(app, &song.key)?;
     let srt_path = delivery.join("subtitles.srt");
@@ -165,7 +185,7 @@ where
         song.duration_ms,
         &segments,
         &Delivery {
-            separation: &separation,
+            separation: separation.as_ref(),
             srt_path: &srt_path,
             lrc_path: &lrc_path,
         },

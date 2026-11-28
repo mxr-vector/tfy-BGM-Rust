@@ -257,7 +257,7 @@ pub fn endpoints() -> Vec<ApiEndpoint> {
             method: "POST",
             path: "/v1/subtitles/generate",
             summary: "提交字幕生成任务",
-            description: "请求体 {\"key\":…,\"separationModel\":…,\"separationTarget\":\"vocals\"|\"instrumental\"}；返回 202 与 task。",
+            description: "请求体 {\"key\":…,\"separate\":true|false,\"separationModel\":…,\"separationTarget\":\"vocals\"|\"instrumental\"}；separate 默认 true，false 时直接识别原始音频。返回 202 与 task。",
         },
         ApiEndpoint {
             category: CAT_SEPARATION,

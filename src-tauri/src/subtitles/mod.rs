@@ -1,15 +1,18 @@
-//! 「字幕生成」：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
+//! 「字幕生成」：人声分离（可选）→ 识别音频归一化 → 分片 ASR → SRT / LRC。
 //!
-//! 数据流（顺序固定，不允许跳过或合并）：
-//! 1. 用户在生成前确认人声分离模型；未确认时直接拒绝；
-//! 2. 先占用曲目 key 锁（与 UI / HTTP 的其他生成链路互斥），再由
+//! 数据流：
+//! 1. 生成前由界面确认「人声分离」开关（默认开启）与分离模型；开启分离但未确认
+//!    模型时直接拒绝；
+//! 2. 先占用曲目 key 锁（与 UI / HTTP 的其他生成链路互斥）。开启分离时由
 //!    `separation::separate_locked` 把原始音频分离为本地 `vocals.wav` 与伴奏文件，
-//!    并在返回前校验两个文件存在且非空；失败即终止；
-//! 3. 只对人声 WAV 用 ffmpeg 归一化为 16 kHz 单声道 PCM（sherpa-onnx 的
-//!    `Wave::read` 只接受单声道 WAV）；绝不读取原始混合音频或伴奏轨做识别；
+//!    并在返回前校验两个文件存在且非空；失败即终止。关闭分离时跳过该步，
+//!    直接使用原始音频，适合口播 / 语音素材；
+//! 3. 用 ffmpeg 把识别输入（人声 WAV 或原始音频）归一化为 16 kHz 单声道 PCM
+//!    （sherpa-onnx 的 `Wave::read` 只接受单声道 WAV）；开启分离时绝不读取
+//!    原始混合音频或伴奏轨做识别；
 //! 4. `ModelRuntime::transcribe_segments` 按固定时间窗切片逐段识别，得到带时间轴的
 //!    `SubtitleSegment[]`，每完成一片推送一次进度；
-//! 5. 结果格式化为 SRT / LRC，连同分离模型与文件路径持久化到应用配置目录的
+//! 5. 结果格式化为 SRT / LRC，连同可选的人声分离交付信息持久化到应用配置目录的
 //!    `subtitles/` 下，供「桌面歌词」按曲目 key 读取。
 //!
 //! 字幕生成只依赖 `AppHandle`、`ModelRuntime`、`Song` 与模型根目录，不持有 `State`，
@@ -61,8 +64,8 @@ pub struct SubtitleResult {
     pub title: String,
     pub source_path: String,
     pub source_format: String,
-    /// 本次使用的分离模型与本地人声 / 伴奏文件；歌词识别仅使用其中的人声文件。
-    pub separation: crate::separation::SeparationInfo,
+    /// 本次使用的分离模型与本地人声 / 伴奏文件；关闭人声分离时为 `None`。
+    pub separation: Option<crate::separation::SeparationInfo>,
     pub duration: f64,
     pub segments: Vec<SubtitleSegment>,
     pub srt: String,

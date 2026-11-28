@@ -244,15 +244,22 @@ pub(crate) async fn subtitles_generate(
     api.authorize(&headers, None)?;
     let value = body_value(body);
     let key = track_key(&query, &value)?;
+    // 默认做人声分离；显式传 separate=false 时直接识别原始音频（口播 / 语音）。
+    let separate = value
+        .get("separate")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let model = value
         .get("separationModel")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .ok_or_else(|| {
-            ApiError::bad_request("缺少 separationModel：先通过 /v1/separation/models 选择人声模型")
-        })?
+        .unwrap_or_default()
         .to_owned();
+    if separate && model.is_empty() {
+        return Err(ApiError::bad_request(
+            "缺少 separationModel：先通过 /v1/separation/models 选择人声模型，或传 separate=false 直接识别原始音频",
+        ));
+    }
     let target = separation_target(value.get("separationTarget"))?;
     let app = api.app();
     if app.state::<AppState>().song(&key).is_none() {
@@ -264,6 +271,7 @@ pub(crate) async fn subtitles_generate(
         &api,
         TaskRequest::Subtitles {
             key,
+            separate,
             separation_model: model,
             separation_target: target,
         },

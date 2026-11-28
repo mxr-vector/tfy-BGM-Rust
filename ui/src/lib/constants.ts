@@ -32,6 +32,8 @@ export const COMMANDS = {
   updateCategory: 'update_category',
   openCategoriesFile: 'open_categories_file',
   importTracks: 'import_tracks',
+  /** 字幕页快速导入：音频直接进曲库，视频自动提取音轨后导入。 */
+  importSubtitleMedia: 'import_subtitle_media',
   updateTrack: 'update_track',
   moveTracks: 'move_tracks',
   deleteTracks: 'delete_tracks',

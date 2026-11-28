@@ -103,6 +103,8 @@ impl TaskStatus {
 pub enum TaskRequest {
     Subtitles {
         key: String,
+        /// 是否先生成人声分离；`false` 时直接识别原始音频。
+        separate: bool,
         separation_model: String,
         separation_target: Option<String>,
     },
@@ -346,6 +348,7 @@ impl TaskStore {
         match request {
             TaskRequest::Subtitles {
                 key,
+                separate,
                 separation_model,
                 separation_target,
             } => {
@@ -361,6 +364,7 @@ impl TaskStore {
                     app,
                     &runtime,
                     &song,
+                    separate,
                     &separation_model,
                     separation_target.as_deref(),
                     &root,

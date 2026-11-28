@@ -192,6 +192,7 @@ pub fn run() {
             commands::update_category,
             commands::open_categories_file,
             commands::import_tracks,
+            commands::import_subtitle_media,
             commands::update_track,
             commands::move_tracks,
             commands::delete_tracks,

@@ -208,6 +208,50 @@ export async function openImport(): Promise<void> {
 
 
 
+/**
+ * 字幕页快速导入口播素材：音频直接进曲库，视频自动提取音轨后导入。
+ * 返回本次新增的曲目，供字幕记录列表直接加入并选中。
+ */
+export async function openSubtitleImport(): Promise<Song[]> {
+  let imported: Song[] = [];
+  await runLibraryTask('subtitle-import', async () => {
+    const options = categoryOptions();
+    if (options.length === 0) {
+      toast('请先在曲库中创建分类，再导入音频', 'error');
+      return;
+    }
+    const values = await showModal({
+      title: '导入口播音频 / 视频',
+      description:
+        '音频直接复制到曲库；视频会自动提取首条音轨（AAC / M4A）后导入，原文件不会被修改。导入完成后自动加入字幕生成记录列表。',
+      fields: [
+        {
+          name: 'category',
+          label: '目标分类',
+          type: 'select',
+          value: preferredCategory(),
+          options,
+        },
+      ],
+      confirmText: '选择文件并导入',
+    });
+    if (!values) return;
+
+    const before = new Set(state.library.songs.map((song) => song.key));
+    const result = await invoke<LibraryMutation | null>(COMMANDS.importSubtitleMedia, {
+      category: values.category,
+    });
+    if (!result) return;
+    applyMutation(result);
+    imported = result.library.songs.filter((song) => !before.has(song.key));
+    reportToast(
+      result.report,
+      imported.length > 0 ? `已导入 ${imported.length} 个音频` : '导入完成',
+    );
+  });
+  return imported;
+}
+
 export async function openMove(
   keys: string[],
   title: string | null = null,

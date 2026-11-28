@@ -134,9 +134,9 @@ pub fn delete_stored(app: &AppHandle, key: &str) -> Result<bool> {
     Ok(removed)
 }
 
-/// 一次生成需要随记录持久化的交付信息。
+/// 一次生成需要随记录持久化的交付信息；关闭人声分离时 `separation` 为 `None`。
 pub(super) struct Delivery<'a> {
-    pub(crate) separation: &'a crate::separation::SeparationInfo,
+    pub(crate) separation: Option<&'a crate::separation::SeparationInfo>,
     pub(crate) srt_path: &'a Path,
     pub(crate) lrc_path: &'a Path,
 }
@@ -162,11 +162,11 @@ pub(super) fn save_stored(
         duration_ms,
         srt: format_srt(segments),
         lrc: format_lrc(title, segments),
-        separation_model_name: Some(separation.model_name.clone()),
-        accompaniment_model_name: Some(separation.accompaniment_model_name.clone()),
-        vocals_path: Some(separation.vocals_path.clone()),
-        accompaniment_path: Some(separation.accompaniment_path.clone()),
-        accompaniment_kind: Some(separation.accompaniment_kind.clone()),
+        separation_model_name: separation.map(|info| info.model_name.clone()),
+        accompaniment_model_name: separation.map(|info| info.accompaniment_model_name.clone()),
+        vocals_path: separation.map(|info| info.vocals_path.clone()),
+        accompaniment_path: separation.map(|info| info.accompaniment_path.clone()),
+        accompaniment_kind: separation.map(|info| info.accompaniment_kind.clone()),
         srt_path: Some(delivery.srt_path.to_string_lossy().into_owned()),
         lrc_path: Some(delivery.lrc_path.to_string_lossy().into_owned()),
     };
@@ -304,15 +304,14 @@ pub(crate) fn migrated_stored(
     next
 }
 
-/// 把分离后的人声 WAV 归一化为 16 kHz 单声道 PCM（sherpa-onnx 要求）。
+/// 把识别输入（分离后的人声或原始音频）归一化为 16 kHz 单声道 PCM（sherpa-onnx 要求）。
 ///
-/// 分离阶段已强制要求 ffmpeg，这里不再保留「直接使用源文件」的降级路径；
 /// 返回的临时文件由调用方在识别结束后删除。
 pub(super) fn normalize_to_wav(app: &AppHandle, source: &Path, key: &str) -> Result<PathBuf> {
     let target = wav_path_for(app, key)?;
     if let Err(error) = crate::speech_audio::to_asr_wav(source, &target) {
         let _ = fs::remove_file(&target);
-        return Err(error).context("无法归一化人声轨");
+        return Err(error).context("无法归一化识别音频");
     }
     Ok(target)
 }

@@ -118,7 +118,7 @@
 | **多设备输出** | 同一路混音同时送到多个物理设备，每路独立音量与静音；不支持 `setSinkId` 时回退为系统默认输出 |
 | **节目单** | 每日时段编排、逐曲起止时间、拖拽排序、自动排期；重叠拦截与到点执行 |
 | **歌曲详情** | 正在播放页；歌词 / 详情双标签展示分类、艺术家、专辑、格式与音频状态，索引后补充 BPM / 调性 / 综合响度 / 真峰值；内置音频诊断、字幕生成、A/B 循环与导出入口 |
-| **字幕生成** | 人声分离 → 仅识别人声轨 → SRT / LRC；记录检索、分段 / 原文编辑、分离交付文件 |
+| **字幕生成** | 人声分离（可关）→ 识别人声轨或原始音频 → SRT / LRC；记录检索、分段 / 原文编辑、分离交付文件；搜索框旁可快速导入口播音视频（视频自动提取音轨） |
 | **文生语音** | Edge 在线朗读 / CosyVoice3 零样本克隆 / ZipVoice 声音克隆；文本 / LRC / SRT 导入，内置或录制参考音色，导出 WAV |
 | **桌面歌词** | 透明置顶、逐词混色、已唱标记提前；字体 / 字号 / 颜色 / 窗口尺寸可调 |
 | **音频导出** | 默认 -14 LUFS 归一化，四档目标；ffmpeg 两遍 `loudnorm`；失败回退源格式复制并说明原因 |
@@ -130,14 +130,18 @@
 
 ### 字幕生成流程
 
-流程固定为「人声分离 → 仅识别分离后的人声轨 → 生成字幕」，不提供跳过分离的入口：
+「人声分离」开关默认开启，开启时流程为「人声分离 → 仅识别分离后的人声轨 → 生成字幕」；关闭后跳过分离，直接识别原始音频，适合口播 / 语音素材。
+
+字幕页搜索框旁的「导入音频」支持快速导入口播素材：音频直接复制进曲库，视频先提取首条音轨并转码为 AAC / M4A 再导入，原文件不会被修改；导入完成后自动加入字幕生成记录列表。
+
+生成流程：
 
 1. ffmpeg 把源音频（MP3 / FLAC / M4A / OGG / WAV）解码为 44.1 kHz 双声道浮点 PCM。
-2. 分离引擎在独立子进程中运行（模型不兼容时只影响该子进程）。人声由所选模型分离，伴奏固定使用随包 UVR 乐器模型；常规时长两路并行，超过 10 分钟改为串行以控制峰值内存。交付写入 `separations/<曲目 key 前缀>-<哈希>/`，两个 WAV 未成功落盘时立即停止，不回退原始混音。
-3. 只对人声轨归一化为 16 kHz 单声道，按约 10 秒切片；切点在目标点前后 2.5 秒内吸附到能量最低的 20 ms 帧，避免把词切成两半。
-4. 逐段调用已加载的 ASR 模型，结果格式化为 SRT / LRC，按曲目 key 持久化到 `subtitles/`，同目录另写 `subtitles.srt` 与 `subtitles.lrc`。
+2. 开启分离时，分离引擎在独立子进程中运行（模型不兼容时只影响该子进程）。人声由所选模型分离，伴奏固定使用随包 UVR 乐器模型；常规时长两路并行，超过 10 分钟改为串行以控制峰值内存。交付写入 `separations/<曲目 key 前缀>-<哈希>/`，两个 WAV 未成功落盘时立即停止，不回退原始混音。
+3. 把识别输入（人声轨或原始音频）归一化为 16 kHz 单声道，按约 10 秒切片；切点在目标点前后 2.5 秒内吸附到能量最低的 20 ms 帧，避免把词切成两半。
+4. 逐段调用已加载的 ASR 模型，结果格式化为 SRT / LRC，按曲目 key 持久化到 `subtitles/`，同目录另写 `subtitles.srt` 与 `subtitles.lrc`。关闭分离重新生成时会清理该曲目上次留下的人声 / 伴奏文件。
 
-自定义分离模型必须为 sherpa-onnx 兼容的 2-stem 模型，使用前校验 `model_type`、`stems=2` 与必需元数据；未确认模型时不会开始分离。模型未加载、缺少 ffmpeg、解码失败或 ASR 无结果都会给出明确错误。
+自定义分离模型必须为 sherpa-onnx 兼容的 2-stem 模型，使用前校验 `model_type`、`stems=2` 与必需元数据；开启分离但未确认模型时不会开始。模型未加载、缺少 ffmpeg、解码失败或 ASR 无结果都会给出明确错误。
 
 结果编辑支持「分段编辑」（逐条改文字与起止时间，可插入 / 删除）与「原文编辑」。保存时后端校验时间合法性、折叠换行并校验单句长度；SRT 兼容缺失序号与 `MM:SS,mmm` 简写，LRC 兼容元数据标签（`[offset:]` 仅忽略、不参与计时）与一行多时间戳，无法识别的时间轴会指出行号且不写盘。
 
@@ -440,7 +444,7 @@ Spleeter 的首次解压产物放在应用**数据**目录的 `separation-models
 | PUT | `/v1/subtitles/text` | `?key=&format=srt\|lrc`，body `{ "text": "…" }`，按原文解析后写回 |
 | DELETE | `/v1/subtitles/track` | `?key=` 删除记录，并清理人声 / 伴奏与临时文件 |
 | GET | `/v1/subtitles/export` | `?key=&format=srt\|lrc`，以附件形式返回文件内容 |
-| POST | `/v1/subtitles/generate` | 提交生成任务，body `{ "key": …, "separationModel": …, "separationTarget": "vocals\|instrumental" }` |
+| POST | `/v1/subtitles/generate` | 提交生成任务，body `{ "key": …, "separate": true\|false, "separationModel": …, "separationTarget": "vocals\|instrumental" }`；`separate` 默认 `true`，`false` 时直接识别原始音频 |
 
 **人声分离**
 
@@ -531,6 +535,10 @@ data: {"task":{…},"type":"task"}
 # 1. 提交任务：返回 202，data.task.id 即任务 id
 curl -s -X POST $BASE/subtitles/generate -H 'Content-Type: application/json' \
   -d '{"key":"cheerful/上春山","separationModel":"spleeter-2stems-int8"}'
+
+# 口播 / 语音：跳过人声分离，直接识别原始音频
+curl -s -X POST $BASE/subtitles/generate -H 'Content-Type: application/json' \
+  -d '{"key":"voice/开场白","separate":false}'
 
 # 2. 订阅该任务的进度（收到 done / failed 后服务端关闭连接）
 curl -N $BASE/tasks/task-1795358888573-0002/events

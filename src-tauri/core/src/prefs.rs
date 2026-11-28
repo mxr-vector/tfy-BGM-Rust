@@ -267,6 +267,8 @@ pub struct Prefs {
     pub desktop_lyrics_enabled: bool,
     /// 字幕预览偏好格式：`srt` 或 `lrc`。
     pub subtitle_format: String,
+    /// 生成字幕时是否先做人声分离；关闭后直接识别原始音频（适合口播 / 语音）。
+    pub subtitle_separation_enabled: bool,
 
     // ---- 平台特有（仅对应平台读取）----
     /// Windows：系统媒体传输控制（SMTC）。
@@ -315,6 +317,7 @@ impl Default for Prefs {
             separation_model: None,
             desktop_lyrics_enabled: false,
             subtitle_format: "srt".to_owned(),
+            subtitle_separation_enabled: true,
             smtc: false,
             spatial_audio: false,
             audio_enhancement: true,
@@ -1063,6 +1066,7 @@ mod tests {
         let prefs = Prefs::default();
         assert!(!prefs.desktop_lyrics_enabled);
         assert_eq!(prefs.subtitle_format, "srt");
+        assert!(prefs.subtitle_separation_enabled);
 
         // 偏好格式只保留 srt / lrc，其它值回退 srt。
         for (input, expected) in [(" LRC ", "lrc"), ("srt", "srt"), ("vtt", "srt")] {
@@ -1082,6 +1086,7 @@ mod tests {
         let prefs = Prefs {
             desktop_lyrics_enabled: true,
             subtitle_format: "lrc".into(),
+            subtitle_separation_enabled: false,
             ..Prefs::default()
         };
         prefs.save(&path).unwrap();
@@ -1089,6 +1094,7 @@ mod tests {
         assert!(warning.is_none());
         assert!(loaded.desktop_lyrics_enabled);
         assert_eq!(loaded.subtitle_format, "lrc");
+        assert!(!loaded.subtitle_separation_enabled);
     }
 
     #[test]
@@ -1102,6 +1108,7 @@ mod tests {
         assert!(!prefs.smtc);
         assert!(!prefs.spatial_audio);
         assert!(!prefs.mpris2);
+        assert!(prefs.subtitle_separation_enabled);
         assert_eq!(prefs.ui_font, DEFAULT_UI_FONT);
     }
 

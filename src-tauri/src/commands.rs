@@ -36,6 +36,12 @@ type CommandResult<T> = Result<T, String>;
 static SUBTITLE_GENERATION: JobSlot = JobSlot::new();
 static WAV_TRANSCRIPTION: JobSlot = JobSlot::new();
 
+/// 字幕页快速导入可接受的音视频扩展名；不在曲库音频列表中的文件会先提取音轨。
+const IMPORT_MEDIA_EXTENSIONS: [&str; 23] = [
+    "aac", "wma", "opus", "aiff", "caf", "amr", "mp4", "mov", "mkv", "webm", "m4v", "avi", "flv",
+    "ts", "mpg", "mpeg", "wmv", "3gp", "ogv", "vob", "m2ts", "asf", "rmvb",
+];
+
 fn describe(error: anyhow::Error) -> String {
     format!("{error:#}")
 }
@@ -826,9 +832,10 @@ pub fn separation_models(app: AppHandle, state: State<'_, AppState>) -> Separati
     separation::catalog(&app, &state.models_root())
 }
 
-/// 为音乐库曲目生成字幕：人声分离 → 人声轨归一化 → 分片 ASR → SRT / LRC。
+/// 为音乐库曲目生成字幕：人声分离（可选）→ 识别音频归一化 → 分片 ASR → SRT / LRC。
 ///
-/// `separation_model` 由用户在生成前确认；为空时直接拒绝，不会回退到原始音频。
+/// `separate` 默认 `true`：此时 `separation_model` 由用户在生成前确认，为空直接拒绝。
+/// `separate` 为 `false` 时跳过人声分离，直接识别原始音频（适合口播 / 语音）。
 /// `separation_target` 仅用于自定义 UVR 模型：用户确认模型主输出是人声还是乐器。
 /// 过程进度通过 `subtitle-progress` 推送，失败也会推送带原因的 error 事件。
 #[tauri::command]
@@ -836,8 +843,9 @@ pub async fn generate_subtitles(
     app: AppHandle,
     state: State<'_, AppState>,
     key: String,
-    separation_model: String,
+    separation_model: Option<String>,
     separation_target: Option<String>,
+    separate: Option<bool>,
     job_id: Option<uuid::Uuid>,
 ) -> CommandResult<Option<subtitles::SubtitleResult>> {
     let song = state
@@ -846,6 +854,8 @@ pub async fn generate_subtitles(
     let runtime = state.model_runtime();
     let models_root = state.models_root();
     let task_app = app.clone();
+    let separation_model = separation_model.unwrap_or_default();
+    let separate = separate.unwrap_or(true);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let job = SUBTITLE_GENERATION.start(
             job_id.unwrap_or_else(uuid::Uuid::new_v4),
@@ -855,6 +865,7 @@ pub async fn generate_subtitles(
             &task_app,
             &runtime,
             &song,
+            separate,
             &separation_model,
             separation_target.as_deref(),
             &models_root,
@@ -1210,6 +1221,100 @@ pub async fn import_tracks(
         .import_tracks(&app, &category, paths)
         .map(Some)
         .map_err(describe)
+}
+
+/// 字幕页快速导入口播素材：音频直接导入曲库，视频 / 其它容器先提取首条音轨。
+///
+/// 转换在临时目录完成，导入时仍由曲库复制；视频原文件不会被修改或移走。
+#[tauri::command]
+pub async fn import_subtitle_media(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    category: String,
+) -> CommandResult<Option<LibraryMutation>> {
+    if !state.has_category(&category) {
+        return Err(format!("未注册的分类：{category}"));
+    }
+    let Some(files) = app
+        .dialog()
+        .file()
+        .set_title("导入口播音频 / 视频")
+        .add_filter("曲库音频（直接导入）", &AUDIO_EXTENSIONS)
+        .add_filter("音视频（自动提取音轨）", &IMPORT_MEDIA_EXTENSIONS)
+        .blocking_pick_files()
+    else {
+        return Ok(None);
+    };
+    let paths: Vec<PathBuf> = files
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let task_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = task_app.state::<AppState>();
+        let temp =
+            tempfile::TempDir::new().map_err(|error| format!("无法创建临时目录：{error}"))?;
+        let mut sources = Vec::with_capacity(paths.len());
+        let mut failures = Vec::new();
+        for path in paths {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if audio_extension(file_name).is_some() {
+                sources.push(path);
+                continue;
+            }
+            let target = temp_media_path(temp.path(), &path);
+            match crate::speech_audio::extract_audio_track(&path, &target) {
+                Ok(()) => sources.push(target),
+                Err(error) => failures.push(format!("{}：{error:#}", path.display())),
+            }
+        }
+        if sources.is_empty() {
+            return Err(if failures.is_empty() {
+                "未选择可导入的媒体".to_owned()
+            } else {
+                failures.join("；")
+            });
+        }
+        let mut mutation = state
+            .import_tracks(&task_app, &category, sources)
+            .map_err(describe)?;
+        if !failures.is_empty() {
+            mutation.report.total += failures.len();
+            mutation.report.failed += failures.len();
+            for failure in failures {
+                mutation.report.messages.push(failure.clone());
+                mutation.report.failures.push(failure);
+            }
+        }
+        Ok(mutation)
+    })
+    .await
+    .map_err(|error| format!("导入任务异常结束：{error}"))?
+    .map(Some)
+}
+
+/// 为提取出的音轨生成不冲突的临时路径，并保留原文件名作为曲名。
+fn temp_media_path(dir: &Path, source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| stem.chars().take(100).collect::<String>())
+        .unwrap_or_else(|| "media".to_owned());
+    let mut candidate = dir.join(format!("{stem}.m4a"));
+    let mut suffix = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem} ({suffix}).m4a"));
+        suffix += 1;
+    }
+    candidate
 }
 
 #[tauri::command]

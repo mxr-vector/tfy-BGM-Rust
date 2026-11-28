@@ -11,6 +11,7 @@ import { guardLibraryPlayback } from '@/composables/useScheduler';
 import { formatTime } from '@/lib/format';
 import { showModal } from '@/lib/modal';
 import type { Song } from '@/lib/types';
+import { busyAction, openSubtitleImport } from '@/stores/actions';
 import { loadStatus, modelsInfo } from '@/stores/models';
 import { playSong, togglePlay } from '@/stores/player';
 import { openSettings } from '@/stores/settings';
@@ -18,6 +19,7 @@ import { state } from '@/stores/state';
 import type { SubtitleRecordFilter } from '@/stores/subtitles';
 import {
   addSubtitleRecord,
+  addSubtitleRecords,
   cancelEditing,
   cancelSubtitleRecognition,
   canCancelSubtitleRecognition,
@@ -45,7 +47,9 @@ import {
   previewFormat,
   revealSeparationAudio,
   separationAccompaniment,
+  separationEnabled,
   separationModelsLoading,
+  setSeparationEnabled,
   previewText,
   progress,
   recordFilter,
@@ -149,12 +153,14 @@ const selectedInLibrary = computed(() => Boolean(selectedSong.value?.path));
  */
 const separationForSelection = computed(() => {
   if (result.value && result.value.key === selectedKey.value) {
+    const separation = result.value.separation;
+    if (!separation) return null;
     return {
-      modelName: result.value.separation.modelName,
-      accompanimentModelName: result.value.separation.accompanimentModelName,
-      vocalsPath: result.value.separation.vocalsPath,
-      accompanimentPath: result.value.separation.accompanimentPath,
-      accompanimentKind: result.value.separation.accompanimentKind,
+      modelName: separation.modelName,
+      accompanimentModelName: separation.accompanimentModelName,
+      vocalsPath: separation.vocalsPath,
+      accompanimentPath: separation.accompanimentPath,
+      accompanimentKind: separation.accompanimentKind,
       srtPath: result.value.srtPath,
       lrcPath: result.value.lrcPath,
       current: true,
@@ -175,9 +181,34 @@ const separationForSelection = computed(() => {
   };
 });
 
+/** 正在为字幕页导入音视频；转换 / 导入期间锁定按钮。 */
+const subtitleImporting = computed(() => busyAction.value === 'subtitle-import');
+
+/** 快速导入口播素材：音频直接进曲库，视频自动提取音轨；导入后加入字幕记录列表。 */
+async function importSubtitleMedia(): Promise<void> {
+  if (generating.value || editing.value || busyAction.value) return;
+  const imported = await openSubtitleImport();
+  if (imported.length === 0) return;
+  addSubtitleRecords(imported);
+}
+
+/** 切换「人声分离」开关；生成 / 编辑期间锁定，避免与进行中的任务冲突。 */
+function toggleSeparation(): void {
+  if (generating.value || editing.value) return;
+  setSeparationEnabled(!separationEnabled.value);
+}
+
+/** 按开关决定入口：开启时先确认分离模型，关闭时直接识别原始音频。 */
+function startGeneration(): void {
+  if (separationEnabled.value) {
+    void chooseSeparationModel();
+    return;
+  }
+  void generateSubtitles(false);
+}
+
 /**
- * 生成前必须由用户确认分离模型。未确认不发起任何后端任务，
- * 因此不会出现跳过分离直接识别原始音频的情况。
+ * 开启人声分离时，生成前必须由用户确认分离模型；未确认不发起任何后端任务。
  */
 async function chooseSeparationModel(): Promise<void> {
   if (
@@ -264,7 +295,7 @@ async function chooseSeparationModel(): Promise<void> {
     if (!role) return;
     target = role.target === 'instrumental' ? 'instrumental' : 'vocals';
   }
-  await generateSubtitles(chosen.id, target);
+  await generateSubtitles(true, chosen.id, target);
 }
 
 function storedFor(key: string) {
@@ -322,7 +353,7 @@ function onDraftTextInput(event: Event): void {
       <div>
         <h2>字幕生成</h2>
         <p>
-          选择曲目并确认人声分离模型：先分离出人声与伴奏，再仅对分离后的人声轨调用 ASR；记录可检索，结果可分段编辑或直接修改 SRT / LRC 原文，再预览与导出。
+          选择曲目后按开关决定识别输入：开启人声分离时先分离出人声与伴奏，再仅对分离后的人声轨调用 ASR（适合歌曲）；关闭时直接识别原始音频（适合口播 / 语音）。记录可检索，结果可分段编辑或直接修改 SRT / LRC 原文，再预览与导出。
         </p>
       </div>
       <span class="subtitle-header-badge">
@@ -340,26 +371,38 @@ function onDraftTextInput(event: Event): void {
               {{ hasQuery ? `${searchResults.length} 条结果` : '仅搜索，不加载曲库' }}
             </span>
           </div>
-          <label class="subtitle-search">
-            <Icon name="search" />
-            <input
-              v-model="subtitleQuery"
-              type="search"
-              placeholder="搜索曲名、文件名、艺人…"
-              autocomplete="off"
-              spellcheck="false"
-              aria-label="搜索音乐库曲目"
-            />
+          <div class="subtitle-search-row">
+            <label class="subtitle-search">
+              <Icon name="search" />
+              <input
+                v-model="subtitleQuery"
+                type="search"
+                placeholder="搜索曲名、文件名、艺人…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="搜索音乐库曲目"
+              />
+              <button
+                v-if="subtitleQuery"
+                type="button"
+                class="subtitle-search-clear"
+                title="清空搜索"
+                @click="subtitleQuery = ''"
+              >
+                <Icon name="x" />
+              </button>
+            </label>
             <button
-              v-if="subtitleQuery"
               type="button"
-              class="subtitle-search-clear"
-              title="清空搜索"
-              @click="subtitleQuery = ''"
+              class="subtitle-btn is-ghost is-compact subtitle-import"
+              :disabled="generating || editing || busyAction !== null"
+              title="导入口播音频或视频，视频会自动提取音轨"
+              @click="importSubtitleMedia"
             >
-              <Icon name="x" />
+              <Icon name="upload" />
+              {{ subtitleImporting ? '导入中…' : '导入音频' }}
             </button>
-          </label>
+          </div>
 
           <div class="subtitle-song-list">
             <p v-if="!hasQuery" class="subtitle-empty">
@@ -561,8 +604,31 @@ function onDraftTextInput(event: Event): void {
           <span>请从左侧选择一首曲目</span>
         </div>
 
+        <button
+          type="button"
+          class="subtitle-separation-toggle"
+          role="switch"
+          :aria-checked="separationEnabled"
+          :disabled="generating || editing"
+          @click="toggleSeparation"
+        >
+          <span class="subtitle-separation-toggle-text">
+            <span class="subtitle-separation-toggle-title">人声分离</span>
+            <span class="subtitle-separation-toggle-hint">
+              {{ separationEnabled
+                ? '先分离人声与伴奏，仅识别分离后的人声轨（推荐歌曲）'
+                : '直接识别原始音频，不产出人声 / 伴奏文件（推荐口播、语音）' }}
+            </span>
+          </span>
+          <span class="switch" :class="{ 'is-on': separationEnabled }" aria-hidden="true">
+            <span class="switch-thumb"></span>
+          </span>
+        </button>
+
         <p class="subtitle-hint">
-          生成流程固定为：人声分离（人声可选模型，伴奏固定内置伴奏模型）→ 仅识别分离后的人声轨 → 生成字幕，不提供跳过分离的入口。
+          {{ separationEnabled
+            ? '下一步选择人声分离模型；伴奏固定使用内置伴奏模型，歌词识别只使用分离后的人声轨。'
+            : '将直接对源音频归一化并识别；不会生成人声 / 伴奏交付物，已有分离文件会被清理。' }}
         </p>
 
         <div class="subtitle-actions">
@@ -575,12 +641,16 @@ function onDraftTextInput(event: Event): void {
               !modelReady ||
               generating ||
               editing ||
-              separationModelsLoading
+              (separationEnabled && separationModelsLoading)
             "
-            @click="chooseSeparationModel"
+            @click="startGeneration"
           >
             <Icon :name="generating ? 'refresh' : 'sparkles'" />
-            {{ generating ? '生成中…' : '选择模型并生成字幕' }}
+            {{ generating
+              ? '生成中…'
+              : separationEnabled
+                ? '选择模型并生成字幕'
+                : '直接识别并生成字幕' }}
           </button>
           <button
             type="button"
@@ -634,10 +704,13 @@ function onDraftTextInput(event: Event): void {
             <strong>生成完成</strong>
             <span>{{ result.segments.length }} 条 · {{ formatTime(result.duration) }}</span>
           </div>
-          <p class="subtitle-result-meta">
+          <p v-if="result.separation" class="subtitle-result-meta">
             分离模型 {{ result.separation.modelName }}（{{ result.separation.engine }}）
             · 伴奏模型 {{ result.separation.accompanimentModelName }}
             · 歌词识别仅使用分离后的人声文件
+          </p>
+          <p v-else class="subtitle-result-meta">
+            未进行人声分离 · 直接识别原始音频
           </p>
         </div>
 
@@ -1026,6 +1099,18 @@ function onDraftTextInput(event: Event): void {
 }
 .subtitle-muted.is-ready { color: var(--accent-bright); }
 
+.subtitle-search-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.subtitle-search-row .subtitle-search {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.subtitle-search-row .subtitle-import { flex: none; padding: 0 12px; }
 .subtitle-search {
   display: flex;
   align-items: center;
@@ -1153,6 +1238,35 @@ function onDraftTextInput(event: Event): void {
   background: var(--accent-soft);
   color: var(--accent-bright);
 }
+.subtitle-separation-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 2px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+.subtitle-separation-toggle:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+.subtitle-separation-toggle:disabled { cursor: not-allowed; opacity: 0.6; }
+.subtitle-separation-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.subtitle-separation-toggle-title { font-size: 12.5px; font-weight: 650; color: var(--text); }
+.subtitle-separation-toggle-hint { font-size: 10.5px; color: var(--text-3); }
+
 .subtitle-track-path, .subtitle-track-meta, .subtitle-result-meta, .subtitle-hint {
   margin: 6px 0 0;
   font-size: 11px;

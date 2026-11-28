@@ -138,6 +138,8 @@ export interface Prefs {
   desktopLyricsEnabled: boolean;
   /** 字幕预览偏好格式。 */
   subtitleFormat: SubtitleFormat;
+  /** 生成字幕时是否先做人声分离；关闭后直接识别原始音频（适合口播 / 语音）。 */
+  subtitleSeparationEnabled: boolean;
 }
 
 export type SubtitleFormat = 'srt' | 'lrc';
@@ -553,8 +555,8 @@ export interface SubtitleResult {
   title: string;
   sourcePath: string;
   sourceFormat: string;
-  /** 本次分离模型与本地人声 / 伴奏文件。 */
-  separation: SeparationInfo;
+  /** 本次分离模型与本地人声 / 伴奏文件；关闭人声分离时为 `null`。 */
+  separation: SeparationInfo | null;
   duration: number;
   segments: SubtitleSegment[];
   srt: string;

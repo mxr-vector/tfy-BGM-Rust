@@ -26,6 +26,51 @@ pub fn to_asr_wav(source: &Path, target: &Path) -> Result<()> {
     convert(source, target, None, None, REFERENCE_RATE)
 }
 
+/// 从视频或其它容器中提取首条音轨，转码为 AAC（M4A），供曲库与 ASR 使用。
+///
+/// 输出保持立体声与原采样率，仅去掉视频流；转码而非直接复制，避免 MKV / WebM
+/// 等容器的音频编码无法写入 M4A。
+pub fn extract_audio_track(source: &Path, target: &Path) -> Result<()> {
+    let ffmpeg = ffmpeg_path().context("未检测到 ffmpeg，请安装 ffmpeg 或设置 TFY_FFMPEG")?;
+    let mut command = quiet_command(&ffmpeg);
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+        ])
+        .arg(source)
+        .args([
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-f",
+            "mp4",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(target);
+    let output = command.output().context("无法启动 ffmpeg")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message: String = stderr.trim().chars().take(400).collect();
+        bail!("音轨提取失败：{message}");
+    }
+    if std::fs::metadata(target)?.len() <= 44 {
+        bail!("提取后的音轨为空");
+    }
+    Ok(())
+}
+
 fn convert(
     source: &Path,
     target: &Path,
