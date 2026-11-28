@@ -17,6 +17,13 @@ import zipfile
 
 REPO = Path(__file__).resolve().parents[1]
 
+# 与 scripts/package-common.ps1 的 Get-BundledSeparationModels 保持同步。
+BUNDLED_SEPARATION_MODELS = (
+    "UVR-MDX-NET-Inst_HQ_3.onnx",
+    "UVR-MDX-NET-Voc_FT.onnx",
+    "sherpa-onnx-spleeter-2stems-int8.tar.bz2",
+)
+
 
 def app_version() -> str:
     conf = json.loads((REPO / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
@@ -82,6 +89,11 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=REPO / "dist")
     parser.add_argument("--max-mib", type=int, default=100, help="Gitee 单附件上限")
+    parser.add_argument(
+        "--with-models",
+        action="store_true",
+        help="附带人声分离模型（约 174 MiB）。Gitee 单附件 100 MiB 限制下必须同时抬高 --max-mib 或改用分卷",
+    )
     args = parser.parse_args()
 
     version = app_version()
@@ -111,6 +123,17 @@ def main() -> None:
         for asset in sorted((REPO / "models/voices").iterdir()):
             if asset.is_file():
                 shutil.copy2(asset, voices / asset.name)
+
+        # 运行时按 Resource/models 解析分离模型（Windows 上即 exe 同级），
+        # 与 scripts/package-common.ps1 的 Copy-BundledSeparationModels 保持一致。
+        if args.with_models:
+            models = package / "models"
+            models.mkdir()
+            for name in BUNDLED_SEPARATION_MODELS:
+                source = REPO / "models" / name
+                if not source.is_file():
+                    raise FileNotFoundError(f"缺少随包分离模型：{source}")
+                shutil.copy2(source, models / name)
 
         categories = json.loads(
             (REPO / "src-tauri/core/assets/categories.default.json").read_text(

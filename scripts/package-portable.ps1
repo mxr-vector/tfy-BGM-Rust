@@ -154,13 +154,17 @@ try {
     [System.IO.Directory]::CreateDirectory($package) | Out-Null
     Copy-Item -LiteralPath $releaseExe, (Join-Path $repo "LICENSE"), (Join-Path $repo "README.md") -Destination $package -Force
 
-    # Resources resolve relative to the executable in the portable build.
+    # Resources resolve relative to the executable in the portable build:
+    # assets/bg (wallpapers), voices (TTS timbres) and models (separation ONNX +
+    # Spleeter archive) must all sit next to tfy-bgm.exe.
     $assets = Join-Path $package "assets"
     [System.IO.Directory]::CreateDirectory($assets) | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo "assets\bg") -Destination $assets -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $repo "models\voices") -Destination $package -Recurse -Force
+    Copy-BundledSeparationModels -RepoRoot $repo -Destination (Join-Path $package "models") | Out-Null
     Initialize-PortableBgm -Destination (Join-Path $package "bgm") -Source (Join-Path $repo "bgm") `
         -CategoriesPath (Join-Path $srcTauri "core\assets\categories.default.json") -IncludeLibrary:$WithBgm
+    Assert-PortableResources -Package $package
 
     if ($NoZip) {
         Write-Host "[3/4] zip skipped (-NoZip)"

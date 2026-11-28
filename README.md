@@ -15,7 +15,7 @@
 以及从网易云 / QQ 音乐 / 汽水音乐导出歌单的 **歌单迁移**。另提供本机 HTTP 接口
 （`127.0.0.1:8737`，9 类 33 个接口，含长任务 SSE），供 OBS、Stream Deck、直播脚本等外部项目接入控制。
 
-> 音频素材始终外置在 `bgm/`，不进入可执行文件；人声分离模型随安装包分发（绿色版需自行放置 `models/`），
+> 音频素材始终外置在 `bgm/`，不进入可执行文件；人声分离模型随安装版与 Windows 绿色版一同分发（绿色版放在 exe 同级的 `models/`），
 > ASR / TTS 模型在「模型」分组中下载到本地，指纹分析与语音推理均不发送音频或文本到网络。
 
 ---
@@ -204,7 +204,7 @@
 | :--- | :--- | :--- |
 | 曲库音频 | `bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}` | 文件名即曲名；官方发布使用独立曲库 ZIP |
 | 内置壁纸 | `assets/bg/` | 目录内的 jpg / jpeg / png / webp / mp4 自动发现，视频预览直接取首帧，整个目录经 `bundle.resources` 打包 |
-| 随包分离模型 | `models/` | UVR 人声 / 伴奏 ONNX 与 Spleeter 归档（约 174 MB），经 `bundle.resources` 打进安装包；开发模式直接读该目录 |
+| 随包分离模型 | `models/` | UVR 人声 / 伴奏 ONNX 与 Spleeter 归档（约 174 MB），经 `bundle.resources` 打进安装包；绿色版由 `package-portable.ps1` 复制到 exe 同级 `models/`；开发模式直接读该目录 |
 | 设备无关核心库 | `src-tauri/core/` | 目录扫描、标签解析与缓存、文件操作、分类、配置、节目单与循环点持久化、导出与响度归一化、音频指纹索引与去重 / 以声搜声；可独立测试 |
 | 分类默认模板 | `src-tauri/core/assets/categories.default.json` | 6 个内置分类的默认文案与图标，编译期嵌入 |
 | Tauri 应用层 | `src-tauri/src/` | 运行期状态、曲库根目录、文件监听、本机 API、字幕与桌面歌词、人声分离、文生语音、歌单迁移、字体扫描与系统设置 |
@@ -631,7 +631,7 @@ cd src-tauri && cargo tauri dev
 ### 通用约定
 
 - **曲库单独分发**：四种程序包默认不含曲库音频。另有一份跨平台、跨架构的 `bgm.zip`，只含 `bgm/` 中的曲库音频。
-- **CPU 分离模型随安装版保留**：NSIS / deb / rpm 附带三个 CPU 分离模型（约 174 MiB）、内置壁纸和音色。绿色版不含分离模型；如需字幕生成，把仓库 `models/` 放到 exe 同级，并安装 FFmpeg。
+- **CPU 分离模型随包分发**：NSIS / deb / rpm 经 `bundle.resources` 附带三个 CPU 分离模型（约 174 MiB）、内置壁纸和音色；Windows 绿色版由 `scripts/package-portable.ps1` 复制到 exe 同级的 `models/`，组装完成后逐项校验，缺文件直接打包失败。Gitee 渠道受单附件 100 MiB 限制，仍不含分离模型。
 - **GPU 环境不随包分发**：需要时由用户按需下载。原生 Windows ARM64 不支持当前固定版本的 CosyVoice CPU 自动环境（缺少对应 PyPI wheel）；这不影响随安装版提供的 Sherpa CPU 分离模型。
 - **版本唯一来源**：`src-tauri/tauri.conf.json` 的 `version`；脚本会校验 `Cargo.toml` 的 `[package].version`，不一致直接报错。
 - **构建顺序**：前端必须先 `pnpm run build`。绿色版直接用 cargo 构建时**必须带 `--features custom-protocol`**，否则 Tauri 按开发模式加载 `devUrl`，exe 启动后白屏。
@@ -645,10 +645,10 @@ cd src-tauri && cargo tauri dev
 ### 方式一：Windows 绿色版
 
 ```powershell
-# 默认：不带音频，只建分类空目录（约 34 MB，主要是内置壁纸与语音提示音），启动后自行指定曲库
+# 默认：不带音频，只建分类空目录（约 200 MB：分离模型压缩后约 165 MB + 内置壁纸 30 MB + 音色 7 MB），启动后自行指定曲库
 powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1
 
-# 自带曲库：把仓库 bgm/ 一起打包（自包含，约 350 MB，以音频为主）
+# 自带曲库：把仓库 bgm/（约 315 MB）一起打包（自包含，约 515 MB，以音频为主）
 powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 -WithBgm
 ```
 
@@ -670,7 +670,8 @@ dist/
   tfy-bgm/                                 ← 仅使用 -NoZip 时输出组装目录
 ```
 
-- ZIP 始终从新建的临时目录组装，不会打入 `dist\tfy-bgm` 中残留的模型、曲库或其他文件。
+- zip 内含三项随包资源：`assets/bg/`（内置壁纸）、`voices/`（内置音色与 `prompts.json`）、`models/`（三个 CPU 分离模型）；组装结束后脚本逐项校验，缺文件直接失败，不再发出运行期才报「缺少模型文件」的包。
+- ZIP 始终从新建的临时目录组装，不会打入 `dist\tfy-bgm` 中残留的曲库或其他文件。
 - `-NoZip` 不会覆盖现有便携目录里的用户曲库。
 - zip 内为单层 `tfy-bgm/`，条目分隔符统一 `/`，中文名按 UTF-8 存储，跨平台解压不乱码。
 - 手动构建时：
@@ -758,7 +759,7 @@ git push origin v1.0.0
 
 Gitee 原生流水线位于 `.workflow/package.yml`。推送到 Gitee 的 `v*` 标签会校验版本，使用 `cargo-xwin` 在 Linux 托管环境交叉编译 **Windows x64 绿色版**，再由 `release@gitee` 创建发行版并上传压缩包与 `SHA256SUMS.txt`，无需配置 Token。
 
-Gitee 绿色版默认不带曲库和人声分离模型，压缩包限制在 100 MiB 以内；含模型的 Windows 安装包、Linux deb/rpm 与 arm64 产物继续由 GitHub Actions 发布。
+Gitee 绿色版默认不带曲库和人声分离模型，压缩包限制在 100 MiB 以内；含模型的 Windows 绿色版与安装包、Linux deb/rpm 及 arm64 产物继续由 GitHub Actions 发布。
 
 ---
 

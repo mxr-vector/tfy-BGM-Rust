@@ -175,6 +175,60 @@ function Format-FileSize {
     return ("{0:N1} MB" -f ($Bytes / 1MB))
 }
 
+# 随包分离模型：UVR 人声 / 伴奏 ONNX 与 Spleeter 归档。
+# 运行时按 `Resource/models` 解析（Windows 上 resource_dir 就是 exe 所在目录），
+# 少任何一个文件，「人声分离」页都会显示「缺少模型文件」，所以绿色版必须显式复制。
+function Get-BundledSeparationModels {
+    return @(
+        "UVR-MDX-NET-Inst_HQ_3.onnx",
+        "UVR-MDX-NET-Voc_FT.onnx",
+        "sherpa-onnx-spleeter-2stems-int8.tar.bz2"
+    )
+}
+
+# 复制到 <包根>\models\；返回总字节数，便于在日志里核对体积。
+function Copy-BundledSeparationModels {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    $source = Join-Path $RepoRoot "models"
+    [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
+    $total = [long]0
+    foreach ($name in Get-BundledSeparationModels) {
+        $file = Join-Path $source $name
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+            throw "缺少随包分离模型：$file（请先执行 git checkout -- models/）"
+        }
+        $size = (Get-Item -LiteralPath $file).Length
+        if ($size -le 0) { throw "随包分离模型是空文件：$file" }
+        Copy-Item -LiteralPath $file -Destination (Join-Path $Destination $name) -Force
+        $total += $size
+    }
+    Write-Host ("models/: bundled separation models ({0})" -f (Format-FileSize $total))
+    return $total
+}
+
+# 组装完成后逐项校验；任何随包资源缺失都让打包失败，而不是发一个运行期报错的包。
+function Assert-PortableResources {
+    param([Parameter(Mandatory)][string]$Package)
+
+    foreach ($relative in @("tfy-bgm.exe", "assets\bg", "voices\prompts.json")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Package $relative))) {
+            throw "绿色版缺少资源：$relative"
+        }
+    }
+    foreach ($name in Get-BundledSeparationModels) {
+        $path = Join-Path (Join-Path $Package "models") $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "绿色版缺少分离模型：models\$name"
+        }
+    }
+    $models = Join-Path $Package "models"
+    Write-Host ("Resources verified: assets\bg, voices, models ({0})" -f (Format-FileSize ((Get-ChildItem -LiteralPath $models -File | Measure-Object -Property Length -Sum).Sum)))
+}
+
 # sherpa-onnx-sys downloads a ~127 MB native archive from GitHub Releases inside
 # its build script (no retry, no mirror) and accepts any existing lib/ directory
 # without checking the contents. On CI that ends in a late, confusing

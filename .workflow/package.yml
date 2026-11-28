@@ -1,6 +1,6 @@
 # Gitee Go 原生发版流水线：推送 v* 标签后，交叉编译 Windows x64 绿色版并发布 Release。
 # Gitee 托管构建环境是 Linux，因此使用 Tauri 官方支持的 cargo-xwin，不依赖 Windows Runner。
-# 绿色版默认不内置曲库；Gitee 普通仓库单附件上限为 100 MiB，含模型的安装包仍由 GitHub Actions 发布。
+# 绿色版默认不内置曲库；Gitee 普通仓库单附件上限为 100 MiB，含模型（压缩后约 165 MiB）的绿色版与安装包仍由 GitHub Actions 发布。
 name: package
 displayName: 听风吟 · Gitee 发版
 

@@ -30,6 +30,10 @@ skills-lock.json
 logs
 *.log
 
+# Python 打包脚本的字节码缓存
+__pycache__/
+*.pyc
+
 # Editor / OS
 .vscode/
 !.vscode/extensions.json
