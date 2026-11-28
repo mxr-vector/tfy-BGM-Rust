@@ -369,7 +369,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: bgm-library
-          path: dist/tfy-bgm-${{ needs.plan.outputs.version }}-bgm.zip
+          path: dist/bgm.zip
           compression-level: 0
           if-no-files-found: error
           retention-days: 3
@@ -394,7 +394,7 @@ jobs:
           expected=("$prefix"-windows-{x64,arm64}-{portable.zip,setup.exe}
                     "$prefix"-linux-{amd64,arm64}.deb
                     "$prefix"-linux-{x86_64,aarch64}.rpm
-                    "$prefix"-bgm.zip)
+                    bgm.zip)
           diff -u <(printf '%s\n' "${expected[@]}" | sort) \
             <(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
           for asset in "${expected[@]}"; do test -f "$asset"; done

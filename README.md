@@ -629,7 +629,7 @@ cd src-tauri && cargo tauri dev
 
 ### 通用约定
 
-- **曲库单独分发**：四种程序包默认不含曲库音频。另有一份跨平台、跨架构的 `tfy-bgm-<版本>-bgm.zip`，只含 `bgm/` 中的曲库音频。
+- **曲库单独分发**：四种程序包默认不含曲库音频。另有一份跨平台、跨架构的 `bgm.zip`，只含 `bgm/` 中的曲库音频。
 - **CPU 分离模型随安装版保留**：NSIS / deb / rpm 附带三个 CPU 分离模型（约 174 MiB）、内置壁纸和音色。绿色版不含分离模型；如需字幕生成，把仓库 `models/` 放到 exe 同级，并安装 FFmpeg。
 - **GPU 环境不随包分发**：需要时由用户按需下载。原生 Windows ARM64 不支持当前固定版本的 CosyVoice CPU 自动环境（缺少对应 PyPI wheel）；这不影响随安装版提供的 Sherpa CPU 分离模型。
 - **版本唯一来源**：`src-tauri/tauri.conf.json` 的 `version`；脚本会校验 `Cargo.toml` 的 `[package].version`，不一致直接报错。
@@ -722,7 +722,7 @@ SKIP_BUILD=1 bash scripts/package-linux.sh rpm   # 复用已有构建
 | Windows 安装版 | `tfy-bgm-1.0.0-windows-x64-setup.exe` |
 | Linux DEB | `tfy-bgm-1.0.0-linux-amd64.deb` |
 | Linux RPM | `tfy-bgm-1.0.0-linux-x86_64.rpm` |
-| 独立曲库（全平台共用） | `tfy-bgm-1.0.0-bgm.zip` |
+| 独立曲库（全平台共用） | `bgm.zip` |
 
 - 架构按平台惯例：Windows `x64` / `arm64`，deb `amd64` / `arm64`，rpm `x86_64` / `aarch64`。
 - `SHA256SUMS.txt` 与 `sha256sum -c` 兼容（小写十六进制、两个空格、LF 换行），Windows 与 Linux 产物可写入同一份。
