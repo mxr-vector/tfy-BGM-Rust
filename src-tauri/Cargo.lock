@@ -4746,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "tfy-bgm"
-version = "0.8.2-tauri2"
+version = "0.8.0-tauri2"
 dependencies = [
  "anyhow",
  "axum",
