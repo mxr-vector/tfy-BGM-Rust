@@ -25,7 +25,7 @@ const referenceModeOptions = [
   { value: 'builtin', label: '内置音色' },
   { value: 'custom', label: '麦克风录制' },
 ];
-const RECORDING_PROMPT = '心之所向，素履所往，生如逆旅，一苇以航。';
+const RECORDING_PROMPT = '心之所向，素履以往，生如逆旅，一苇以航。';
 interface SynthesisProgress { jobId: string; current: number; total: number; device: 'cpu' | 'cuda' | 'cloud' }
 
 const families = ['EdgeTTS', 'CosyVoice3', 'ZipVoice'] as const;
