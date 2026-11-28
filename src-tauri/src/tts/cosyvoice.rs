@@ -458,11 +458,13 @@ fn prepare_venv(
         progress("正在创建 CosyVoice3 Python 环境…");
         let mut command = Command::new(uv);
         command
-            .args(["venv", "--clear", "--force", "--python"])
+            // uv 0.9 起 `venv --clear` 已包含旧版 `--force` 的语义（可清除非 venv 目录），
+            // 而 `--force` 已被移除；继续传入会让 uv 以 exit code 2 退出。
+            .args(["venv", "--clear", "--python"])
             .arg(python_home)
             .arg(venv)
             .env("UV_CACHE_DIR", app_cache.join("cosyvoice/uv-cache"));
-        run_cancellable(&mut command, token, SETUP_COMMAND_TIMEOUT)
+        run_setup_capturing_stderr(&mut command, token)
             .context("创建 CosyVoice Python 环境失败")?;
     }
     ensure!(
@@ -569,20 +571,9 @@ pub(super) fn install_managed_cuda(
         }
     });
     if let Err(error) = result {
-        let mut diagnostics = diagnostics.reopen()?;
         check_cancelled(token)?;
-        use std::io::{Seek, SeekFrom};
-        let start = diagnostics
-            .metadata()?
-            .len()
-            .saturating_sub(STDERR_LIMIT as u64);
-        diagnostics.seek(SeekFrom::Start(start))?;
-        let mut tail = Vec::new();
-        diagnostics
-            .take(STDERR_LIMIT as u64)
-            .read_to_end(&mut tail)?;
-        let detail = String::from_utf8_lossy(&tail);
-        return Err(error).context(format!("安装 GPU 推理依赖失败：{}", detail.trim()));
+        let detail = stderr_tail(diagnostics.path()).unwrap_or_default();
+        return Err(error).context(format!("安装 GPU 推理依赖失败：{detail}"));
     }
     progress("正在用 CosyVoice3 模型验证 CUDA…");
     let model = std::path::absolute(model)?;
@@ -791,7 +782,39 @@ fn run_setup(uv: &Path, cache: &Path, token: &CancellationToken, args: &[&str]) 
     command
         .args(args)
         .env("UV_CACHE_DIR", cache.join("cosyvoice/uv-cache"));
-    run_cancellable(&mut command, token, SETUP_COMMAND_TIMEOUT)
+    run_setup_capturing_stderr(&mut command, token)
+}
+
+/// 运行环境准备命令，失败时把 stderr 末尾并入错误链，避免用户只看到 exit code。
+fn run_setup_capturing_stderr(command: &mut Command, token: &CancellationToken) -> Result<()> {
+    let diagnostics = tempfile::NamedTempFile::new().context("无法创建环境准备日志")?;
+    command
+        .stdin(Stdio::null())
+        .stderr(diagnostics.reopen()?);
+    let Err(error) = run_cancellable(command, token, SETUP_COMMAND_TIMEOUT) else {
+        return Ok(());
+    };
+    if token.is_cancelled() {
+        return Err(error);
+    }
+    let detail = stderr_tail(diagnostics.path()).unwrap_or_default();
+    if detail.is_empty() {
+        Err(error)
+    } else {
+        Err(error).context(detail)
+    }
+}
+
+/// 读取日志文件末尾 `STDERR_LIMIT` 字节，用于附带命令自身的错误输出。
+fn stderr_tail(path: &Path) -> io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+    let start = file.metadata()?.len().saturating_sub(STDERR_LIMIT as u64);
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::new();
+    file.take(STDERR_LIMIT as u64).read_to_end(&mut tail)?;
+    Ok(String::from_utf8_lossy(&tail).trim().to_owned())
 }
 
 fn run_cancellable(
