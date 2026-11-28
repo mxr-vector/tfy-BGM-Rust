@@ -148,7 +148,7 @@ function isBusy(): boolean {
           :class="{ 'is-active': state.view === 'tts' }"
           :aria-current="state.view === 'tts' ? 'page' : undefined"
           id="nav-tts"
-          title="使用 Kokoro 或 ZipVoice 离线合成语音"
+          title="使用 Edge 在线音色或本地克隆模型合成语音"
           @click="setView('tts')"
         >
           <Icon name="volume-2" class="nav-icon" />

@@ -1011,24 +1011,26 @@ watch(settingsOpen, async (open) => {
                   <div class="settings-subgroup-head">
                     <h4>TTS 语音模型</h4>
                   </div>
-                  <p class="settings-hint">CosyVoice3 使用 5–15 秒参考音频和对应文本进行零样本克隆，首次加载自动准备运行环境。Kokoro 适合多音色朗读，ZipVoice 支持中英文声音克隆。</p>
+                  <p class="settings-hint">Edge 朗读为在线引擎，无需下载模型，联网即可合成。CosyVoice3 使用 5–15 秒参考音频和对应文本进行零样本克隆，首次加载自动准备运行环境；ZipVoice 支持中英文声音克隆。</p>
                   <div class="settings-models">
                     <SettingsModelRow
                       v-for="model in ttsModels"
                       :key="model.id"
                       :name="model.name"
-                      :path="model.hasFiles ? model.path : undefined"
                       :size-bytes="model.sizeBytes"
+                      :size-label="model.online ? '免下载' : undefined"
+                      :path="model.hasFiles ? model.path : undefined"
                       :loaded="model.loaded"
-                      :status="model.installed ? '已安装' : model.hasFiles ? '文件不完整' : undefined"
+                      :status="model.online ? '在线' : model.installed ? '已安装' : model.hasFiles ? '文件不完整' : undefined"
                     >
                         <template #details>
-                          <template v-if="model.recommended"> · 推荐</template>
-                          <template v-if="!model.hasFiles"> · {{ model.package }}</template>
+                          <template v-if="model.online"> · 在线引擎</template>
+                          <template v-else-if="model.recommended"> · 推荐</template>
+                          <template v-if="!model.hasFiles && model.package"> · {{ model.package }}</template>
                         </template>
                         <span v-if="ttsModelActionLabel(model.id)" class="settings-muted" role="status">{{ ttsModelActionLabel(model.id) }}</span>
-                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource({ kind: 'tts', model })">修改下载源</button>
-                        <button type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true, model.id)">访问下载源</button>
+                        <button v-if="!model.online" type="button" class="settings-link" :disabled="savingDownloadSource" @click="editDownloadSource({ kind: 'tts', model })">修改下载源</button>
+                        <button v-if="!model.online" type="button" class="settings-link" :disabled="savingDownloadSource" @click="openModelDownloadSource(true, model.id)">访问下载源</button>
                         <button v-if="model.installed" type="button" class="settings-btn" :disabled="ttsModelBusy" @click="manageTtsModel(model, 'load')">
                           {{ model.loaded ? '重新加载' : '加载' }}
                         </button>

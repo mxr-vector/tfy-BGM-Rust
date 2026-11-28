@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig};
 
 mod cosyvoice;
-mod kokoro;
+mod edge;
 mod zipvoice;
 use tauri::{
     AppHandle, Emitter, Manager, State,
@@ -47,6 +47,7 @@ impl LoadedTts {
         match &self.engine {
             TtsEngine::Sherpa(engine) => engine.device(),
             TtsEngine::CosyVoice(engine) => engine.device(),
+            TtsEngine::Edge(engine) => engine.device(),
         }
     }
 }
@@ -54,6 +55,7 @@ impl LoadedTts {
 enum TtsEngine {
     Sherpa(SherpaEngine),
     CosyVoice(cosyvoice::Engine),
+    Edge(edge::Engine),
 }
 
 struct SherpaEngine {
@@ -61,7 +63,6 @@ struct SherpaEngine {
     cpu: Option<OfflineTts>,
     config: OfflineTtsConfig,
     rate: u32,
-    speakers: i32,
 }
 
 impl SherpaEngine {
@@ -86,7 +87,6 @@ impl SherpaEngine {
         if let Some(gpu) = gpu {
             return Ok(Self {
                 rate: gpu.sample_rate,
-                speakers: gpu.speakers,
                 gpu: Some(gpu),
                 cpu: None,
                 config,
@@ -96,7 +96,6 @@ impl SherpaEngine {
         let cpu = OfflineTts::create(&config).context("加载 TTS 模型失败")?;
         Ok(Self {
             rate: sherpa_sample_rate(&cpu)?,
-            speakers: cpu.num_speakers(),
             gpu: None,
             cpu: Some(cpu),
             config,
@@ -138,6 +137,7 @@ impl LoadedTts {
         match &mut self.engine {
             TtsEngine::Sherpa(engine) => engine.gpu.is_some() || engine.cpu.is_some(),
             TtsEngine::CosyVoice(engine) => engine.is_alive(),
+            TtsEngine::Edge(engine) => engine.is_alive(),
         }
     }
 }
@@ -299,7 +299,8 @@ type CommandResult<T> = Result<T, String>;
 pub struct SynthesisRequest {
     family: String,
     model_id: String,
-    voice_id: i32,
+    /// Edge 在线音色短名（如 `zh-CN-XiaoxiaoNeural`）；本地克隆引擎忽略此项。
+    voice: Option<String>,
     segments: Vec<TtsSegment>,
     reference_audio: Option<Vec<u8>>,
     reference_text: Option<String>,
@@ -573,6 +574,9 @@ pub fn open_model_download_source(
     } else {
         state.asr_download_url()
     };
+    if url.is_empty() {
+        return Err("该引擎为在线朗读，没有可访问的模型下载源".into());
+    }
     app.opener()
         .open_url(url.as_str(), None::<&str>)
         .map_err(|error| error.to_string())
@@ -614,7 +618,7 @@ pub async fn remove_tts_model(app: AppHandle, id: String, delete_files: bool) ->
             {
                 set_engine(engine, None);
             }
-            if delete_files {
+            if delete_files && !model.online {
                 let path = Path::new(&model.path);
                 let target = match path.canonicalize() {
                     Ok(target) => target,
@@ -653,6 +657,12 @@ fn builtin_voices_root(app: &AppHandle) -> Result<PathBuf> {
 #[tauri::command]
 pub async fn list_tts_builtin_voices(app: AppHandle) -> CommandResult<Vec<String>> {
     worker(move || speech_audio::builtin_voice_files(&builtin_voices_root(&app)?)).await
+}
+
+/// Edge 在线朗读的可用音色；联网获取，失败时退回内置清单。
+#[tauri::command]
+pub async fn list_edge_voices() -> CommandResult<Vec<edge::EdgeVoice>> {
+    worker(edge::voices).await
 }
 
 #[derive(Serialize)]
@@ -793,7 +803,7 @@ fn synthesize(
     tts_script::validate_segments(&mut request.segments, MAX_DURATION_MS)?;
     if !matches!(
         request.family.as_str(),
-        "Kokoro" | "ZipVoice" | "CosyVoice3"
+        "EdgeTTS" | "ZipVoice" | "CosyVoice3"
     ) {
         bail!("未知的 TTS 模型类别");
     }
@@ -808,7 +818,8 @@ fn synthesize(
     if !model.installed || model.family != request.family {
         bail!("模型文件不齐全或型号不匹配，请检查模型配置");
     }
-    let reference = if model.family == "Kokoro" {
+    // 在线朗读使用平台音色，不需要参考录音。
+    let reference = if model.family == "EdgeTTS" {
         None
     } else {
         let audio = request
@@ -822,6 +833,13 @@ fn synthesize(
             .filter(|text| speech_audio::valid_reference_text(text))
             .context("请填写与参考录音完全对应的参考文本")?;
         Some((speech_audio::read_reference(audio)?, text))
+    };
+    let edge_voice = if model.family == "EdgeTTS" {
+        Some(edge::validate_voice(
+            request.voice.as_deref().unwrap_or_default(),
+        )?)
+    } else {
+        None
     };
     check_cancelled(token)?;
     clear_dead_engine(slot);
@@ -837,11 +855,8 @@ fn synthesize(
     let result = match &mut loaded.engine {
         TtsEngine::Sherpa(engine) => {
             let sample_rate = engine.rate;
-            let mut generation = match (model.family, reference) {
-                ("Kokoro", _) => kokoro::generation(request.voice_id, engine.speakers)?,
-                ("ZipVoice", Some((audio, text))) => zipvoice::generation(audio, text),
-                _ => bail!("未知的 TTS 模型类别"),
-            };
+            let (audio, text) = reference.context("请提供参考录音")?;
+            let mut generation = zipvoice::generation(audio, text);
             synthesize_track(
                 app,
                 &request.segments,
@@ -854,6 +869,19 @@ fn synthesize(
                     generation.speed = speed;
                     engine.generate(&generation, text, token, on_cpu)
                 },
+            )
+        }
+        TtsEngine::Edge(engine) => {
+            let voice = edge_voice.as_deref().context("请选择 Edge 朗读音色")?;
+            synthesize_track(
+                app,
+                &request.segments,
+                job_id,
+                token,
+                engine.sample_rate(),
+                true,
+                &device,
+                |text, speed, _| engine.generate(text, voice, speed, token),
             )
         }
         TtsEngine::CosyVoice(engine) => {
@@ -899,46 +927,34 @@ fn create_engine(
     token: &CancellationToken,
     progress: &dyn Fn(&str),
 ) -> Result<LoadedTts> {
-    let engine = if model.family == "CosyVoice3" {
-        TtsEngine::CosyVoice(cosyvoice::Engine::load(
+    let engine = match model.family {
+        "CosyVoice3" => TtsEngine::CosyVoice(cosyvoice::Engine::load(
             Path::new(&model.path),
             app_cache,
             token,
             progress,
-        )?)
-    } else {
-        let mut config = OfflineTtsConfig::default();
-        config.model.num_threads =
-            std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
-        config.max_num_sentences = 3;
-        match model.family {
-            "Kokoro" => kokoro::configure(&mut config, model),
-            "ZipVoice" => zipvoice::configure(&mut config, root, model),
-            _ => bail!("未知的 TTS 模型类别"),
-        }
-        let field = |value: &Option<String>| value.clone().context("TTS 模型配置缺少路径");
-        let threads = config.model.num_threads;
-        let init = if model.family == "Kokoro" {
-            let c = &config.model.kokoro;
-            crate::sherpa_cuda::Init::Kokoro {
-                model: field(&c.model)?,
-                voices: field(&c.voices)?,
-                tokens: field(&c.tokens)?,
-                lexicon: field(&c.lexicon)?,
-                threads,
-            }
-        } else {
+        )?),
+        "EdgeTTS" => TtsEngine::Edge(edge::Engine::load()?),
+        "ZipVoice" => {
+            let mut config = OfflineTtsConfig::default();
+            config.model.num_threads =
+                std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as i32;
+            config.max_num_sentences = 3;
+            zipvoice::configure(&mut config, root, model);
+            let field = |value: &Option<String>| value.clone().context("TTS 模型配置缺少路径");
+            let threads = config.model.num_threads;
             let c = &config.model.zipvoice;
-            crate::sherpa_cuda::Init::ZipVoice {
+            let init = crate::sherpa_cuda::Init::ZipVoice {
                 tokens: field(&c.tokens)?,
                 encoder: field(&c.encoder)?,
                 decoder: field(&c.decoder)?,
                 vocoder: field(&c.vocoder)?,
                 lexicon: field(&c.lexicon)?,
                 threads,
-            }
-        };
-        TtsEngine::Sherpa(SherpaEngine::load(config, init, token)?)
+            };
+            TtsEngine::Sherpa(SherpaEngine::load(config, init, token)?)
+        }
+        _ => bail!("未知的 TTS 模型类别"),
     };
     Ok(LoadedTts {
         path: model.path.clone(),
@@ -1000,9 +1016,7 @@ pub(crate) fn benchmark(
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     let (rate, mut generation) = match &loaded.engine {
         TtsEngine::CosyVoice(engine) => (engine.sample_rate(), None),
-        TtsEngine::Sherpa(engine) if model.family == "Kokoro" => {
-            (engine.rate, Some(kokoro::generation(3, engine.speakers)?))
-        }
+        TtsEngine::Edge(engine) => (engine.sample_rate(), None),
         TtsEngine::Sherpa(engine) => {
             let (audio, text) = reference
                 .as_ref()
@@ -1030,6 +1044,9 @@ pub(crate) fn benchmark(
             let samples = match &mut loaded.engine {
                 TtsEngine::Sherpa(engine) => {
                     engine.generate(generation.as_mut().unwrap(), text, &token, &|| {})?
+                }
+                TtsEngine::Edge(engine) => {
+                    engine.generate(text, edge::DEFAULT_VOICE, 1.0, &token)?
                 }
                 TtsEngine::CosyVoice(engine) => {
                     let (_, prompt_text) = reference
@@ -1066,6 +1083,7 @@ pub(crate) fn benchmark(
         "device": match &loaded.engine {
             TtsEngine::Sherpa(engine) => engine.device(),
             TtsEngine::CosyVoice(engine) => engine.device(),
+            TtsEngine::Edge(engine) => engine.device(),
         },
         "total_ms": iterations, "p50_ms": quantile(&iterations, 0.5), "p95_ms": quantile(&iterations, 0.95),
         "first_segment_ms": first_segment, "first_segment_p50_ms": quantile(&first_segment, 0.5),
@@ -1242,7 +1260,7 @@ mod tests {
 
     #[test]
     fn catalog_reports_the_loaded_backend_and_clears_it_on_release() {
-        let mut model = tts_models::model(Path::new("models"), "kokoro-int8").unwrap();
+        let mut model = tts_models::model(Path::new("models"), "zipvoice-int8").unwrap();
         let mut loaded = (model.path.clone(), "cuda");
         apply_loaded_status(&mut model, Some(&loaded));
         assert_eq!(model.device, None);
@@ -1362,5 +1380,29 @@ mod tests {
         assert_eq!(speech_audio::pause_after("“你好。”", 24_000), 3_840);
         assert_eq!(speech_audio::pause_after("前半句，", 24_000), 1_440);
         assert_eq!(speech_audio::pause_after("跨段继续", 24_000), 0);
+    }
+
+    /// 联网验收：走完整的「引擎创建 → 在线合成 → 轨道拼装 → WAV」链路。
+    #[test]
+    #[ignore = "需要联网访问 Edge 朗读服务"]
+    fn live_edge_benchmark_writes_a_24khz_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("edge.wav");
+        let report = benchmark(
+            dir.path(),
+            tts_models::EDGE_ID,
+            dir.path(),
+            &["在线朗读端到端验收。".to_owned()],
+            None,
+            &output,
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(report["sample_rate"], edge::SAMPLE_RATE);
+        assert_eq!(report["device"], "cloud");
+        let wave = speech_audio::read_wave(&output).unwrap();
+        assert_eq!(wave.sample_rate(), edge::SAMPLE_RATE as i32);
+        assert!(wave.samples().len() > 8_000, "合成音频过短");
     }
 }

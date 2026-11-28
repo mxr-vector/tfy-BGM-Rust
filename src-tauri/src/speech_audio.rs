@@ -413,6 +413,48 @@ mod tests {
         }
     }
 
+    /// 用户导入的常见音频容器都应能转成参考音色要求的 16 kHz 单声道 PCM16 WAV。
+    #[test]
+    fn common_audio_containers_are_normalized_to_16k_mono() {
+        let Some(ffmpeg) = ffmpeg_path() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.wav");
+        let samples: Vec<f32> = (0..16_000 * 6)
+            .map(|index| (index as f32 * 0.11).sin() * 0.2)
+            .collect();
+        crate::separation::write_wav16_slices(&source, &[&samples], 16_000).unwrap();
+        for (name, codec) in [
+            ("ref.flac", ["-c:a", "flac"]),
+            ("ref.mp3", ["-c:a", "libmp3lame"]),
+            ("ref.ogg", ["-c:a", "libvorbis"]),
+            ("ref.m4a", ["-c:a", "aac"]),
+        ] {
+            let target = dir.path().join(name);
+            let output = quiet_command(&ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+                .arg(&source)
+                .args(codec)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{name} 转码失败：{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let prepared = prepare_reference(&std::fs::read(&target).unwrap())
+                .unwrap_or_else(|error| panic!("{name} 应被接受：{error:#}"));
+            let reference = read_reference(&prepared).unwrap();
+            assert!(
+                (80_000..=240_000).contains(&reference.len()),
+                "{name} 归一化后时长异常：{} 帧",
+                reference.len()
+            );
+        }
+    }
+
     #[test]
     fn polishing_trims_silence_and_zeroes_both_edges() {
         let mut samples = vec![0.0; 4_800];

@@ -130,22 +130,7 @@ impl Native {
         let mut config: sys::OfflineTtsConfig = unsafe { std::mem::zeroed() };
         config.model.provider = c"cuda".as_ptr();
         config.max_num_sentences = 3;
-        config.model.kokoro.length_scale = 1.0;
         match init {
-            Init::Kokoro {
-                model,
-                voices,
-                tokens,
-                lexicon,
-                threads,
-            } => {
-                config.model.num_threads = threads;
-                let kokoro = &mut config.model.kokoro;
-                kokoro.model = strings.push(model, "Kokoro model")?;
-                kokoro.voices = strings.push(voices, "Kokoro voices")?;
-                kokoro.tokens = strings.push(tokens, "Kokoro tokens")?;
-                kokoro.lexicon = strings.push(lexicon, "Kokoro lexicon")?;
-            }
             Init::ZipVoice {
                 tokens,
                 encoder,

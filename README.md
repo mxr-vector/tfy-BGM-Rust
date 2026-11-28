@@ -7,8 +7,9 @@
 支持 **mp3 / m4a / flac / wav / ogg**，切歌可交叉淡入淡出，同一路音乐可同时送到多个输出设备并独立调音量。
 
 字幕工作流先分离人声与伴奏，再仅对分离后的人声轨调用 ASR，产出可编辑的 **SRT / LRC**，
-并以透明置顶窗口逐词显示桌面歌词。文生语音用 **CosyVoice3 / Kokoro / ZipVoice** 在本机合成口播，
-支持文本 / LRC / SRT 导入、内置音色与 5–15 秒参考音频的零样本克隆，结果可导出 WAV。
+并以透明置顶窗口逐词显示桌面歌词。文生语音可用 **Edge 在线朗读**（免下载、多语言音色），
+或用 **CosyVoice3 / ZipVoice** 在本机合成口播，支持文本 / LRC / SRT 导入、内置音色与
+5–15 秒参考音频的零样本克隆，结果可导出 WAV。
 
 曲库工具另有 **音频指纹去重** 与 **以声搜声**（本地 Chromaprint 指纹，绝不上传网络），
 以及从网易云 / QQ 音乐 / 汽水音乐导出歌单的 **歌单迁移**。另提供本机 HTTP 接口
@@ -57,11 +58,11 @@
 
 ![文生语音：合成文本、CosyVoice3 零样本克隆与本地离线渲染](assets/text2tts.webp)
 
-- 三种引擎按场景选择：**CosyVoice3**（`Fun-CosyVoice3-0.5B-2512`，零样本克隆，24 kHz）、**Kokoro**（自然朗读，多音色、低延迟，INT8 147 MB / FP32 365 MB）、**ZipVoice**（5–15 秒参考音频克隆，另需 `vocos_24khz.onnx`，INT8 109 MB / FP32 478 MB）。
+- 三种引擎按场景选择：**Edge 朗读**（Microsoft Edge 在线朗读，免下载模型，直接选用多语言音色，24 kHz）、**CosyVoice3**（`Fun-CosyVoice3-0.5B-2512`，零样本克隆，24 kHz）、**ZipVoice**（5–15 秒参考音频克隆，另需 `vocos_24khz.onnx`，INT8 109 MB / FP32 478 MB）。
 - 文本可直接粘贴，或「导入文本」解析 `txt` / `lrc` / `srt`：纯文本按句切分（每段 ≤180 字、≤3 句），LRC / SRT 保留时间轴，停顿补静音、超长句自动提速。
-- 克隆类引擎需参考音频（约 5–15 秒）及其逐字文本，可选内置音色或麦克风录制；音频统一归一化为 16 kHz 单声道再送入模型。
+- 克隆类引擎需参考音频（约 5–15 秒）及其逐字文本，可选内置音色、麦克风录制，或导入 **wav / mp3 / flac / ogg / m4a** 等常见音频文件；导入后会统一转码为 **16 kHz 单声道 PCM16 WAV**（ffmpeg 解码 + 响度归一化），并校验 5–15 秒时长。导入文件没有已知逐字稿，需手动填写对应文字。Edge 朗读不需要参考音频，按所选音色直接合成。
 - 「生成声音」按段串行合成并实时显示进度，完成后可试听并 **导出 WAV**（默认 `合成语音.wav`），结果缓存在应用缓存目录，按 LRU 限制 8 个 / 512 MB。
-- 不流式：整段 WAV 就绪后才可播放；CUDA 可用时自动加速，推理失败则回退 CPU 重试当前段。
+- 不流式：整段 WAV 就绪后才可播放；本地引擎在 CUDA 可用时自动加速，推理失败则回退 CPU 重试当前段。Edge 朗读需要联网，合成文本会发送到 Microsoft 在线服务。
 
 ### 桌面歌词
 
@@ -118,7 +119,7 @@
 | **节目单** | 每日时段编排、逐曲起止时间、拖拽排序、自动排期；重叠拦截与到点执行 |
 | **歌曲详情** | 正在播放页；歌词 / 详情双标签展示分类、艺术家、专辑、格式与音频状态，索引后补充 BPM / 调性 / 综合响度 / 真峰值；内置音频诊断、字幕生成、A/B 循环与导出入口 |
 | **字幕生成** | 人声分离 → 仅识别人声轨 → SRT / LRC；记录检索、分段 / 原文编辑、分离交付文件 |
-| **文生语音** | CosyVoice3 零样本克隆 / Kokoro 自然朗读 / ZipVoice 声音克隆；文本 / LRC / SRT 导入，内置或录制参考音色，导出 WAV |
+| **文生语音** | Edge 在线朗读 / CosyVoice3 零样本克隆 / ZipVoice 声音克隆；文本 / LRC / SRT 导入，内置或录制参考音色，导出 WAV |
 | **桌面歌词** | 透明置顶、逐词混色、已唱标记提前；字体 / 字号 / 颜色 / 窗口尺寸可调 |
 | **音频导出** | 默认 -14 LUFS 归一化，四档目标；ffmpeg 两遍 `loudnorm`；失败回退源格式复制并说明原因 |
 | **可视化诊断** | 整曲波形、72 段频谱、LUFS / 峰值仪表、削波与相位相关、可用性结论 |
@@ -142,9 +143,9 @@
 
 ### 文生语音流程
 
-- 三种引擎共用「文本预处理 → 按段合成 → 拼装 WAV」流程：CosyVoice3 走独立 Python 子进程（ONNX），Kokoro / ZipVoice 走 sherpa-onnx。
+- 三种引擎共用「文本预处理 → 按段合成 → 拼装 WAV」流程：CosyVoice3 走独立 Python 子进程（ONNX），ZipVoice 走 sherpa-onnx，Edge 朗读走 Microsoft 在线服务（MP3 由纯 Rust 解码为 24 kHz PCM）。
 - 纯文本按标点切句（≤180 字、≤3 句/段）；LRC / SRT 按时间轴分段，段间空档补静音、超长句提高语速以对齐时间。
-- 克隆类引擎需参考音频（5–15 秒）及逐字文本，可选内置音色或现场录制；统一重采样到 16 kHz 单声道后送入模型。
+- 克隆类引擎需参考音频（5–15 秒）及逐字文本，可选内置音色或现场录制；统一重采样到 16 kHz 单声道后送入模型。Edge 朗读按所选在线音色直接合成，语速由同一套「超长句提速」参数换算为 `+N%`。
 - 合成结果按内容哈希缓存到应用缓存目录（LRU 8 个 / 512 MB），避免重复推理；导出时另存为 WAV 并做电平归一化。
 - 不流式：整段完成才可播放；CUDA 首次失败后在 CPU 重试当前段，已完成的段不重发。
 
@@ -218,7 +219,7 @@
 tfy-bgm.exe ──┬─ 曲库扫描 / 文件监听 ──▶ LibrarySnapshot ──IPC──▶ Vue 3 界面
               ├─ 节目单调度 ──▶ 节目歌曲 + 音量
               ├─ 字幕：ffmpeg → 分离子进程 → ASR → SRT / LRC
-              ├─ 文生语音：CosyVoice3 / Kokoro / ZipVoice → WAV
+              ├─ 文生语音：Edge 在线朗读 / CosyVoice3 / ZipVoice → WAV
               ├─ 音频指纹：Chromaprint → 去重 / 以声搜声（本地）
               ├─ 本机 HTTP API（127.0.0.1:8737）◀──▶ OBS / Stream Deck / 脚本
               └─ bgm/<分类>/*.{mp3,m4a,flac,wav,ogg}（安装版内置，绿色版外置）
@@ -269,7 +270,7 @@ ASR 推理由 [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/rust-api/index.
 
 ### TTS 语音模型
 
-- 三种引擎在「模型」分组中按需下载，安装到模型目录的 `tts/` 子目录：**CosyVoice3**（`Fun-CosyVoice3-0.5B-2512`，ONNX + Python 运行时）、**Kokoro**（INT8 147 MB / FP32 365 MB）、**ZipVoice**（INT8 109 MB / FP32 478 MB，另需 `vocos_24khz.onnx`）。
+- 本地引擎在「模型」分组中按需下载，安装到模型目录的 `tts/` 子目录：**CosyVoice3**（`Fun-CosyVoice3-0.5B-2512`，ONNX + Python 运行时）、**ZipVoice**（INT8 109 MB / FP32 478 MB，另需 `vocos_24khz.onnx`）。**Edge 朗读**为在线引擎，不占用模型目录，也不需要安装步骤。
 - 切换引擎无需重启；未安装时「生成声音」不可用并提示下载。CosyVoice3 首次加载会准备托管 Python 环境，之后可在顶部「安装 GPU 环境」启用 CUDA。
 - 「GPU 推理环境」通过可配置的 PyPI / PyTorch 镜像安装 `torch 2.3.1 + torchaudio 2.3.1 + onnxruntime 1.23.2`（约 2 GB），支持切换镜像源与一键删除；删除只清缓存与虚拟环境，不动模型文件。建议显存 8 GB 以上再启用。
 
@@ -281,9 +282,9 @@ ASR 推理由 [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/rust-api/index.
 | :--- | :--- |
 | `TFY_SPEECH_DEVICE=auto`（默认）或 `cpu` | `auto` 在运行时已配置且显存达标时优先尝试 NVIDIA CUDA；`cpu` 跳过探测，强制 CPU。 |
 | `TFY_ASR_MIN_VRAM_MIB` | Qwen3 空闲显存门槛，默认 4096 MiB。 |
-| `TFY_TTS_MIN_VRAM_MIB` | Kokoro / ZipVoice 默认 2048 MiB，CosyVoice3 默认 6144 MiB。 |
+| `TFY_TTS_MIN_VRAM_MIB` | ZipVoice 默认 2048 MiB，CosyVoice3 默认 6144 MiB。 |
 | `TFY_ASR_CPU_THREADS` | ASR 线程数，可在 1 到 `min(4, 可用逻辑核数)` 之间调优，默认上限。 |
-| `TFY_SHERPA_CUDA_DIR` | Sherpa CUDA 归档解压后的绝对目录，用于 Qwen3、Kokoro 和 ZipVoice。 |
+| `TFY_SHERPA_CUDA_DIR` | Sherpa CUDA 归档解压后的绝对目录，用于 Qwen3 和 ZipVoice。 |
 | `TFY_COSYVOICE_CUDA_PYTHON` | 单独安装的 CosyVoice Python 3.11 环境中解释器的绝对路径。该环境应与应用托管环境使用同一套 CosyVoice Python 依赖，仅将 `onnxruntime` 替换为兼容 CUDA 12 / cuDNN 9 的 `onnxruntime-gpu`，不要在应用托管的 CPU 环境中替换。 |
 
 Sherpa CUDA 可选附件使用 [v2.0.1 发布页](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.1) 的 CUDA 12.x / cuDNN 9.x / ORT 1.28.2 x64 包（Windows 约 597 MB，Linux 约 394 MB）。两平台均需正常工作的 NVIDIA 驱动和 `nvidia-smi`，另需可解析的 CUDA 12 / cuDNN 9 运行库（包括 cuBLAS、cuFFT 和 cuRAND）。Windows 可把依赖 DLL 放在 CUDA 附件的 `lib` 下、与该附件的 ORT DLL 同目录；不要放到应用目录。Linux 确保依赖在系统的动态库搜索路径或启动时指定的 `LD_LIBRARY_PATH` 中。默认安装包不包含 CUDA 附件、不要求安装 CUDA SDK；未配置时保持 CPU。AMD/Intel、无可测显存、未提供 CUDA 运行时均使用 CPU。Windows 旧的 DirectML 自动选择已取消。
@@ -300,7 +301,7 @@ Windows x64 用户可以先下载 CosyVoice3，再到「设置 → 模型」顶�
 
 ```bash
 python scripts/bench-speech.py --gpu --resources asr-resources.json "$EXE" asr "$ASR_MODEL" vocals-16k.wav 1 5 asr.json
-python scripts/bench-speech.py --gpu --resources tts-resources.json "$EXE" tts "$MODELS" kokoro-int8 "$CACHE" texts.txt out.wav 1 5 tts.json
+python scripts/bench-speech.py --gpu --resources tts-resources.json "$EXE" tts "$MODELS" zipvoice-int8 "$CACHE" texts.txt out.wav 1 5 tts.json
 ```
 
 `texts.txt` 每行一段；CosyVoice3 / ZipVoice 命令把模型 ID 换掉，并在报告文件名后追加参考 WAV 路径及其完整文本。用 `--speech-bench --help` 查看参数。`asr` 复用字幕分段规则，只计已分离的单声道 WAV，不包含人声分离；`asr-whole` 识别整段。TTS 不流式输出可播放音频，报告的首段完成时间不是首包，完整 WAV 就绪才可播放。`--gpu` 记录整卡利用率和显存峰值（含其它进程），可选 `psutil` 记录进程树 CPU 秒数和 RSS。检查报告中的 `device`，不把回退后的 CPU 时间算作 CUDA 成绩。回退测试可在 `auto` 下把两个显存阈值设为 `999999`，再用缺少 CUDA 依赖的附件复测；两种情况下均应有有效 CPU 输出。
@@ -310,12 +311,12 @@ python scripts/bench-speech.py --gpu --resources tts-resources.json "$EXE" tts "
 | 平台 / 模型 | CPU P50 / P95 | CUDA P50 / P95 | CPU / CUDA 首段 P50 |
 | :--- | ---: | ---: | ---: |
 | Windows Qwen3 INT8 | 1.81 / 1.82 | 3.08 / 3.84 | 不适用 |
-| Windows Kokoro INT8 | 4.53 / 5.51 | 4.80 / 5.74 | 2.34 / 2.42 |
 | Windows CosyVoice3 | 12.49 / 12.90 | 2.22 / 2.27 | 5.69 / 1.05 |
 | WSL2 Linux Qwen3 INT8 | 3.94 / 4.62 | 3.84 / 3.92 | 不适用 |
-| WSL2 Linux Kokoro INT8 | 3.09 / 3.19 | 2.75 / 4.11 | 1.63 / 1.41 |
 
-Windows 样本中 Qwen3 和 Kokoro 的 CUDA 总耗时未改善；INT8 模型的算子覆盖、CPU/GPU 数据搬运和子进程通信都可能影响结果，尚未做逐算子归因。Qwen3 两个后端的分段时间相同，转写有两字不同；CosyVoice3 产出同为 24 kHz，音频时长约 5.01 / 4.89 秒，未做正式听测。WSL2 不替代原生 Linux 桌面验收。
+Windows 样本中 Qwen3 的 CUDA 总耗时未改善；INT8 模型的算子覆盖、CPU/GPU 数据搬运和子进程通信都可能影响结果，尚未做逐算子归因。Qwen3 两个后端的分段时间相同，转写有两字不同；CosyVoice3 产出同为 24 kHz，音频时长约 5.01 / 4.89 秒，未做正式听测。WSL2 不替代原生 Linux 桌面验收。
+
+Edge 朗读是联网合成，不使用本地推理设备，因此不参与上述 CPU / CUDA 对照；它的验收方式是联网请求一次完整合成，确认返回 24 kHz 音频且能拼装成 WAV。
 
 ### 应用配置 config.json
 
@@ -807,7 +808,8 @@ cargo check --workspace                # 需要 WebKitGTK 等系统依赖
 
 | 项目 / 资源 | 说明 |
 | :--- | :--- |
-| [sherpa-onnx](https://csukuangfj.github.io/sherpa/onnx/index.html) | 端侧语音框架，为 ASR 与 Kokoro / ZipVoice 语音合成提供 ONNX 推理能力 |
+| [sherpa-onnx](https://csukuangfj.github.io/sherpa/onnx/index.html) | 端侧语音框架，为 ASR 与 ZipVoice 语音合成提供 ONNX 推理能力 |
+| [edge-tts](https://github.com/rany2/edge-tts) / [edge-tts-rust](https://github.com/initsnow/edge-tts-rust) | Microsoft Edge 在线朗读协议与 Rust 客户端，为免下载的多语言朗读提供合成能力 |
 | [CosyVoice3 · 通义千问语音实验室](https://github.com/FunAudioLLM/CosyVoice) | 本地零样本语音合成与声音克隆，支持自然、富有表现力的口播生成 |
 | [哲风壁纸](https://haowallpaper.com/) | 为界面预览与壁纸设计提供视觉灵感 |
 | [PlaylistAggregatorLite](https://github.com/BabaBoyGegeBoy/PlaylistAggregatorLite) | 云平台歌单聚合与迁移参考，助力跨平台整理收藏的音乐灵感 |

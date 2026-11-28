@@ -7,14 +7,16 @@ import { toast } from '@/lib/toast';
 export interface TtsModel {
   id: string;
   name: string;
-  family: 'Kokoro' | 'ZipVoice' | 'CosyVoice3';
+  family: TtsFamily;
   package: string;
   recommended: boolean;
+  /** 在线引擎：无需下载，也不占用模型目录。 */
+  online: boolean;
   sizeBytes: number;
   installed: boolean;
   hasFiles: boolean;
   loaded: boolean;
-  device: 'cpu' | 'cuda' | null;
+  device: 'cpu' | 'cuda' | 'cloud' | null;
   gpuEnvironmentReady: boolean | null;
   gpuEnvironmentPresent: boolean;
   path: string;
@@ -25,10 +27,13 @@ export interface TtsModel {
   /** 用户按模型覆盖的下载源；空表示使用默认。 */
   customDownloadUrl: string;
 }
+/** `EdgeTTS` 走在线朗读，其余为本地模型。 */
+export type TtsFamily = 'EdgeTTS' | 'ZipVoice' | 'CosyVoice3';
 interface TtsDownloadProgress { jobId: string; id: string; file: string; received: number; total: number }
 export interface TtsLoadProgress { jobId: string; stage: string }
 export interface TtsJob { id: string; cancelled: boolean; finished: boolean }
-export type TtsFamily = TtsModel['family'];
+/** `list_edge_voices` 返回的在线音色。 */
+export interface EdgeVoice { name: string; locale: string; gender: string; friendlyName: string }
 
 export const ttsScriptText = ref('');
 export const ttsScriptFormat = ref<'txt' | 'lrc' | 'srt'>('txt');
@@ -36,6 +41,27 @@ export const ttsModels = ref<TtsModel[]>([]);
 export const ttsModelsLoading = ref(false);
 export const ttsPreferredFamily = ref<TtsFamily | null>(null);
 export const ttsPreferredModelIds = ref<Partial<Record<TtsFamily, string>>>({});
+/** Edge 在线朗读的可用音色；首次进入页面时按需拉取。 */
+export const edgeVoices = ref<EdgeVoice[]>([]);
+export const edgeVoicesLoading = ref(false);
+let edgeVoicesRequest: Promise<void> | null = null;
+
+export function refreshEdgeVoices(force = false): Promise<void> {
+  if (!force && edgeVoices.value.length > 0) return Promise.resolve();
+  if (edgeVoicesRequest) return edgeVoicesRequest;
+  edgeVoicesRequest = (async () => {
+    edgeVoicesLoading.value = true;
+    try {
+      edgeVoices.value = await invoke<EdgeVoice[]>(COMMANDS.listEdgeVoices);
+    } catch (error) {
+      toast(`读取 Edge 在线音色失败：${normalizeError(error)}`, 'error');
+    } finally {
+      edgeVoicesLoading.value = false;
+      edgeVoicesRequest = null;
+    }
+  })();
+  return edgeVoicesRequest;
+}
 export const ttsDownloadProgress = ref<TtsDownloadProgress | null>(null);
 export const ttsDownloadPercent = computed(() => ttsDownloadProgress.value && ttsDownloadProgress.value.total > 0
   ? Math.round(ttsDownloadProgress.value.received / ttsDownloadProgress.value.total * 100) : 0);

@@ -23,13 +23,6 @@ pub(crate) enum Init {
         dir: PathBuf,
         threads: u32,
     },
-    Kokoro {
-        model: String,
-        voices: String,
-        tokens: String,
-        lexicon: String,
-        threads: i32,
-    },
     ZipVoice {
         tokens: String,
         encoder: String,
@@ -162,6 +155,8 @@ pub(crate) struct Worker {
     replies: Option<Receiver<Result<(Reply, Vec<f32>)>>>,
     threads: Vec<JoinHandle<()>>,
     pub sample_rate: u32,
+    /// 音色数量：ZipVoice 不使用 sid，但 Ready 帧仍按同一协议回传。
+    #[allow(dead_code)]
     pub speakers: i32,
 }
 

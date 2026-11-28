@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::tts::check_cancelled;
 use bgm_core::prefs::{
     DEFAULT_TTS_DOWNLOAD_URL, DEFAULT_TTS_MIRROR_URL, DEFAULT_TTS_RELEASE_URL,
-    TTS_COSYVOICE_MODEL_ID, TTS_SHERPA_MODEL_IDS,
+    TTS_COSYVOICE_MODEL_ID, TTS_EDGE_MODEL_ID, TTS_SHERPA_MODEL_IDS,
 };
 
 pub const DIR: &str = "tts";
@@ -43,6 +43,8 @@ pub struct TtsModel {
     pub package: &'static str,
     pub size_bytes: u64,
     pub recommended: bool,
+    /// 在线引擎：无需下载，也不占用模型目录。
+    pub online: bool,
     pub installed: bool,
     pub has_files: bool,
     pub loaded: bool,
@@ -59,15 +61,6 @@ pub struct TtsModel {
 }
 
 impl TtsModel {
-    pub fn acoustic_file(&self) -> &'static str {
-        let dir = Path::new(&self.path);
-        if self.id.ends_with("int8") && present(dir, "model.int8.onnx") {
-            "model.int8.onnx"
-        } else {
-            "model.onnx"
-        }
-    }
-
     pub fn zipvoice_files(&self) -> (&'static str, &'static str) {
         if self.id.ends_with("int8") {
             ("encoder.int8.onnx", "decoder.int8.onnx")
@@ -77,28 +70,17 @@ impl TtsModel {
     }
 
     fn complete(&self) -> bool {
+        if self.online {
+            return true;
+        }
         let dir = Path::new(&self.path);
         if self.family == "CosyVoice3" {
             return cosyvoice_complete(dir);
         }
-        let required = if self.family == "Kokoro" {
-            [
-                self.acoustic_file(),
-                "voices.bin",
-                "tokens.txt",
-                "lexicon-us-en.txt",
-                "lexicon-zh.txt",
-            ]
-            .as_slice()
+        let (encoder, decoder) = self.zipvoice_files();
+        [encoder, decoder, "tokens.txt", "lexicon.txt"]
             .iter()
             .all(|name| present(dir, name))
-        } else {
-            let (encoder, decoder) = self.zipvoice_files();
-            [encoder, decoder, "tokens.txt", "lexicon.txt"]
-                .iter()
-                .all(|name| present(dir, name))
-        };
-        required
     }
 }
 
@@ -109,12 +91,13 @@ struct Spec {
     package: &'static str,
     hash: &'static str,
     size: u64,
+    /// 在线引擎没有本地文件，安装即视为已完成。
+    online: bool,
 }
 pub(crate) const COSYVOICE_ID: &str = TTS_COSYVOICE_MODEL_ID;
-const KOKORO_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[0];
-const KOKORO_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[1];
-const ZIPVOICE_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[2];
-const ZIPVOICE_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[3];
+pub(crate) const EDGE_ID: &str = TTS_EDGE_MODEL_ID;
+const ZIPVOICE_INT8_ID: &str = TTS_SHERPA_MODEL_IDS[0];
+const ZIPVOICE_FP32_ID: &str = TTS_SHERPA_MODEL_IDS[1];
 const COSYVOICE_ONNX_REPO: &str = "zhangluoyang/cosyvoice3-onnx";
 const COSYVOICE_ONNX_REV: &str = "4e43c04c7bb86d5551da5bc7dc912f3c326ffe30";
 const COSYVOICE_OFFICIAL_REPO: &str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512";
@@ -226,28 +209,22 @@ const COSYVOICE_SIZE: u64 = {
 
 const SPECS: &[Spec] = &[
     Spec {
+        id: EDGE_ID,
+        name: "Microsoft Edge 在线朗读",
+        family: "EdgeTTS",
+        package: "",
+        hash: "",
+        size: 0,
+        online: true,
+    },
+    Spec {
         id: COSYVOICE_ID,
         name: "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
         family: "CosyVoice3",
         package: "cosyvoice3",
         hash: "",
         size: COSYVOICE_SIZE,
-    },
-    Spec {
-        id: KOKORO_INT8_ID,
-        name: "Kokoro · INT8",
-        family: "Kokoro",
-        package: "kokoro-int8-multi-lang-v1_1.tar.bz2",
-        hash: "259c9c8bc906d6078e4e0570421885dabb68b539c2f970fcbb890a58eeaf3e9c",
-        size: 147_052_523,
-    },
-    Spec {
-        id: KOKORO_FP32_ID,
-        name: "Kokoro · FP32",
-        family: "Kokoro",
-        package: "kokoro-multi-lang-v1_1.tar.bz2",
-        hash: "b78e1ac42b852e839cceaafbe88f66806bf5860992d1d7b9a3f2ad1198427aed",
-        size: 364_855_331,
+        online: false,
     },
     Spec {
         id: ZIPVOICE_INT8_ID,
@@ -256,6 +233,7 @@ const SPECS: &[Spec] = &[
         package: "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2",
         hash: "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803",
         size: 109_162_785,
+        online: false,
     },
     Spec {
         id: ZIPVOICE_FP32_ID,
@@ -264,6 +242,7 @@ const SPECS: &[Spec] = &[
         package: "sherpa-onnx-zipvoice-distill-fp32-zh-en-emilia.tar.bz2",
         hash: "3b6729d03bf4ba64deeec113048bdbbe55dbc30580b609be76342e0099fd23a8",
         size: 477_800_463,
+        online: false,
     },
 ];
 
@@ -286,8 +265,11 @@ fn spec(id: &str) -> Result<&'static Spec> {
 }
 
 /// 默认地址：浏览地址用于「访问下载源」，安装基址用于编辑占位与镜像校验。
+/// 在线引擎没有可下载的文件，两者都为空。
 fn default_urls(spec: &Spec) -> (&'static str, &'static str) {
-    if spec.family == "CosyVoice3" {
+    if spec.online {
+        ("", "")
+    } else if spec.family == "CosyVoice3" {
         (DEFAULT_TTS_DOWNLOAD_URL, DEFAULT_TTS_DOWNLOAD_URL)
     } else {
         (DEFAULT_TTS_RELEASE_URL, DEFAULT_TTS_MIRROR_URL)
@@ -307,28 +289,35 @@ fn entry(spec: &Spec, dir: &Path) -> TtsModel {
         package: spec.package,
         size_bytes: spec.size,
         recommended: spec.id == COSYVOICE_ID,
-        installed: false,
-        has_files: dir.is_dir(),
+        online: spec.online,
+        installed: spec.online,
+        has_files: !spec.online && dir.is_dir(),
         loaded: false,
         device: None,
         gpu_environment_ready: None,
         gpu_environment_present: false,
-        path: dir.to_string_lossy().into_owned(),
+        path: if spec.online {
+            String::new()
+        } else {
+            dir.to_string_lossy().into_owned()
+        },
         default_download_url: default_download_url.to_owned(),
         default_source_url: default_source_url.to_owned(),
         custom_download_url: String::new(),
     };
-    model.installed = model.complete()
-        && (spec.family != "ZipVoice"
-            || dir.parent().is_some_and(|root| {
-                AUXILIARY.iter().all(|(name, _, expected_hash, size)| {
-                    fs::metadata(root.join(name))
-                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == *size)
-                        && fs::read(root.join(name)).is_ok_and(|data| {
-                            format!("{:x}", Sha256::digest(data)) == *expected_hash
-                        })
-                })
-            }));
+    if !spec.online {
+        model.installed = model.complete()
+            && (spec.family != "ZipVoice"
+                || dir.parent().is_some_and(|root| {
+                    AUXILIARY.iter().all(|(name, _, expected_hash, size)| {
+                        fs::metadata(root.join(name))
+                            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == *size)
+                            && fs::read(root.join(name)).is_ok_and(|data| {
+                                format!("{:x}", Sha256::digest(data)) == *expected_hash
+                            })
+                    })
+                }));
+    }
     model
 }
 
@@ -336,15 +325,23 @@ fn package_dir(spec: &Spec) -> &str {
     spec.package.trim_end_matches(".tar.bz2")
 }
 
+fn model_dir(root: &Path, spec: &Spec) -> PathBuf {
+    if spec.online {
+        PathBuf::new()
+    } else {
+        root.join(DIR).join(package_dir(spec))
+    }
+}
+
 pub fn model(root: &Path, id: &str) -> Result<TtsModel> {
     let spec = spec(id)?;
-    Ok(entry(spec, &root.join(DIR).join(package_dir(spec))))
+    Ok(entry(spec, &model_dir(root, spec)))
 }
 
 pub fn catalog(root: &Path) -> Vec<TtsModel> {
     SPECS
         .iter()
-        .map(|spec| entry(spec, &root.join(DIR).join(package_dir(spec))))
+        .map(|spec| entry(spec, &model_dir(root, spec)))
         .collect()
 }
 
@@ -368,6 +365,9 @@ pub fn install(
 ) -> Result<()> {
     check_cancelled(token)?;
     let spec = spec(id)?;
+    if spec.online {
+        return Ok(());
+    }
     validate_source(id, source)?;
     let root = models_root.join(DIR);
     fs::create_dir_all(&root)?;
@@ -597,10 +597,16 @@ fn is_modelscope_repo(url: &reqwest::Url) -> bool {
 }
 
 /// 按模型校验下载源：CosyVoice3 只接受 ModelScope 仓库地址，
-/// Kokoro / ZipVoice 只接受可拼接文件名的 HTTP(S) 镜像目录。
+/// ZipVoice 只接受可拼接文件名的 HTTP(S) 镜像目录，在线引擎不接受任何下载源。
 pub fn validate_source(id: &str, source: &str) -> Result<()> {
     let spec = spec(id)?;
     let source = source.trim().trim_end_matches('/');
+    if spec.online {
+        if source.is_empty() {
+            return Ok(());
+        }
+        bail!("{} 是在线引擎，无需配置模型下载源", spec.name);
+    }
     if source.is_empty() {
         return Ok(());
     }
@@ -616,7 +622,7 @@ pub fn validate_source(id: &str, source: &str) -> Result<()> {
         return Ok(());
     }
     if is_modelscope_repo(&url) {
-        bail!("Kokoro / ZipVoice 下载源需为可直接拼接文件名的 HTTP(S) 镜像目录");
+        bail!("ZipVoice 下载源需为可直接拼接文件名的 HTTP(S) 镜像目录");
     }
     if url.path().contains("/releases/tag/") {
         bail!("请填写可直接下载的镜像目录，而不是 GitHub release 页面");
@@ -883,8 +889,9 @@ mod tests {
 
     #[test]
     fn spec_ids_match_core_constants() {
-        assert_eq!(SPECS.len(), 1 + TTS_SHERPA_MODEL_IDS.len());
+        assert_eq!(SPECS.len(), 2 + TTS_SHERPA_MODEL_IDS.len());
         assert!(SPECS.iter().any(|spec| spec.id == TTS_COSYVOICE_MODEL_ID));
+        assert!(SPECS.iter().any(|spec| spec.id == TTS_EDGE_MODEL_ID));
         for id in TTS_SHERPA_MODEL_IDS {
             assert!(SPECS.iter().any(|spec| spec.id == id), "缺少模型 {id}");
         }
@@ -896,12 +903,28 @@ mod tests {
         assert_eq!(browse, DEFAULT_TTS_DOWNLOAD_URL);
         assert_eq!(base, DEFAULT_TTS_DOWNLOAD_URL);
 
+        // 在线引擎不需要下载源，界面据此隐藏相关入口。
+        assert_eq!(default_urls_for(EDGE_ID).unwrap(), ("", ""));
+
         for id in TTS_SHERPA_MODEL_IDS {
             let (browse, base) = default_urls_for(id).unwrap();
             assert_eq!(browse, DEFAULT_TTS_RELEASE_URL);
             assert_eq!(base, DEFAULT_TTS_MIRROR_URL);
         }
         assert!(default_urls_for("unknown").is_err());
+    }
+
+    #[test]
+    fn online_engine_needs_no_model_files() {
+        let root = tempfile::tempdir().unwrap();
+        let model = model(root.path(), EDGE_ID).unwrap();
+        assert!(model.online);
+        assert!(model.installed);
+        assert!(!model.has_files);
+        assert!(model.path.is_empty());
+        assert_eq!(model.size_bytes, 0);
+        // 目录为空也保持「已安装」，界面因此不会给出下载按钮。
+        assert!(!root.path().join(DIR).exists());
     }
 
     #[test]
@@ -917,20 +940,24 @@ mod tests {
             .is_ok()
         );
 
-        assert!(validate_source(KOKORO_INT8_ID, "").is_ok());
-        assert!(validate_source(KOKORO_INT8_ID, "https://mirror.example.com/tts").is_ok());
-        assert!(validate_source(KOKORO_INT8_ID, "https://mirror.example.com/tts/").is_ok());
-        assert!(validate_source(KOKORO_INT8_ID, DEFAULT_TTS_DOWNLOAD_URL).is_err());
+        // 在线引擎只接受空下载源。
+        assert!(validate_source(EDGE_ID, "").is_ok());
+        assert!(validate_source(EDGE_ID, DEFAULT_TTS_MIRROR_URL).is_err());
+
+        assert!(validate_source(ZIPVOICE_INT8_ID, "").is_ok());
+        assert!(validate_source(ZIPVOICE_INT8_ID, "https://mirror.example.com/tts").is_ok());
+        assert!(validate_source(ZIPVOICE_INT8_ID, "https://mirror.example.com/tts/").is_ok());
+        assert!(validate_source(ZIPVOICE_INT8_ID, DEFAULT_TTS_DOWNLOAD_URL).is_err());
         assert!(
             validate_source(
-                KOKORO_INT8_ID,
-                "https://mirror.example.com/tts/kokoro.tar.bz2"
+                ZIPVOICE_INT8_ID,
+                "https://mirror.example.com/tts/zipvoice.tar.bz2"
             )
             .is_err()
         );
         assert!(
             validate_source(
-                KOKORO_INT8_ID,
+                ZIPVOICE_INT8_ID,
                 "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models"
             )
             .is_err()

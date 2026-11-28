@@ -11,10 +11,11 @@ import { toast } from '@/lib/toast';
 import { suspendPlayback } from '@/stores/audio-engine';
 import { openSettings } from '@/stores/settings';
 import {
-  cancelTtsInstall, cancelTtsJob, installTtsModel, openModelDownloadSource, refreshTtsModels,
+  cancelTtsInstall, cancelTtsJob, edgeVoices, edgeVoicesLoading, installTtsModel,
+  openModelDownloadSource, refreshEdgeVoices, refreshTtsModels,
   ttsDownloadPercent, ttsDownloadProgress, ttsInstallCancelling, ttsInstalling, ttsModelBusy,
   ttsModels, ttsModelsLoading, ttsPreferredFamily, ttsPreferredModelIds, ttsSynthesizing,
-  type TtsFamily, type TtsJob,
+  type EdgeVoice, type TtsFamily, type TtsJob,
 } from '@/stores/tts';
 
 interface BuiltinReference { audio: number[]; text: string | null }
@@ -25,13 +26,36 @@ const referenceModeOptions = [
   { value: 'custom', label: '麦克风录制' },
 ];
 const RECORDING_PROMPT = '心之所向，素履所往，生如逆旅，一苇以航。';
-interface SynthesisProgress { jobId: string; current: number; total: number; device: 'cpu' | 'cuda' }
+interface SynthesisProgress { jobId: string; current: number; total: number; device: 'cpu' | 'cuda' | 'cloud' }
 
-const families = ['CosyVoice3', 'Kokoro', 'ZipVoice'] as const;
+const families = ['EdgeTTS', 'CosyVoice3', 'ZipVoice'] as const;
+const familyLabels: Record<TtsFamily, string> = {
+  EdgeTTS: 'Edge 朗读',
+  CosyVoice3: 'CosyVoice3',
+  ZipVoice: 'ZipVoice',
+};
 const familyDescriptions: Record<TtsFamily, string> = {
+  EdgeTTS: '在线音色',
   CosyVoice3: '零样本克隆',
-  Kokoro: '自然朗读',
   ZipVoice: '声音克隆',
+};
+/** 常用语言的中文名；未列出的语言直接显示代码。 */
+const localeLabels: Record<string, string> = {
+  'zh-CN': '普通话',
+  'zh-HK': '粤语（中国香港）',
+  'zh-TW': '中国台湾',
+  'zh-MO': '中国澳门',
+  'en-US': '英语（美国）',
+  'en-GB': '英语（英国）',
+  'en-AU': '英语（澳大利亚）',
+  'ja-JP': '日语',
+  'ko-KR': '韩语',
+  'fr-FR': '法语',
+  'de-DE': '德语',
+  'es-ES': '西班牙语',
+  'ru-RU': '俄语',
+  'pt-BR': '葡萄牙语（巴西）',
+  'it-IT': '意大利语',
 };
 // Wait for a fresh catalog after entering the workspace, even if Settings populated the cache.
 const cachedCatalog = ttsModels.value;
@@ -39,26 +63,29 @@ const catalog = computed(() => ttsModels.value === cachedCatalog ? null : ttsMod
 const defaultModel = computed(() => {
   const models = catalog.value ?? [];
   return models.find(model => model.installed && model.recommended)
-    ?? models.find(model => model.installed && model.family === 'Kokoro')
+    ?? models.find(model => model.installed && model.family === 'EdgeTTS')
     ?? models.find(model => model.installed && model.family === 'ZipVoice')
     ?? models.find(model => model.installed)
     ?? models[0];
 });
-const family = computed(() => ttsPreferredFamily.value ?? defaultModel.value?.family ?? 'CosyVoice3');
+const family = computed(() => ttsPreferredFamily.value ?? defaultModel.value?.family ?? 'EdgeTTS');
 const synthesisProgress = ref<SynthesisProgress | null>(null);
 const synthesisModelId = ref('');
 const synthesisCancelling = ref(false);
 let synthesisJob: TtsJob | null = null;
 let disposed = false;
 const scriptEditor = useTemplateRef('scriptEditor');
-const voiceSearch = ref('');
-const voiceId = ref(3);
+const edgeVoice = ref('');
+const edgeVoiceSearch = ref('');
 const referenceText = ref('');
 const referenceAudio = ref<number[] | null>(null);
 const referenceMode = ref<ReferenceMode>('builtin');
 const builtinVoice = ref('');
 const builtinVoices = ref<string[]>([]);
 const referenceKind = ref('');
+/** 参考音频来自导入文件：逐字稿需要用户补填。 */
+const referenceFromFile = ref(false);
+const referenceFile = useTemplateRef<HTMLInputElement>('referenceFile');
 const referencePreviewUrl = ref('');
 const generating = ref(false);
 const recordingClip = ref(false);
@@ -78,6 +105,7 @@ const modelDeviceLabel = computed(() => {
   if (generating.value && synthesisModelId.value === modelId.value) {
     return synthesisProgress.value?.device?.toUpperCase() ?? '正在选择…';
   }
+  if (selectedModel.value?.online) return '在线';
   return selectedModel.value?.device?.toUpperCase() ?? '未加载';
 });
 const isReady = computed(() => Boolean(selectedModel.value));
@@ -85,33 +113,50 @@ const modelOptions = computed(() => installedModels.value
   .map(model => ({ value: model.id, label: model.recommended ? `${model.name} · 推荐` : model.name })));
 const modelEmptyTitle = computed(() => ttsModelsLoading.value
   ? '正在扫描本地模型…'
-  : catalog.value === null ? '无法读取模型列表，请刷新后重试' : `${family.value} 模型尚未安装`);
+  : catalog.value === null ? '无法读取模型列表，请刷新后重试' : `${familyLabels[family.value]} 模型尚未安装`);
 const modelHelp: Record<TtsFamily, string> = {
+  EdgeTTS: '调用 Microsoft Edge 在线朗读，无需下载模型，联网即可合成。',
   CosyVoice3: '首次加载会自动准备本地运行环境。',
-  Kokoro: '适合口播与知识讲解，支持多音色低延迟朗读。',
   ZipVoice: '支持以 5–15 秒参考音频及对应文本克隆声音。',
 };
-const voiceOptions = computed(() => voiceNames.map((name, id) => ({ value: String(id), label: `${name} · ${id < 3 ? '英' : '中'}` })));
-const visibleVoices = computed(() => voiceOptions.value.filter(voice => voice.value === String(voiceId.value)
-  || voice.label.toLowerCase().includes(voiceSearch.value.trim().toLowerCase())));
+const edgeVoiceOptions = computed(() => edgeVoices.value.map(voice => ({
+  value: voice.name,
+  label: edgeVoiceLabel(voice),
+})));
+const visibleEdgeVoices = computed(() => {
+  const keyword = edgeVoiceSearch.value.trim().toLowerCase();
+  return edgeVoiceOptions.value.filter(voice => voice.value === edgeVoice.value
+    || !keyword || voice.label.toLowerCase().includes(keyword));
+});
 const parsingForGeneration = ref(false);
 const generationBlocker = computed(() => {
   if (!isReady.value) return '请先安装并选择本地模型';
   if (ttsModelBusy.value) return '模型正在忙，请稍后再试';
-  if (captureActive.value || recordingClip.value) return '参考音频正在录制或处理';
+  if (family.value !== 'EdgeTTS' && (captureActive.value || recordingClip.value)) return '参考音频正在录制或处理';
   if (!scriptEditor.value?.hasText) return '请在左侧输入或导入合成文本';
-  if (family.value === 'ZipVoice' || family.value === 'CosyVoice3') {
-    if (!referenceAudio.value) return '请先载入或录制参考音色';
-    if (!referenceText.value.trim()) {
-      return referenceMode.value === 'builtin'
-        ? '该内置音色缺少配套逐字稿，请改用麦克风录制'
-        : '请录制参考音色';
-    }
+  if (family.value === 'EdgeTTS') {
+    if (edgeVoicesLoading.value && !edgeVoices.value.length) return '正在获取在线音色…';
+    if (!edgeVoice.value) return '请选择在线朗读音色';
+    return '';
+  }
+  if (!referenceAudio.value) return '请先载入或录制参考音色';
+  if (!referenceText.value.trim()) {
+    if (referenceFromFile.value) return '请填写导入音频中实际说出的文字';
+    return referenceMode.value === 'builtin'
+      ? '该内置音色缺少配套逐字稿，请改用麦克风录制'
+      : '请录制参考音色';
   }
   return '';
 });
 const canGenerate = computed(() => !generationBlocker.value && !parsingForGeneration.value && !generating.value);
-const voiceNames = `af_maple af_sol bf_vale zf_001 zf_002 zf_003 zf_004 zf_005 zf_006 zf_007 zf_008 zf_017 zf_018 zf_019 zf_021 zf_022 zf_023 zf_024 zf_026 zf_027 zf_028 zf_032 zf_036 zf_038 zf_039 zf_040 zf_042 zf_043 zf_044 zf_046 zf_047 zf_048 zf_049 zf_051 zf_059 zf_060 zf_067 zf_070 zf_071 zf_072 zf_073 zf_074 zf_075 zf_076 zf_077 zf_078 zf_079 zf_083 zf_084 zf_085 zf_086 zf_087 zf_088 zf_090 zf_092 zf_093 zf_094 zf_099 zm_009 zm_010 zm_011 zm_012 zm_013 zm_014 zm_015 zm_016 zm_020 zm_025 zm_029 zm_030 zm_031 zm_033 zm_034 zm_035 zm_037 zm_041 zm_045 zm_050 zm_052 zm_053 zm_054 zm_055 zm_056 zm_057 zm_058 zm_061 zm_062 zm_063 zm_064 zm_065 zm_066 zm_068 zm_069 zm_080 zm_081 zm_082 zm_089 zm_091 zm_095 zm_096 zm_097 zm_098 zm_100`.split(' ');
+
+function edgeVoiceLabel(voice: EdgeVoice): string {
+  const prefix = voice.name.split('-').slice(0, 2).join('-');
+  const short = voice.name.startsWith(`${prefix}-`) ? voice.name.slice(prefix.length + 1) : voice.name;
+  return [short || voice.name, localeLabels[voice.locale] ?? voice.locale, voice.gender === 'Female' ? '女' : voice.gender === 'Male' ? '男' : '']
+    .filter(Boolean)
+    .join(' · ');
+}
 const outputPlayer = ref<HTMLAudioElement | null>(null);
 const referencePlayer = ref<HTMLAudioElement | null>(null);
 let releasePlayback: (() => void) | undefined;
@@ -155,13 +200,20 @@ function resetReference(): void {
   referenceAudio.value = null;
   referenceText.value = '';
   referenceKind.value = '';
+  referenceFromFile.value = false;
 }
 
-function setReferenceAudio(audio: Uint8Array<ArrayBuffer>, label: string, transcript: string | null = null): void {
+function setReferenceAudio(
+  audio: Uint8Array<ArrayBuffer>,
+  label: string,
+  transcript: string | null = null,
+  fromFile = false,
+): void {
   resetReference();
   referenceAudio.value = Array.from(audio);
   referenceText.value = transcript ?? '';
   referenceKind.value = label;
+  referenceFromFile.value = fromFile;
   referencePreviewUrl.value = URL.createObjectURL(new Blob([audio], { type: 'audio/wav' }));
 }
 
@@ -172,7 +224,7 @@ async function loadBuiltinReference(): Promise<void> {
   const model = modelId.value;
   try {
     const reference = await invoke<BuiltinReference>(COMMANDS.loadTtsBuiltinReference, { voice });
-    if (disposed || family.value === 'Kokoro' || modelId.value !== model
+    if (disposed || family.value === 'EdgeTTS' || modelId.value !== model
       || referenceMode.value !== 'builtin' || builtinVoice.value !== voice) return;
     setReferenceAudio(Uint8Array.from(reference.audio), voice, reference.text);
     if (!reference.text) toast('该内置音色缺少配套逐字稿，无法用于声音克隆，请改用麦克风录制', 'error');
@@ -180,32 +232,55 @@ async function loadBuiltinReference(): Promise<void> {
   finally { recordingClip.value = false; }
 }
 
-async function acceptReference(blob: Blob, label: string): Promise<void> {
+async function acceptReference(blob: Blob, label: string, fromFile = false): Promise<void> {
   if (blob.size > 25 * 1024 * 1024) { toast('参考音频文件不能超过 25 MB', 'error'); return; }
   if (recordingClip.value) return;
   recordingClip.value = true;
   const model = modelId.value;
   try {
     const bytes = await blob.arrayBuffer();
-    if (!await checkClipDuration(bytes.slice(0))) return;
+    if (!await checkClipDuration(bytes.slice(0), fromFile)) return;
     if (disposed) return;
     const normalized = await invokeBinary<ArrayBuffer>(COMMANDS.normalizeTtsReference, bytes);
-    if (disposed || family.value === 'Kokoro' || modelId.value !== model || referenceMode.value !== 'custom') return;
-    setReferenceAudio(new Uint8Array(normalized), label, RECORDING_PROMPT);
-    toast('参考音频已响度归一化为 16 kHz 单声道', 'success');
+    if (disposed || family.value === 'EdgeTTS' || modelId.value !== model || referenceMode.value !== 'custom') return;
+    // 导入的文件不知道说了什么，留空让用户补逐字稿；录音则用固定参考句。
+    setReferenceAudio(new Uint8Array(normalized), label, fromFile ? '' : RECORDING_PROMPT, fromFile);
+    toast(fromFile
+      ? '已转为 16 kHz 单声道，请补全这段音频对应的文字'
+      : '参考音频已响度归一化为 16 kHz 单声道', 'success');
   } catch (error) { toast(`参考音频不可用：${normalizeError(error)}`, 'error'); }
   finally { recordingClip.value = false; }
 }
 
-async function checkClipDuration(bytes: ArrayBuffer): Promise<boolean> {
+async function checkClipDuration(bytes: ArrayBuffer, fromFile: boolean): Promise<boolean> {
   let context: AudioContext | undefined;
   try {
     context = new AudioContext();
     const audio = await context.decodeAudioData(bytes);
-    if (audio.duration < 5 || audio.duration > 15) { toast('参考录音必须在 5 到 15 秒之间，请重新录制', 'error'); return false; }
+    if (audio.duration < 5 || audio.duration > 15) {
+      toast(fromFile ? '音频时长必须在 5 到 15 秒之间' : '参考录音必须在 5 到 15 秒之间，请重新录制', 'error');
+      return false;
+    }
     return true;
-  } catch { toast('无法解码参考录音，请检查麦克风后重录', 'error'); return false; }
+  } catch {
+    toast(fromFile ? '无法解码该音频文件，请换用 wav / mp3 / flac / ogg' : '无法解码参考录音，请检查麦克风后重录', 'error');
+    return false;
+  }
   finally { await context?.close().catch(() => undefined); }
+}
+
+function pickReferenceFile(): void {
+  if (recordingClip.value || generating.value || captureActive.value) return;
+  referenceFile.value?.click();
+}
+
+async function onReferenceFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 清空 value，允许连续导入同一个文件。
+  input.value = '';
+  if (!file) return;
+  await acceptReference(file, file.name, true);
 }
 
 function endCapture(): void {
@@ -255,10 +330,10 @@ async function generate(): Promise<void> {
   const request = {
     family: selectedFamily,
     modelId: modelId.value,
-    voiceId: voiceId.value,
+    voice: selectedFamily === 'EdgeTTS' ? edgeVoice.value : null,
     segments: editor.segments,
-    referenceAudio: selectedFamily !== 'Kokoro' ? referenceAudio.value : null,
-    referenceText: selectedFamily !== 'Kokoro' ? referenceText.value.trim() : null,
+    referenceAudio: selectedFamily === 'EdgeTTS' ? null : referenceAudio.value,
+    referenceText: selectedFamily === 'EdgeTTS' ? null : referenceText.value.trim(),
   };
   let unlisten: (() => void) | null = null;
   try {
@@ -273,7 +348,9 @@ async function generate(): Promise<void> {
     outputDuration.value = result.duration;
     outputFamily.value = selectedFamily;
     outputUrl.value = assetUrl(result.path);
-    toast('语音已优化响度，并保留模型原生采样率', 'success');
+    toast(selectedFamily === 'EdgeTTS'
+      ? '在线朗读已合成，并完成响度归一化'
+      : '语音已优化响度，并保留模型原生采样率', 'success');
   } catch (error) {
     if (!disposed && !job.cancelled) toast(`语音合成失败：${normalizeError(error)}`, 'error');
   } finally {
@@ -306,6 +383,14 @@ async function downloadOutput(): Promise<void> {
 }
 
 watch([family, modelId], resetReference);
+// 在线音色按需拉取，并在列表到达后选中一个默认的中文音色。
+watch(family, (value) => { if (value === 'EdgeTTS') void refreshEdgeVoices(); }, { immediate: true });
+watch(edgeVoices, (voices) => {
+  if (!voices.length) return;
+  if (!voices.some(voice => voice.name === edgeVoice.value)) {
+    edgeVoice.value = voices.find(voice => voice.name === 'zh-CN-XiaoxiaoNeural')?.name ?? voices[0].name;
+  }
+}, { immediate: true });
 watch([modelId, builtinVoice, referenceMode], ([selectedModel, , mode]) => {
   if ((family.value === 'ZipVoice' || family.value === 'CosyVoice3') && selectedModel && mode === 'builtin' && !referenceAudio.value) {
     void loadBuiltinReference();
@@ -330,11 +415,11 @@ onBeforeUnmount(() => {
 <template>
   <section class="tts-page" aria-label="文生语音">
     <header class="tts-heading">
-      <div><span class="tts-overline">VOICE / LOCAL INFERENCE</span><h1>让文字，成为声音。</h1><p>稿件朗读与字幕配音，全程在本地完成。</p></div>
-      <button type="button" class="tts-action" @click="refreshTtsModels"><Icon name="refresh" />刷新本地模型</button>
+      <div><span class="tts-overline">VOICE / EDGE &amp; LOCAL</span><h1>让文字，成为声音。</h1><p>稿件朗读与字幕配音：Edge 在线音色，或本地克隆模型。</p></div>
+      <button type="button" class="tts-action" @click="refreshTtsModels"><Icon name="refresh" />刷新模型列表</button>
     </header>
 
-    <nav class="tts-tabs" aria-label="TTS 模型">
+    <nav class="tts-tabs" aria-label="TTS 引擎">
       <button
         v-for="item in families"
         :key="item"
@@ -344,7 +429,7 @@ onBeforeUnmount(() => {
         :disabled="captureActive || recordingClip"
         @click="ttsPreferredFamily = item"
       >
-        {{ item }}<span>{{ familyDescriptions[item] }}</span>
+        {{ familyLabels[item] }}<span>{{ familyDescriptions[item] }}</span>
       </button>
     </nav>
 
@@ -353,11 +438,11 @@ onBeforeUnmount(() => {
 
       <div class="tts-side">
         <section class="tts-card tts-voice-card">
-          <div class="tts-card-heading"><div><span class="tts-overline">VOICE PALETTE</span><h2>{{ family === 'Kokoro' ? '挑选朗读声音' : family === 'CosyVoice3' ? 'CosyVoice3 零样本克隆' : '选择克隆音色' }}</h2></div><span class="tts-native">模型原生采样率</span></div>
+          <div class="tts-card-heading"><div><span class="tts-overline">VOICE PALETTE</span><h2>{{ family === 'EdgeTTS' ? '挑选在线朗读声音' : family === 'CosyVoice3' ? 'CosyVoice3 零样本克隆' : '选择克隆音色' }}</h2></div><span class="tts-native">{{ family === 'EdgeTTS' ? '24 kHz 在线音频' : '模型原生采样率' }}</span></div>
           <div v-if="isReady" class="tts-field">
-            <span>本地模型</span>
-            <AppSelect :model-value="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择已安装的 TTS 模型" @update:model-value="selectModel" />
-            <span class="tts-native tts-device" role="status">推理设备 · {{ modelDeviceLabel }}</span>
+            <span>{{ family === 'EdgeTTS' ? '朗读引擎' : '本地模型' }}</span>
+            <AppSelect :model-value="modelId" :options="modelOptions" :disabled="captureActive || recordingClip" label="选择 TTS 引擎" @update:model-value="selectModel" />
+            <span class="tts-native tts-device" role="status">{{ family === 'EdgeTTS' ? '服务状态' : '推理设备' }} · {{ modelDeviceLabel }}</span>
           </div>
           <template v-if="!isReady">
             <div class="tts-model-empty">
@@ -380,13 +465,15 @@ onBeforeUnmount(() => {
             <button type="button" class="tts-action" @click="openSettings('models')">前往模型管理</button>
           </template>
           <template v-else>
-            <template v-if="family === 'Kokoro'">
+            <template v-if="family === 'EdgeTTS'">
               <div class="tts-voice-picker">
-                <input v-model="voiceSearch" class="tts-search" type="search" placeholder="搜索音色或语言" aria-label="搜索声音" />
-                <AppSelect :model-value="String(voiceId)" :options="visibleVoices" label="选择语音" @update:model-value="voiceId = Number($event)" />
+                <input v-model="edgeVoiceSearch" class="tts-search" type="search" placeholder="搜索音色或语言" aria-label="搜索在线音色" />
+                <AppSelect :model-value="edgeVoice" :options="visibleEdgeVoices" :disabled="edgeVoicesLoading && !edgeVoices.length" label="选择在线朗读音色" @update:model-value="edgeVoice = $event" />
               </div>
             </template>
-            <p class="tts-voice-note">{{ family === 'Kokoro' ? 'Kokoro 适合口播、知识解说；自然语调、多语音、低延迟，适合长文本朗读。' : '内置音色附带逐字稿；麦克风录音请朗读下方参考句。' }}</p>
+            <p class="tts-voice-note">{{ family === 'EdgeTTS'
+              ? 'Edge 朗读由 Microsoft 在线服务合成，音色覆盖多语言、无需下载模型；合成文本会发送到在线服务。'
+              : '内置音色附带逐字稿；麦克风录音请朗读下方参考句，也可导入 5–15 秒的音频文件。' }}</p>
             <template v-if="family === 'ZipVoice' || family === 'CosyVoice3'">
               <div class="tts-field">
                 <span>参考来源</span>
@@ -400,12 +487,16 @@ onBeforeUnmount(() => {
                 <p v-else class="tts-reference-status">暂无内置参考音色，可切换到麦克风录制。</p>
               </template>
               <template v-else>
-                <blockquote class="tts-recording-prompt">{{ RECORDING_PROMPT }}</blockquote>
+                <blockquote v-if="!referenceFromFile" class="tts-recording-prompt">{{ RECORDING_PROMPT }}</blockquote>
                 <div class="tts-reference-actions">
                   <button type="button" class="tts-action" :disabled="recording.requesting.value || (recording.recording.value && !recording.canStop.value) || recordingClip || generating" @click="recording.recording.value ? recording.stop() : startCapture()">
                     <Icon :name="recording.recording.value ? 'check' : 'wave'" />
                     {{ recording.requesting.value ? '正在请求麦克风…' : recording.recording.value ? `结束录音 · ${formatTime(recording.elapsedMs.value / 1000)}` : recordingClip ? '正在处理参考音频…' : referenceAudio ? '重新录制音色' : '开始录制音色（5–15 秒）' }}
                   </button>
+                  <button type="button" class="tts-action" :disabled="recording.recording.value || recordingClip || generating" title="导入 wav / mp3 / flac / ogg 等音频，自动转为 16 kHz 单声道" @click="pickReferenceFile">
+                    <Icon name="upload" />导入音频
+                  </button>
+                  <input ref="referenceFile" class="tts-file-input" type="file" accept=".wav,.mp3,.flac,.ogg,.oga,.m4a,.opus,audio/*" aria-label="导入参考音频文件" @change="onReferenceFile" />
                 </div>
                 <div v-if="recording.recording.value" class="tts-recording-status" role="status" aria-live="polite">
                   <span class="tts-recording-dot" aria-hidden="true"></span>
@@ -419,7 +510,13 @@ onBeforeUnmount(() => {
                     <span :style="{ transform: `scaleX(${recording.inputLevel.value})` }"></span>
                   </div>
                 </div>
-                <p v-else class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? `${referenceKind} · 已录制` : '请安静环境录制清晰人声，录制满 5 秒后可结束，15 秒自动停止。' }}</p>
+                <template v-else>
+                  <label v-if="referenceFromFile" class="tts-reference-field">
+                    <span>参考文字</span>
+                    <textarea v-model="referenceText" rows="3" maxlength="1000" placeholder="请输入这段音频中实际说出的文字，需与音频逐字对应" aria-label="参考音频对应文字"></textarea>
+                  </label>
+                  <p class="tts-reference-status" :title="referenceKind">{{ recordingClip ? '正在处理参考音频…' : referenceAudio ? `${referenceKind} · ${referenceFromFile ? '已导入' : '已录制'}` : '可录制 5–15 秒人声，或导入 wav / mp3 / flac / ogg 音频。' }}</p>
+                </template>
               </template>
               <audio v-if="referencePreviewUrl" ref="referencePlayer" class="tts-voice-preview" :src="referencePreviewUrl" :controls="!captureActive" preload="none" aria-label="试听参考音频" @play="pauseCompetingAudio" />
               <p v-if="referenceAudio && referenceMode === 'builtin' && referenceText" class="tts-reference-status">已载入配套逐字稿</p>
@@ -432,14 +529,14 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section class="tts-card tts-render-card">
-          <div class="tts-card-heading"><div><span class="tts-overline">RENDER / WAV</span><h2>生成声音</h2></div><span class="tts-live-dot">LOCAL ONLY</span></div>
-          <p>在本机离线合成语音，可试听并导出 WAV。</p>
-          <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating || parsingForGeneration ? 'refresh' : 'play'"/>{{ generating ? '正在本地合成…' : parsingForGeneration ? '正在解析文本…' : '生成声音' }}</button>
+          <div class="tts-card-heading"><div><span class="tts-overline">RENDER / WAV</span><h2>生成声音</h2></div><span class="tts-live-dot">{{ family === 'EdgeTTS' ? 'ONLINE' : 'LOCAL' }}</span></div>
+          <p>{{ family === 'EdgeTTS' ? '通过 Edge 在线服务合成，可试听并导出 WAV。' : '在本机离线合成语音，可试听并导出 WAV。' }}</p>
+          <button type="button" class="tts-generate" :disabled="!canGenerate" @click="generate"><Icon :name="generating || parsingForGeneration ? 'refresh' : 'play'"/>{{ generating ? (family === 'EdgeTTS' ? '正在在线合成…' : '正在本地合成…') : parsingForGeneration ? '正在解析文本…' : '生成声音' }}</button>
           <p v-if="!generating && !parsingForGeneration && generationBlocker" class="tts-reference-status" aria-live="polite">{{ generationBlocker }}</p>
-          <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段 · {{ synthesisProgress.device === 'cuda' ? 'CUDA' : 'CPU' }}</p>
+          <p v-if="generating && synthesisProgress" class="tts-download-status">已合成 {{ synthesisProgress.current }} / {{ synthesisProgress.total }} 段 · {{ synthesisProgress.device === 'cuda' ? 'CUDA' : synthesisProgress.device === 'cloud' ? '在线' : 'CPU' }}</p>
           <button v-if="generating" type="button" class="tts-action" :disabled="synthesisCancelling" @click="cancelSynthesis">{{ synthesisCancelling ? '正在取消…' : '取消合成' }}</button>
           <div v-if="outputUrl" class="tts-output">
-            <span class="tts-output-meta">{{ outputFamily }} · {{ outputRate.toLocaleString() }} Hz · {{ outputDuration.toFixed(1) }} 秒 · {{ outputName }}</span>
+            <span class="tts-output-meta">{{ familyLabels[outputFamily] }} · {{ outputRate.toLocaleString() }} Hz · {{ outputDuration.toFixed(1) }} 秒 · {{ outputName }}</span>
             <audio ref="outputPlayer" :src="outputUrl" :controls="!generating && !captureActive" preload="metadata" aria-label="试听合成语音" @play="pauseCompetingAudio" />
             <div><button type="button" class="tts-action tts-accent-action" :disabled="generating" @click="downloadOutput"><Icon name="download"/>导出 WAV</button></div>
           </div>
@@ -470,6 +567,10 @@ onBeforeUnmount(() => {
 .tts-page :deep(.tts-card-heading>span:not(.tts-native)){color:var(--text-3);font-size:11px}
 .tts-reference-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .tts-recording-prompt{margin:8px 0 4px;padding:10px 12px;border-left:3px solid var(--accent-bright);background:rgba(25,217,139,.07);color:var(--text);font-size:13px;line-height:1.7}
+.tts-file-input{display:none}
+.tts-reference-field{display:grid;gap:5px;margin-top:8px;color:var(--text-2);font-size:12px}
+.tts-reference-field textarea{width:100%;min-height:66px;padding:8px 9px;border:1px solid var(--line);border-radius:var(--radius-btn);background:rgba(255,255,255,.035);color:var(--text);font:inherit;font-size:12px;line-height:1.6;resize:vertical}
+.tts-reference-field textarea::placeholder{color:var(--text-3)}
 .tts-recording-status{display:grid;grid-template-columns:10px minmax(0,1fr) 88px;align-items:center;gap:10px;margin-top:8px;padding:10px 12px;border:1px solid rgba(248,113,113,.28);border-radius:8px;background:rgba(239,68,68,.1)}
 .tts-recording-dot{width:9px;height:9px;border-radius:50%;background:#f87171;box-shadow:0 0 0 4px rgba(248,113,113,.12);animation:tts-recording-pulse 1.2s ease-in-out infinite}
 .tts-recording-copy{display:flex;min-width:0;flex-direction:column;gap:3px}

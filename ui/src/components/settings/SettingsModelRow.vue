@@ -4,6 +4,8 @@ import { formatBytes } from '@/lib/format';
 withDefaults(defineProps<{
   name: string;
   sizeBytes: number;
+  /** 覆盖体积文案，用于「免下载」这类在线引擎。 */
+  sizeLabel?: string;
   path?: string;
   status?: string;
   loaded?: boolean;
@@ -23,7 +25,7 @@ withDefaults(defineProps<{
       </div>
       <p v-if="path" class="settings-model-path" :title="path">{{ path }}</p>
       <p class="settings-model-meta">
-        {{ formatBytes(sizeBytes) }}<slot name="details" />
+        {{ sizeLabel ?? formatBytes(sizeBytes) }}<slot name="details" />
       </p>
     </div>
     <div class="settings-model-actions">

@@ -46,10 +46,10 @@ pub const DEFAULT_ASR_DOWNLOAD_URL: &str =
 /// CosyVoice3 ONNX 模型默认下载仓库。
 pub const DEFAULT_TTS_DOWNLOAD_URL: &str =
     "https://www.modelscope.cn/models/zhangluoyang/cosyvoice3-onnx/files";
-/// Kokoro / ZipVoice 默认浏览页；仅用于「访问下载源」，不能拼接文件名下载。
+/// ZipVoice 默认浏览页；仅用于「访问下载源」，不能拼接文件名下载。
 pub const DEFAULT_TTS_RELEASE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models";
-/// Kokoro / ZipVoice 默认下载基址；自定义镜像需保持同样的「目录 + 文件名」结构。
+/// ZipVoice 默认下载基址；自定义镜像需保持同样的「目录 + 文件名」结构。
 pub const DEFAULT_TTS_MIRROR_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
 /// CUDA 环境安装默认使用的 PyPI 镜像源（清华）。
@@ -59,12 +59,9 @@ pub const DEFAULT_CUDA_PYTORCH_MIRROR: &str = "https://mirrors.nju.edu.cn/pytorc
 /// CosyVoice3 的稳定模型 id，与运行时 `tts_models::SPECS` 保持一致。
 pub const TTS_COSYVOICE_MODEL_ID: &str = "cosyvoice3-0.5b-2512";
 /// 走 sherpa-onnx release（压缩包 + 平铺镜像）的 TTS 模型 id。
-pub const TTS_SHERPA_MODEL_IDS: [&str; 4] = [
-    "kokoro-int8",
-    "kokoro-fp32",
-    "zipvoice-int8",
-    "zipvoice-fp32",
-];
+pub const TTS_SHERPA_MODEL_IDS: [&str; 2] = ["zipvoice-int8", "zipvoice-fp32"];
+/// 免下载的在线朗读引擎 id：走 Microsoft Edge Read Aloud，不占用模型目录。
+pub const TTS_EDGE_MODEL_ID: &str = "edge-tts";
 
 /// 界面壁纸允许的扩展名（图片优先，MP4 作为动态壁纸）。
 pub const WALLPAPER_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "webp", "mp4"];
@@ -996,11 +993,11 @@ mod tests {
         assert_eq!(invalid.asr_download_url, DEFAULT_ASR_DOWNLOAD_URL);
         let mut sources = BTreeMap::new();
         sources.insert(
-            "kokoro-int8".into(),
+            "zipvoice-int8".into(),
             " https://mirror.example.com/tts/ ".into(),
         );
         sources.insert("../bad".into(), "https://mirror.example.com/x".into());
-        sources.insert("zipvoice-int8".into(), "file:///tmp".into());
+        sources.insert("zipvoice-fp32".into(), "file:///tmp".into());
         sources.insert(
             TTS_COSYVOICE_MODEL_ID.into(),
             "https://www.modelscope.cn/models/owner/repo/files?x=1".into(),
@@ -1014,7 +1011,7 @@ mod tests {
         assert_eq!(
             normalized
                 .tts_download_urls
-                .get("kokoro-int8")
+                .get("zipvoice-int8")
                 .map(String::as_str),
             Some("https://mirror.example.com/tts")
         );

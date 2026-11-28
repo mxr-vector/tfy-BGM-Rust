@@ -70,6 +70,8 @@ export const COMMANDS = {
   parseTtsScript: 'parse_tts_script',
   normalizeTtsReference: 'normalize_tts_reference',
   listTtsBuiltinVoices: 'list_tts_builtin_voices',
+  /** Edge 在线朗读的可用音色（联网获取，失败时后端返回内置清单）。 */
+  listEdgeVoices: 'list_edge_voices',
   loadTtsBuiltinReference: 'load_tts_builtin_reference',
   generateTts: 'generate_tts',
   cancelTtsJob: 'cancel_tts_job',

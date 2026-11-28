@@ -33,6 +33,14 @@ parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "webpki-roots"] }
 # ASR 推理引擎：sherpa-onnx 的 Rust API（构建时自动下载对应平台的预编译库）。
 sherpa-onnx = "2"
+# 在线朗读：Microsoft Edge Read Aloud 的 WebSocket 客户端（无需下载模型）。
+edge-tts-rust = "0.1.7"
+# 解码 edge-tts 返回的 MP3 音频（纯 Rust，不依赖 ffmpeg）。
+symphonia-core = "0.5"
+symphonia-bundle-mp3 = "0.5"
+# reqwest 0.12/0.13 分别启用了 ring 与 aws-lc-rs，rustls 无法自动选择进程级
+# CryptoProvider；WebSocket 建连前必须显式安装，否则会 panic。
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 # 人声分离直接调用 sherpa-onnx 的 C API：Rust 封装尚未暴露 OfflineSourceSeparation。
 sherpa-onnx-sys = "2"
 # 首次使用模型时校验 SHA-256 并解压下载的代码包。
