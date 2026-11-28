@@ -5153,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "tfy-bgm"
-version = "0.9.0-tauri2"
+version = "0.9.1-tauri2"
 dependencies = [
  "anyhow",
  "axum",
