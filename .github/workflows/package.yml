@@ -194,6 +194,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # package-common.ps1 由 powershell.exe 5.1 dot-source；5.1 对无 BOM 的 UTF-8
+      # 脚本按系统 ANSI 解码，一旦写入中文字面量就在解析阶段报一串
+      # "Missing closing '}'"，看不出真实原因。这里用同一解释器提前解析一遍。
+      - name: Check PowerShell scripts parse under 5.1
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem scripts/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error file=scripts/$($file.Name)::PowerShell 5.1 cannot parse this script; keep it ASCII-only (BOM-less UTF-8 is decoded as ANSI)"
+              foreach ($e in $errors) { Write-Host "  L$($e.Extent.StartLineNumber): $($e.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+          Write-Host "PowerShell scripts parse cleanly under 5.1"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

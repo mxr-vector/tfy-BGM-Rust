@@ -9,6 +9,11 @@
 #   tfy-bgm-<version>-linux-<arch>.rpm          arch = x86_64 | aarch64
 #
 # Requires Windows PowerShell 5.1+ (no PS7-only syntax).
+#
+# Keep this file ASCII-only. PowerShell 5.1 decodes a BOM-less script with the
+# system ANSI code page, so any Chinese (or other non-ASCII) literal turns into
+# mojibake and breaks the parser before a single line runs -- which is exactly
+# how the CI build failed once Chinese error messages were added here.
 
 Set-StrictMode -Version Latest
 
@@ -175,9 +180,10 @@ function Format-FileSize {
     return ("{0:N1} MB" -f ($Bytes / 1MB))
 }
 
-# 随包分离模型：UVR 人声 / 伴奏 ONNX 与 Spleeter 归档。
-# 运行时按 `Resource/models` 解析（Windows 上 resource_dir 就是 exe 所在目录），
-# 少任何一个文件，「人声分离」页都会显示「缺少模型文件」，所以绿色版必须显式复制。
+# Bundled separation models: UVR vocals / instrumental ONNX plus the Spleeter
+# archive. The app resolves them through `Resource/models`, which on Windows is
+# always the directory holding the executable, so a portable package must put
+# them next to tfy-bgm.exe or the separation page reports missing model files.
 function Get-BundledSeparationModels {
     return @(
         "UVR-MDX-NET-Inst_HQ_3.onnx",
@@ -186,7 +192,7 @@ function Get-BundledSeparationModels {
     )
 }
 
-# 复制到 <包根>\models\；返回总字节数，便于在日志里核对体积。
+# Copies into <package>\models\ and returns the total byte count for the log.
 function Copy-BundledSeparationModels {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -199,10 +205,10 @@ function Copy-BundledSeparationModels {
     foreach ($name in Get-BundledSeparationModels) {
         $file = Join-Path $source $name
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-            throw "缺少随包分离模型：$file（请先执行 git checkout -- models/）"
+            throw "Missing bundled separation model: $file (run: git checkout -- models/)"
         }
         $size = (Get-Item -LiteralPath $file).Length
-        if ($size -le 0) { throw "随包分离模型是空文件：$file" }
+        if ($size -le 0) { throw "Bundled separation model is empty: $file" }
         Copy-Item -LiteralPath $file -Destination (Join-Path $Destination $name) -Force
         $total += $size
     }
@@ -210,19 +216,20 @@ function Copy-BundledSeparationModels {
     return $total
 }
 
-# 组装完成后逐项校验；任何随包资源缺失都让打包失败，而不是发一个运行期报错的包。
+# Verified after assembly: a missing resource must fail packaging here instead of
+# surfacing as a runtime error on the user's machine.
 function Assert-PortableResources {
     param([Parameter(Mandatory)][string]$Package)
 
     foreach ($relative in @("tfy-bgm.exe", "assets\bg", "voices\prompts.json")) {
         if (-not (Test-Path -LiteralPath (Join-Path $Package $relative))) {
-            throw "绿色版缺少资源：$relative"
+            throw "Portable package is missing a resource: $relative"
         }
     }
     foreach ($name in Get-BundledSeparationModels) {
         $path = Join-Path (Join-Path $Package "models") $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "绿色版缺少分离模型：models\$name"
+            throw "Portable package is missing a separation model: models\$name"
         }
     }
     $models = Join-Path $Package "models"
