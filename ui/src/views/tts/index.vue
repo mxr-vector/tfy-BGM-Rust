@@ -76,7 +76,6 @@ let synthesisJob: TtsJob | null = null;
 let disposed = false;
 const scriptEditor = useTemplateRef('scriptEditor');
 const edgeVoice = ref('');
-const edgeVoiceSearch = ref('');
 const referenceText = ref('');
 const referenceAudio = ref<number[] | null>(null);
 const referenceMode = ref<ReferenceMode>('builtin');
@@ -123,11 +122,6 @@ const edgeVoiceOptions = computed(() => edgeVoices.value.map(voice => ({
   value: voice.name,
   label: edgeVoiceLabel(voice),
 })));
-const visibleEdgeVoices = computed(() => {
-  const keyword = edgeVoiceSearch.value.trim().toLowerCase();
-  return edgeVoiceOptions.value.filter(voice => voice.value === edgeVoice.value
-    || !keyword || voice.label.toLowerCase().includes(keyword));
-});
 const parsingForGeneration = ref(false);
 const generationBlocker = computed(() => {
   if (!isReady.value) return '请先安装并选择本地模型';
@@ -466,10 +460,18 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>
             <template v-if="family === 'EdgeTTS'">
-              <div class="tts-voice-picker">
-                <input v-model="edgeVoiceSearch" class="tts-search" type="search" placeholder="搜索音色或语言" aria-label="搜索在线音色" />
-                <AppSelect :model-value="edgeVoice" :options="visibleEdgeVoices" :disabled="edgeVoicesLoading && !edgeVoices.length" label="选择在线朗读音色" @update:model-value="edgeVoice = $event" />
-              </div>
+              <AppSelect
+                :model-value="edgeVoice"
+                :options="edgeVoiceOptions"
+                :disabled="edgeVoicesLoading && !edgeVoices.length"
+                :placeholder="edgeVoicesLoading && !edgeVoices.length ? '正在获取在线音色…' : '请选择朗读音色'"
+                label="选择在线朗读音色"
+                searchable
+                search-placeholder="搜索音色、语言或性别"
+                :min-menu-width="420"
+                :max-height="320"
+                @update:model-value="edgeVoice = $event"
+              />
             </template>
             <p class="tts-voice-note">{{ family === 'EdgeTTS'
               ? 'Edge 朗读由 Microsoft 在线服务合成，音色覆盖多语言、无需下载模型；合成文本会发送到在线服务。'
@@ -580,7 +582,6 @@ onBeforeUnmount(() => {
 .tts-input-meter{height:7px;overflow:hidden;border-radius:4px;background:rgba(255,255,255,.12)}
 .tts-input-meter span{display:block;width:100%;height:100%;transform:scaleX(0);transform-origin:left center;border-radius:inherit;background:linear-gradient(90deg,#28cf91 0%,#d7d852 75%,#ef6868 100%);transition:transform .08s linear}
 @keyframes tts-recording-pulse{50%{opacity:.45;box-shadow:0 0 0 7px rgba(248,113,113,.04)}}
-.tts-search::placeholder{color:var(--text-3)}
 .tts-reference-status{display:block;margin-top:4px;color:var(--text-3);font-size:11px}
 .tts-native,.tts-live-dot{color:var(--accent-bright);font:10px ui-monospace,Consolas,monospace}
 .tts-download-status{margin-top:10px;color:var(--accent-bright);font-size:11px}
@@ -603,11 +604,8 @@ onBeforeUnmount(() => {
 .tts-generate:disabled{opacity:.4;cursor:not-allowed}
 .tts-output{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:5px 8px;margin-top:6px}
 .tts-output audio{width:100%;height:34px}
-.tts-field,.tts-voice-picker{display:grid;align-items:center;gap:6px;margin-top:6px}
-.tts-field{grid-template-columns:4.5em minmax(0,1fr);color:var(--text-2);font-size:12px}
+.tts-field{display:grid;grid-template-columns:4.5em minmax(0,1fr);align-items:center;gap:6px;margin-top:6px;color:var(--text-2);font-size:12px}
 .tts-device{grid-column:2;justify-self:start}
-.tts-voice-picker{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
-.tts-search{width:100%;min-width:0;min-height:32px;padding:0 9px;border:1px solid var(--line);border-radius:var(--radius-btn);background:rgba(255,255,255,.035);color:var(--text);font-size:12px}
 .tts-page :deep(.app-select-trigger){min-height:32px;font-size:12px}
 .tts-reference-actions .app-select{flex:1 1 116px}
 .tts-reference-status,.tts-output-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
